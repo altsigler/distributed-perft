@@ -31,7 +31,12 @@ DEBUG=-g
 MARCH=
 uname_s := $(shell uname -s)
 ifeq ($(uname_s),Linux)
-MARCH += -march=native
+#MARCH += -march=native
+MARCH += -mbmi
+MARCH += -mbmi2
+MARCH += -mavx
+MARCH += -mavx2
+MARCH += -msse4
 endif
 
 

@@ -77,7 +77,6 @@ static void mcperftPlyInfoPrint(const brdDb_t *const board_db,
 static void mcperftBoardInfoPrint(const brdDb_t *const board_db)
 {
   const chessStat_t *const stats = &board_db->stats;
-  char buf[256];
 
   if (0 == board_db->highest_ply_with_positions)
   {
@@ -104,18 +103,6 @@ static void mcperftBoardInfoPrint(const brdDb_t *const board_db)
                     board_db->highest_ply_with_positions - 1,
                     proc_brds, num_brds, percent_brds);
 
-  }
-  printf ("\n");
-  printf ("Deep Search Run Time:%'llums (%'llusec)\n",
-                        board_db->deep_search_run_time,
-                        board_db->deep_search_run_time / 1000);
-  printf ("Number of positions found during deep search:%s (%'llu)\n",
-                        int128ToStr(board_db->deep_search_positions, buf, sizeof(buf)),
-                        (unsigned long long) board_db->deep_search_positions);
-  if (board_db->deep_search_run_time > 1000)
-  {
-    printf ("Deep Search Positions Per Second:%'llu\n",
-       (unsigned long long) (board_db->deep_search_positions / (board_db->deep_search_run_time / 1000)));
   }
 
   printf ("\n");
@@ -280,9 +267,12 @@ static brdDb_t * brdDbCreate(const unsigned int ply_depth,
   board_db->max_db_entries = max_positions;
   board_db->max_hash_entries = max_positions; // Hash table could be increased to reduce collisions
   board_db->max_move_entries = chess_max_moves;
-  board_db->hash_size_in_bytes = (board_db->max_hash_entries) * sizeof(unsigned long long);
+  board_db->hash_size_in_bytes = (board_db->max_hash_entries) * sizeof(hashEntry_t);
   board_db->db_size_in_bytes = ((size_t) board_db->max_db_entries) * sizeof(brdDbEntry_t);
-  board_db->move_size_in_bytes = ((size_t) board_db->max_move_entries) * sizeof(unsigned long long);
+  board_db->move_size_in_bytes = ((size_t) board_db->max_move_entries) * sizeof(moveEntry_t);
+
+  assert (board_db->max_hash_entries < 0xFF'FFFF'FFFFLLU);
+  assert (board_db->max_move_entries < 0xFF'FFFF'FFFFLLU);
 
   (void) pthread_mutex_init (&board_db->brd_mutex, 0);
 
@@ -291,10 +281,10 @@ static brdDb_t * brdDbCreate(const unsigned int ply_depth,
                   MAP_PRIVATE | MAP_ANONYMOUS,
                   -1,0);
   madvise (hash_addr, board_db->hash_size_in_bytes, MADV_HUGEPAGE);
-  board_db->db_hash = (unsigned long long *) hash_addr;
+  board_db->db_hash = (hashEntry_t *) hash_addr;
 
   board_db->db_entry = (brdDbEntry_t *) (addr + start_of_db_entry);
-  board_db->db_move = (unsigned long long *) (addr + start_of_move_entry);
+  board_db->db_move = (moveEntry_t *) (addr + start_of_move_entry);
 
   mcperftBoardDbInfoPrint(board_db);
 
@@ -411,7 +401,7 @@ static int positionsAdd (brdDb_t *const board_db,
                          const unsigned int ply_number,
                          const unsigned long long *const hash_index_list,
                          chessStat_t *const local_ply_stats,
-                         size_t *const legal_move_index)
+                         moveEntry_t *const legal_move_index)
 {
   /* Out of room in the move database.
   */
@@ -421,12 +411,12 @@ static int positionsAdd (brdDb_t *const board_db,
     return -1;
   }
 
-  *legal_move_index = board_db->next_free_move_index;
+  *legal_move_index = moveIndexToEntry(board_db->next_free_move_index);
 
   for (unsigned int i = 0; i < num_moves; i++)
   {
     const unsigned long long hash_index = hash_index_list[i];
-    unsigned long long ex_entry_index = board_db->db_hash[hash_index];
+    unsigned long long ex_entry_index = hashEntryToIndex(board_db->db_hash[hash_index]);
     unsigned int dup_detected = (ex_entry_index)?1:0;
 
     while (ex_entry_index &&
@@ -437,7 +427,7 @@ static int positionsAdd (brdDb_t *const board_db,
          (next_db_entry[i].ply_number != board_db->db_entry[ex_entry_index].ply_number)))
     {
         local_ply_stats->num_hash_collisions++;
-        ex_entry_index = board_db->db_entry[ex_entry_index].next_brd_in_cache;
+        ex_entry_index = hashEntryToIndex(board_db->db_entry[ex_entry_index].next_brd_in_cache);
     }
     if (0 == ex_entry_index)
     {
@@ -446,7 +436,7 @@ static int positionsAdd (brdDb_t *const board_db,
 
     if (dup_detected)
     {
-      board_db->db_move[board_db->next_free_move_index++] = ex_entry_index;
+      board_db->db_move[board_db->next_free_move_index++] = moveIndexToEntry(ex_entry_index);
       local_ply_stats->duplicate_positions_detected++;
       local_ply_stats->total_moves_added++;
     } else
@@ -461,19 +451,19 @@ static int positionsAdd (brdDb_t *const board_db,
 
       /* Add the new entry to the hash.
       */
-      unsigned long long next_brd_in_cache = board_db->db_hash[hash_index];
-      board_db->db_hash[hash_index] = board_db->next_free_index;
+      unsigned long long next_brd_in_cache = hashEntryToIndex(board_db->db_hash[hash_index]);
+      board_db->db_hash[hash_index] = hashIndexToEntry(board_db->next_free_index);
 
       /* Point the move database to the new board entry.
       */
-      board_db->db_move[board_db->next_free_move_index++] = board_db->next_free_index;
+      board_db->db_move[board_db->next_free_move_index++] = moveIndexToEntry(board_db->next_free_index);
 
       /* Store the position in the database.
       */
       memcpy (&board_db->db_entry[board_db->next_free_index],
                 &next_db_entry[i], sizeof(brdDbEntry_t));
 
-      board_db->db_entry[board_db->next_free_index].next_brd_in_cache = next_brd_in_cache;
+      board_db->db_entry[board_db->next_free_index].next_brd_in_cache = hashIndexToEntry(next_brd_in_cache);
 
       board_db->next_free_index++,
       board_db->ply_table[ply_number+1].num_boards_in_ply++;
@@ -511,8 +501,8 @@ static void nextPositionsCreate (const brdDb_t *const board_db,
 
     ndb_entry->brd_info.brd_info = db_entry->brd_info.brd_info;
 
-    ndb_entry->next_brd_in_cache = 0;
-    ndb_entry->legal_move_index = 0;
+    memset (&ndb_entry->next_brd_in_cache, 0, sizeof (hashEntry_t));
+    memset (&ndb_entry->legal_move_entry, 0, sizeof(moveEntry_t));
     memset (&ndb_entry->status, 0, sizeof(brdStatusInfo_t));
     ndb_entry->ply_number = (unsigned short) ply_number;
 
@@ -588,7 +578,7 @@ static void * brd_db_generate (void *arg)
                             next_db_entry, hash_index_list, ply_number);
 
     if (0 !=  positionsAdd (board_db, num_moves, next_db_entry, ply_number,
-                           hash_index_list, &local_ply_stats, &db_entry->legal_move_index))
+                           hash_index_list, &local_ply_stats, &db_entry->legal_move_entry))
     {
       /* We ran out of memory in the board database, so exit the 
       ** position insertion thread.
@@ -675,7 +665,7 @@ void brdDbGenerate(
   entry_index = board_db->next_free_index++;
   memcpy (&board_db->db_entry[entry_index], 
           &db_entry, sizeof(brdDbEntry_t));
-  board_db->db_hash[hash_index] = entry_index;
+  board_db->db_hash[hash_index] = hashIndexToEntry(entry_index);
 
   memset (&board_db->ply_table[0], 0, sizeof (plyInfo_t));
   board_db->ply_table[0].first_board_in_ply_index = entry_index;
@@ -1706,7 +1696,8 @@ static void brdDbDeepSearchAggregate (
     brdDbEntry_t *position = &board_db->db_entry[ply->first_board_in_ply_index + i];
     for (unsigned int j = 0; j < position->status.num_legal_moves; j++)
     {
-      const unsigned long long next_node_index = board_db->db_move[position->legal_move_index + j];
+      const unsigned long long next_node_index = 
+                        moveEntryToIndex(board_db->db_move[moveEntryToIndex(position->legal_move_entry) + j]);
       position_count_space[i] += deep_search_result[next_node_index - index_offset];
     }
   }
@@ -1750,7 +1741,8 @@ static void brdDbPositionTreeAggregate (const unsigned int search_depth,
 
       for (unsigned int j = 0; j < num_legal_moves; j++)
       {
-        const unsigned long long next_node_index = board_db->db_move[position->legal_move_index + j];
+        const unsigned long long next_node_index = 
+                moveEntryToIndex(board_db->db_move[moveEntryToIndex(position->legal_move_entry) + j]);
         const unsigned long long index_offset_2 = board_db->ply_table[ply_number + 1].first_board_in_ply_index;
 
         position_count_space[ply_number][i] += 
@@ -1818,7 +1810,7 @@ void brdDbAggregate (unsigned int *depth,
   madvise (addr, board_db.position_database_size, MADV_HUGEPAGE);
 
   board_db.db_entry = (brdDbEntry_t *) (addr + board_db.start_of_db_entry);
-  board_db.db_move = (unsigned long long *) (addr + board_db.start_of_move_entry);
+  board_db.db_move = (moveEntry_t *) (addr + board_db.start_of_move_entry);
 
   unsigned _BitInt(128) *position_count_space[board_db.max_db_plies - 1];
   unsigned long long position_count_size[board_db.max_db_plies];

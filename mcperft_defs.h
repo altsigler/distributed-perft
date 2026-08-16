@@ -187,6 +187,39 @@ typedef struct
 } plyInfo_t;
 
 
+typedef struct __attribute__((packed))
+{
+  unsigned char high;
+  unsigned int low;
+} hashEntry_t;
+inline hashEntry_t hashIndexToEntry (const unsigned long long index)
+{
+  const hashEntry_t hash_entry = {(unsigned char) (index >> 32), (unsigned int) index};
+  return hash_entry;
+} 
+
+inline unsigned long long hashEntryToIndex (const hashEntry_t hash_entry)
+{
+  return ((unsigned long long) hash_entry.high << 32) | (unsigned long long) hash_entry.low;
+}
+
+typedef struct __attribute__((packed))
+{ 
+  unsigned char high;
+  unsigned int low;
+} moveEntry_t;
+inline moveEntry_t moveIndexToEntry (const unsigned long long index)
+{ 
+  const moveEntry_t move_entry = {(unsigned char) (index >> 32), (unsigned int) index};
+  return move_entry; 
+}
+  
+inline unsigned long long moveEntryToIndex (const moveEntry_t move_entry)
+{ 
+  return ((unsigned long long) move_entry.high << 32) | (unsigned long long) move_entry.low;
+} 
+  
+
 typedef struct
 {
   /* This flag indicates that the position_at_depth counter has been 
@@ -207,6 +240,7 @@ typedef struct
   unsigned short place_holder:6;
 } brdStatusInfo_t;
 
+//typedef struct __attribute__((packed))
 typedef struct
 {
   /* Start of hash key.
@@ -217,12 +251,6 @@ typedef struct
   /* End of hash key.
   */
 
-  /* Reserved for future use.
-  ** These two bytes have no effect on the structure size, so its OK
-  ** to use them in the future.
-  */
-  unsigned short place_holder;
-
   /* The status of this entry.
   */
   brdStatusInfo_t status; /* 2-byte structure */
@@ -232,14 +260,14 @@ typedef struct
   ** If this value is set to 0 then there is no next board with the 
   ** same hash index.
   */
-  unsigned long long next_brd_in_cache;
+  hashEntry_t next_brd_in_cache;
 
 
   /* The location in the global move table where moves
   ** for this position are recorded. 
   ** Note that 0 is a valid move location.
   */
-  size_t legal_move_index;
+  moveEntry_t legal_move_entry;
 
 } brdDbEntry_t __attribute__ ((aligned (8)));
 
@@ -286,11 +314,11 @@ typedef struct
 
   size_t       max_hash_entries;
   size_t       hash_size_in_bytes;
-  unsigned long long *db_hash;
+  hashEntry_t *db_hash;
 
   size_t max_move_entries;
   size_t move_size_in_bytes;
-  unsigned long long *db_move;
+  moveEntry_t *db_move;
 
   /* Maximum number of plies in the board database.
   */
@@ -318,14 +346,6 @@ typedef struct
   /* Total run time for the most recent board creation in milliseconds.
   */
   unsigned long long position_db_run_time;
-
-  /* Total run time for the deep search for all positions.
-  */
-  unsigned long long deep_search_run_time;
-
-  /* Total number of positions found during deep search.
-  */
-  unsigned _BitInt(128) deep_search_positions;
 
   /* Place holder in case we want to add additional board information witout
   ** changing the datbase format.
