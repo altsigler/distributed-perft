@@ -53,7 +53,7 @@ void perftInit (void)
 
 int main (int argc, char *argv[])
 {
-  unsigned int depth;
+  unsigned int depth = 7;
   char position[256] = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
   if (argc > 1)
