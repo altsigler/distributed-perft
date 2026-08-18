@@ -1045,7 +1045,6 @@ static unsigned long long allBRQNPSquaresLastPlyFindNoTest (
   }
 
   if (whose_move == MOVE_WHITE)
-  if (piece_mask)
   {
     constexpr unsigned long long row1_mask = 0x000000000000ff00;
     constexpr unsigned long long row6_mask = 0x00ff000000000000;
@@ -1122,7 +1121,6 @@ static unsigned long long allBRQNPSquaresLastPlyFindNoTest (
   } 
 
   if (whose_move == MOVE_BLACK)
-  if (piece_mask)
   {
     constexpr unsigned long long row6_mask = 0x00ff000000000000;
     constexpr unsigned long long row1_mask = 0x000000000000ff00;

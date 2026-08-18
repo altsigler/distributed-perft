@@ -303,6 +303,25 @@ void test_m_3(void)
 
 }
 
+void test_m_4(void)
+{ 
+  brd_t brd;
+  brdCtrlInfo_t info;
+  
+  printf ("%s - %d - Starting...\n",
+                 __FUNCTION__, __LINE__);
+  
+  brdutilFenToBrdConvert ("r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10",
+                        &brd, &info);
+  brdutilFenPrint (&brd, &info);
+  brdutilBoardInfoPrint (&info);
+  brdutilBoardPrint (&brd);
+  
+  assert (6'923'051'137 == bytebrdPerft (6, &brd, &info, 0));
+  
+} 
+
+
 /**************************
 ** Starting Position Tests.
 **************************/
@@ -740,6 +759,7 @@ void run_tests(void)
 //  test_m_1(); /* Developed Middle Game */
 //  test_m_2(); /* Early Middle Game */
   test_m_3(); /* Kiwi */
+  test_m_4(); /* Leaderboard Test */
   test_e_1(); /* End Game with King/Rook/Bishop vs King/Queen */
 //  test_e_2(); /* End Game with King vs King/Bishop/Knight */
   test_e_3(); /* End Game with King/Pawns vs King/Pawns */
