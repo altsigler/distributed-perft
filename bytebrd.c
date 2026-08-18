@@ -122,11 +122,13 @@ static unsigned long long movesRapidFind(
                                             one_move[i].en_passant_eligible_pawn, 
                                             one_move[i].castle_eligibility):
                                         allMovePerft (whose_move ^ 1, 
-                                                               bit_brd, 
+                                                               bit_brd->piece, 
                                                                one_move[i].en_passant_eligible_pawn, 
                                                                one_move[i].castle_eligibility,
                                                                depth - 2,
-                                                               0); 
+                                                               0,
+                                                               bit_brd->color[whose_move],
+                                                               bit_brd->color[whose_move ^ 1]);
     moveResultsShow (&one_move[i], bit_brd, total_moves_per_move);
     total_moves_at_depth += total_moves_per_move;
 
@@ -212,8 +214,11 @@ static unsigned long long positionSearch(const unsigned int depth,
   {
     return (depth == 1)?allMoveCandidatesLastPlyFindApi (whose_move, &input_bit_brd, 
                                             en_passant_eligible_pawn, castle_eligibility):
-            allMovePerft (whose_move, &input_bit_brd, 
-                        en_passant_eligible_pawn, castle_eligibility, depth - 1, 0);
+            allMovePerft (whose_move, input_bit_brd.piece, 
+                        en_passant_eligible_pawn, castle_eligibility, depth - 1, 0,
+                        input_bit_brd.color[whose_move ^ 1],   
+                        input_bit_brd.color[whose_move]);      
+
   }
 
   total_moves_at_depth = movesRapidFind (depth, 
@@ -288,11 +293,16 @@ unsigned int bytebrdUtilOpponentInCheck (
   if (whose_move == MOVE_WHITE)
   {
     king_index = bitbrdLowestIndexFromMaskGet(input_bit_brd.piece[S_KING | S_BLACK]);
-    return (kingInCheckApi(MOVE_BLACK, &input_bit_brd, king_index))?1:0; 
+    return (kingInCheckApi(MOVE_BLACK, &input_bit_brd, king_index,
+                            input_bit_brd.color[MOVE_BLACK],
+                            input_bit_brd.color[MOVE_WHITE]))?1:0;
   } 
 
   king_index = bitbrdLowestIndexFromMaskGet(input_bit_brd.piece[S_KING | S_WHITE]);
-  return (kingInCheckApi(MOVE_WHITE, &input_bit_brd, king_index))?1:0; 
+  return (kingInCheckApi(MOVE_WHITE, &input_bit_brd, king_index,
+                        input_bit_brd.color[MOVE_WHITE],
+                        input_bit_brd.color[MOVE_BLACK]))?1:0;
+
 }
 
 /********************************************************************
@@ -540,12 +550,14 @@ unsigned int bytebrdNextMoveGet (
     {
       const unsigned int king_position = bitbrdLowestIndexFromMaskGet(input_bit_brd.piece[S_KING | S_WHITE]);
       *mover_lost = (unsigned int) kingInCheckApi(MOVE_WHITE, 
-                       &input_bit_brd, king_position);
+                       &input_bit_brd, king_position,
+                       input_bit_brd.color[MOVE_WHITE], input_bit_brd.color[MOVE_BLACK]);
     } else
     {
       const unsigned int king_position = bitbrdLowestIndexFromMaskGet(input_bit_brd.piece[S_KING | S_BLACK]);
       *mover_lost = (unsigned int) kingInCheckApi(MOVE_BLACK,
-                       &input_bit_brd, king_position);
+                       &input_bit_brd, king_position,
+                       input_bit_brd.color[MOVE_BLACK], input_bit_brd.color[MOVE_WHITE]);
     }
     return 0;
   }

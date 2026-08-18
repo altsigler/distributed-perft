@@ -121,15 +121,18 @@ static void cleanup(void)
 __attribute__((always_inline)) inline
 static unsigned long long allMoveCandidatesLastPlyFind (
                            const color_e whose_move,
-                           bitBrd_t *restrict bit_brd,
+                           unsigned long long *restrict piece,
                            const unsigned int en_passant_eligible_pawn,
-                           const castleEligibility_t castle_eligibility);
+                           const castleEligibility_t castle_eligibility,
+                           const unsigned long long opponent_pieces_mask,
+                           const unsigned long long mover_pieces_mask);
+
       
 /* Function for making the move. The same function reverses the move.
 */  
 inline static void __attribute__((always_inline))
-MOVE_APPLY (bitBrd_t *restrict bit_brd, 
-                        const color_e whose_move,
+MOVE_APPLY (
+                        unsigned long long *restrict piece, 
                         const unsigned int num_masks,
                         const unsigned char p1,
                         const unsigned char p2,
@@ -138,16 +141,13 @@ MOVE_APPLY (bitBrd_t *restrict bit_brd,
                         const unsigned long long mask2,
                         const unsigned long long mask3)
 {       
-  bit_brd->piece[p1] ^= mask1;
-  bit_brd->color[whose_move] ^= mask1;
+  piece[p1] ^= mask1;
   if (num_masks > 1)
   {
-    bit_brd->piece[p2] ^= mask2;
-    bit_brd->color[bitbrdColorIndexFromColorMaskGet(p2)] ^= mask2;
+    piece[p2] ^= mask2;
     if (unlikely(num_masks > 2))
     {
-      bit_brd->piece[p3] ^= mask3;
-      bit_brd->color[bitbrdColorIndexFromColorMaskGet(p3)] ^= mask3;
+      piece[p3] ^= mask3;
     }
   }
 }
@@ -193,33 +193,30 @@ lookupKeyCompute (const unsigned long long val, const unsigned long long mask)
 ******************************************************************************/
 inline static int __attribute__((always_inline))
 kingInCheck(const color_e whose_move,
-                             const bitBrd_t *restrict bit_brd,
-                             const unsigned int index)
+                             const unsigned long long *restrict piece,
+                             const unsigned int index,
+                             const unsigned long long any_color_pieces_mask)
 {
   unsigned long long attack_bishop_or_queen;
   unsigned long long attack_rook_or_queen;
 
   if (whose_move == MOVE_WHITE)
   {
-    if (unlikely((bit_brd->piece[S_BLACK | S_KNIGHT] & knightAttack[index]) ||
-        (bit_brd->piece[S_BLACK | S_PAWN] & blackPawnAttack[index])))
+    if (unlikely((piece[S_BLACK | S_KNIGHT] & knightAttack[index]) ||
+        (piece[S_BLACK | S_PAWN] & blackPawnAttack[index])))
                 return -1;
 
-    attack_bishop_or_queen = bit_brd->piece[S_BLACK | S_BISHOP] | bit_brd->piece[S_BLACK | S_QUEEN];
-    attack_rook_or_queen = bit_brd->piece[S_BLACK | S_ROOK] | bit_brd->piece[S_BLACK | S_QUEEN];
+    attack_bishop_or_queen = piece[S_BLACK | S_BISHOP] | piece[S_BLACK | S_QUEEN];
+    attack_rook_or_queen = piece[S_BLACK | S_ROOK] | piece[S_BLACK | S_QUEEN];
   } else 
   {
-    if (unlikely((bit_brd->piece[S_WHITE | S_KNIGHT] & knightAttack[index]) ||
-       (bit_brd->piece[S_WHITE | S_PAWN] & whitePawnAttack[index])))
+    if (unlikely((piece[S_WHITE | S_KNIGHT] & knightAttack[index]) ||
+       (piece[S_WHITE | S_PAWN] & whitePawnAttack[index])))
                 return -1;
 
-    attack_bishop_or_queen = bit_brd->piece[S_WHITE | S_BISHOP] | bit_brd->piece[S_WHITE | S_QUEEN];
-    attack_rook_or_queen = bit_brd->piece[S_WHITE | S_ROOK] | bit_brd->piece[S_WHITE | S_QUEEN];
+    attack_bishop_or_queen = piece[S_WHITE | S_BISHOP] | piece[S_WHITE | S_QUEEN];
+    attack_rook_or_queen = piece[S_WHITE | S_ROOK] | piece[S_WHITE | S_QUEEN];
   } 
-
-  const unsigned long long any_color_pieces_mask = bit_brd->color[MOVE_BLACK] |
-                                                        bit_brd->color[MOVE_WHITE];
-
 
   const unsigned long long udlr_attack = udlrAttack[index];
   if (attack_rook_or_queen & udlr_attack)
@@ -245,9 +242,12 @@ kingInCheck(const color_e whose_move,
 }
 int kingInCheckApi(const color_e whose_move,
                              const bitBrd_t *restrict bit_brd,
-                             const unsigned int index)
+                             const unsigned int index,
+                             const unsigned long long mover_pieces_mask,
+                             const unsigned long long opponent_pieces_mask)
+
 {
-  return kingInCheck(whose_move, bit_brd, index);
+  return kingInCheck(whose_move, bit_brd->piece, index, mover_pieces_mask | opponent_pieces_mask);
 }
 
 /******************************************************************************
@@ -261,30 +261,30 @@ int kingInCheckApi(const color_e whose_move,
 __attribute__((always_inline)) inline
 static unsigned char pieceTypeGet (const color_e whose_move,
                                     const unsigned long long mask2,
-                                    const bitBrd_t *restrict bit_brd)
+                                    const unsigned long long *restrict piece)
 {
   unsigned char p2;
 
   if (whose_move == MOVE_WHITE)
   {
-    if (mask2 & bit_brd->piece[S_PAWN | S_BLACK])
+    if (mask2 & piece[S_PAWN | S_BLACK])
     {
       return S_PAWN | S_BLACK;
     }
     for (p2 = S_KNIGHT | S_BLACK; p2 < (S_KING | S_BLACK); p2++)
     {
-      if (mask2 & bit_brd->piece[p2])
+      if (mask2 & piece[p2])
                               break;
     }
   } else 
   {
-    if (mask2 & bit_brd->piece[S_PAWN | S_WHITE])
+    if (mask2 & piece[S_PAWN | S_WHITE])
     {
       return S_PAWN | S_WHITE;
     }
     for (p2 = S_KNIGHT | S_WHITE; p2 < (S_KING | S_WHITE); p2++)
     {
-      if (mask2 & bit_brd->piece[p2])
+      if (mask2 & piece[p2])
                               break;
     }
   } 
@@ -1210,8 +1210,9 @@ static unsigned long long lastPlyMovesValidate (
                                     unsigned long long from_mask,
                                     unsigned long long move_candidate_mask,
                                     const color_e whose_move,
-                                    bitBrd_t *restrict bit_brd,
+                                    unsigned long long *restrict piece,
                                     const unsigned int king_position,
+                                    const unsigned long long mover_pieces_mask,
                                     const unsigned long long opponent_pieces_mask,
                                     const unsigned long long any_color_pieces_mask)
 {
@@ -1237,14 +1238,15 @@ static unsigned long long lastPlyMovesValidate (
       open_squares_mask ^= to_mask;
 #endif
 
-      MOVE_APPLY (bit_brd, whose_move, 1,
+      MOVE_APPLY (piece, 1,
                         p1,0,0,
                         mask1,0,0);
-      if (0 == kingInCheck(whose_move, bit_brd, king_position))
+      if (0 == kingInCheck(whose_move, piece, king_position, 
+                                    (mover_pieces_mask ^ mask1) | opponent_pieces_mask))
       {
         mn++;
       }
-      MOVE_APPLY (bit_brd, whose_move, 1,
+      MOVE_APPLY (piece, 1,
                         p1,0,0,
                         mask1,0,0);
     }
@@ -1258,7 +1260,7 @@ static unsigned long long lastPlyMovesValidate (
       const unsigned long long to_mask = 1LLU << to_index;
 #endif
       const unsigned long long mask1 = to_mask | from_mask;
-      const unsigned char p2 = pieceTypeGet (whose_move, to_mask, bit_brd);
+      const unsigned char p2 = pieceTypeGet (whose_move, to_mask, piece);
 
 #if defined(USE_BMI)
       visible_pieces_mask = _blsr_u64(visible_pieces_mask);
@@ -1266,15 +1268,16 @@ static unsigned long long lastPlyMovesValidate (
       visible_pieces_mask ^= to_mask;
 #endif
 
-      MOVE_APPLY (bit_brd, whose_move, 2,
+      MOVE_APPLY (piece, 2,
                         p1,p2,0,
                         mask1,to_mask,0);
-      if (0 == kingInCheck(whose_move, bit_brd, king_position))
+      if (0 == kingInCheck(whose_move, piece, king_position, 
+              (mover_pieces_mask ^ mask1) | (opponent_pieces_mask ^ to_mask)))
       {
         mn++;
       }
 
-      MOVE_APPLY (bit_brd, whose_move, 2,
+      MOVE_APPLY (piece, 2,
                         p1,p2,0,
                         mask1,to_mask,0);
     }
@@ -1298,12 +1301,13 @@ __attribute__((always_inline)) inline
 static unsigned long long whiteKingSquaresFind (
                             const unsigned int piece_index, 
                             unsigned long long move_candidate_mask,
-                            bitBrd_t *restrict bit_brd,
+                            unsigned long long *restrict piece,
                             oneMove_t *const next_mv,
                             const castleEligibility_t castle_eligibility,
                             const unsigned int record_undo_info,
                             const unsigned int depth,
                             const unsigned int ply,
+                            const unsigned long long mover_pieces_mask,
                             const unsigned long long opponent_pieces_mask,
                             const unsigned int last_ply,
                             const unsigned long long king_attack_mask)
@@ -1341,7 +1345,7 @@ static unsigned long long whiteKingSquaresFind (
     */
     if (0 == (mask2 & opponent_pieces_mask))
     {
-      MOVE_APPLY (bit_brd, MOVE_WHITE, 1,
+      MOVE_APPLY (piece, 1,
                           S_KING | S_WHITE,0,0,
                           mask1,0,0);
 
@@ -1350,10 +1354,12 @@ static unsigned long long whiteKingSquaresFind (
       if (!record_undo_info)
       {
         mn += (last_ply)?
-          allMoveCandidatesLastPlyFind(MOVE_BLACK,bit_brd,0,next_castle_eligibility):
-          allMovePerft(MOVE_BLACK,bit_brd,0,next_castle_eligibility,depth,ply);
+          allMoveCandidatesLastPlyFind(MOVE_BLACK,piece,0,next_castle_eligibility,
+                                        mover_pieces_mask ^ mask1, opponent_pieces_mask):
+          allMovePerft(MOVE_BLACK,piece,0,next_castle_eligibility,depth,ply,
+                                        mover_pieces_mask ^ mask1, opponent_pieces_mask);
       }
-      MOVE_APPLY (bit_brd, MOVE_WHITE, 1,
+      MOVE_APPLY (piece, 1,
                           S_KING | S_WHITE,0,0,
                           mask1,0,0);
 
@@ -1364,9 +1370,9 @@ static unsigned long long whiteKingSquaresFind (
       }
     } else
     {
-      p2 = pieceTypeGet (MOVE_WHITE, mask2, bit_brd); 
+      p2 = pieceTypeGet (MOVE_WHITE, mask2, piece); 
       num_masks = 2;
-      MOVE_APPLY (bit_brd, MOVE_WHITE, 2,
+      MOVE_APPLY (piece, 2,
                         S_KING | S_WHITE,p2,0,
                         mask1,mask2,0);
 
@@ -1391,11 +1397,13 @@ static unsigned long long whiteKingSquaresFind (
         if (!record_undo_info)
         {
           mn += (last_ply)?
-            allMoveCandidatesLastPlyFind(MOVE_BLACK,bit_brd,0,next_castle_eligibility):
-            allMovePerft(MOVE_BLACK,bit_brd,0,next_castle_eligibility,depth,ply);
+            allMoveCandidatesLastPlyFind(MOVE_BLACK,piece,0,next_castle_eligibility,
+                                        mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2):
+            allMovePerft(MOVE_BLACK,piece,0,next_castle_eligibility,depth,ply,
+                                        mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2);
         }
       }
-      MOVE_APPLY (bit_brd, MOVE_WHITE, 2,
+      MOVE_APPLY (piece, 2,
                         S_KING | S_WHITE,p2,0,
                         mask1,mask2,0);
     }
@@ -1452,23 +1460,27 @@ static unsigned long long whiteKingSquaresFind (
       const unsigned long long mask2 = bitbrdMaskFromPositionGet(0, 7) |
                                        bitbrdMaskFromPositionGet(0, 5); // Rook Mask
 
-      MOVE_APPLY (bit_brd, MOVE_WHITE, 2,
+      MOVE_APPLY (piece, 2,
                   S_KING | S_WHITE,p2,0,
                   mask1,mask2,0);
       mn += (last_ply)?
              allMoveCandidatesLastPlyFind(
                           MOVE_BLACK,
-                          bit_brd,
+                          piece,
                           0,
-                          next_castle_eligibility):
+                          next_castle_eligibility,
+                          mover_pieces_mask ^ (mask1 | mask2),
+                          opponent_pieces_mask):
              allMovePerft(
                           MOVE_BLACK,
-                          bit_brd,
+                          piece,
                           0,
                           next_castle_eligibility,
                           depth,
-                          ply);
-      MOVE_APPLY (bit_brd, MOVE_WHITE, 2,
+                          ply,
+                          mover_pieces_mask ^ (mask1 | mask2),
+                          opponent_pieces_mask);
+      MOVE_APPLY (piece, 2,
                   S_KING | S_WHITE,p2,0,
                   mask1,mask2,0);
     } 
@@ -1501,23 +1513,27 @@ static unsigned long long whiteKingSquaresFind (
       const unsigned long long mask2 = bitbrdMaskFromPositionGet(0, 0) |
                                        bitbrdMaskFromPositionGet(0, 3); // Rook Mask
 
-      MOVE_APPLY (bit_brd, MOVE_WHITE, 2,
+      MOVE_APPLY (piece, 2,
                   S_KING | S_WHITE,p2,0,
                   mask1,mask2,0);
       mn += (last_ply)?
              allMoveCandidatesLastPlyFind(
                           MOVE_BLACK,
-                          bit_brd,
+                          piece,
                           0,
-                          next_castle_eligibility):
+                          next_castle_eligibility,
+                          mover_pieces_mask ^ (mask1 | mask2),
+                          opponent_pieces_mask):
              allMovePerft(
                           MOVE_BLACK,
-                          bit_brd,
+                          piece,
                           0,
                           next_castle_eligibility,
                           depth,
-                          ply);
-      MOVE_APPLY (bit_brd, MOVE_WHITE, 2,
+                          ply,
+                          mover_pieces_mask ^ (mask1 | mask2),
+                          opponent_pieces_mask);
+      MOVE_APPLY (piece, 2,
                   S_KING | S_WHITE,p2,0,
                   mask1,mask2,0);
     } 
@@ -1539,12 +1555,13 @@ __attribute__((always_inline)) inline
 static unsigned long long blackKingSquaresFind (
                             const unsigned int piece_index, 
                             unsigned long long move_candidate_mask,
-                            bitBrd_t *restrict bit_brd,
+                            unsigned long long *restrict piece,
                             oneMove_t *const next_mv,
                             const castleEligibility_t castle_eligibility,
                             const unsigned int record_undo_info,
                             const unsigned int depth,
                             const unsigned int ply,
+                            const unsigned long long mover_pieces_mask,
                             const unsigned long long opponent_pieces_mask,
                             const unsigned int last_ply,
                             const unsigned long long king_attack_mask)
@@ -1582,7 +1599,7 @@ static unsigned long long blackKingSquaresFind (
     */
     if (0 == (mask2 & opponent_pieces_mask))
     {
-      MOVE_APPLY (bit_brd, MOVE_BLACK, 1,
+      MOVE_APPLY (piece, 1,
                           S_KING | S_BLACK,0,0,
                           mask1,0,0);
       /* Make the move.
@@ -1590,10 +1607,12 @@ static unsigned long long blackKingSquaresFind (
       if (!record_undo_info)
       {
         mn += (last_ply)?
-          allMoveCandidatesLastPlyFind(MOVE_WHITE,bit_brd,0,next_castle_eligibility):
-          allMovePerft(MOVE_WHITE,bit_brd,0,next_castle_eligibility,depth,ply);
+          allMoveCandidatesLastPlyFind(MOVE_WHITE,piece,0,next_castle_eligibility,
+                            mover_pieces_mask ^ mask1, opponent_pieces_mask):
+          allMovePerft(MOVE_WHITE,piece,0,next_castle_eligibility,depth,ply,
+                            mover_pieces_mask ^ mask1, opponent_pieces_mask);
       }
-      MOVE_APPLY (bit_brd, MOVE_BLACK, 1,
+      MOVE_APPLY (piece, 1,
                           S_KING | S_BLACK,0,0,
                           mask1,0,0);
 
@@ -1605,8 +1624,8 @@ static unsigned long long blackKingSquaresFind (
     } else
     {
       num_masks = 2;
-      p2 = pieceTypeGet (MOVE_BLACK, mask2, bit_brd); 
-      MOVE_APPLY (bit_brd, MOVE_BLACK, 2,
+      p2 = pieceTypeGet (MOVE_BLACK, mask2, piece); 
+      MOVE_APPLY (piece, 2,
                         S_KING | S_BLACK,p2,0,
                         mask1,mask2,0);
 
@@ -1631,11 +1650,13 @@ static unsigned long long blackKingSquaresFind (
         if (!record_undo_info)
         {
           mn += (last_ply)?
-            allMoveCandidatesLastPlyFind(MOVE_WHITE,bit_brd,0,next_castle_eligibility):
-            allMovePerft(MOVE_WHITE,bit_brd,0,next_castle_eligibility,depth,ply);
+            allMoveCandidatesLastPlyFind(MOVE_WHITE,piece,0,next_castle_eligibility,
+                            mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2):
+            allMovePerft(MOVE_WHITE,piece,0,next_castle_eligibility,depth,ply,
+                            mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2);
         }
       }
-      MOVE_APPLY (bit_brd, MOVE_BLACK, 2,
+      MOVE_APPLY (piece, 2,
                         S_KING | S_BLACK,p2,0,
                         mask1,mask2,0);
     }
@@ -1692,23 +1713,27 @@ static unsigned long long blackKingSquaresFind (
       const unsigned long long mask2 = bitbrdMaskFromPositionGet(7, 7) |
                                        bitbrdMaskFromPositionGet(7, 5); // Rook Mask
 
-      MOVE_APPLY (bit_brd, MOVE_BLACK, 2,
+      MOVE_APPLY (piece, 2,
                   S_KING | S_BLACK,p2,0,
                   mask1,mask2,0);
       mn += (last_ply)?
              allMoveCandidatesLastPlyFind(
                           MOVE_WHITE,
-                          bit_brd,
+                          piece,
                           0,
-                          next_castle_eligibility):
+                          next_castle_eligibility,
+                          mover_pieces_mask ^ (mask1 | mask2),
+                          opponent_pieces_mask):
              allMovePerft(
                           MOVE_WHITE,
-                          bit_brd,
+                          piece,
                           0,
                           next_castle_eligibility,
                           depth,
-                          ply);
-      MOVE_APPLY (bit_brd, MOVE_BLACK, 2,
+                          ply,
+                          mover_pieces_mask ^ (mask1 | mask2),
+                          opponent_pieces_mask);
+      MOVE_APPLY (piece, 2,
                   S_KING | S_BLACK,p2,0,
                   mask1,mask2,0);
     } 
@@ -1742,23 +1767,27 @@ static unsigned long long blackKingSquaresFind (
       const unsigned long long mask2 = bitbrdMaskFromPositionGet(7, 0) |
                                        bitbrdMaskFromPositionGet(7, 3); // Rook Mask
 
-      MOVE_APPLY (bit_brd, MOVE_BLACK, 2,
+      MOVE_APPLY (piece, 2,
                   S_KING | S_BLACK,p2,0,
                   mask1,mask2,0);
       mn += (last_ply)?
              allMoveCandidatesLastPlyFind(
                           MOVE_WHITE,
-                          bit_brd,
+                          piece,
                           0,
-                          next_castle_eligibility):
+                          next_castle_eligibility,
+                          mover_pieces_mask ^ (mask1 | mask2),
+                          opponent_pieces_mask):
              allMovePerft(
                           MOVE_WHITE,
-                          bit_brd,
+                          piece,
                           0,
                           next_castle_eligibility,
                           depth,
-                          ply);
-      MOVE_APPLY (bit_brd, MOVE_BLACK, 2,
+                          ply,
+                          mover_pieces_mask ^ (mask1 | mask2),
+                          opponent_pieces_mask);
+      MOVE_APPLY (piece, 2,
                   S_KING | S_BLACK,p2,0,
                   mask1,mask2,0);
     } 
@@ -1775,7 +1804,7 @@ static unsigned long long blackKingSquaresFind (
 __attribute__((always_inline)) inline 
 static unsigned long long allBishopRookQueenSquaresFind (
                                    const color_e whose_move,
-                                   bitBrd_t *restrict bit_brd,
+                                   unsigned long long *restrict piece,
                                    oneMove_t *const next_mv,
                                    const unsigned int king_position,
                                    const unsigned int record_undo_info,
@@ -1796,7 +1825,7 @@ static unsigned long long allBishopRookQueenSquaresFind (
 
   {
     const unsigned char p1 = (unsigned char) ((S_BISHOP) | (whose_move << 3));
-    unsigned long long piece_mask = bit_brd->piece[p1];
+    unsigned long long piece_mask = piece[p1];
     while (piece_mask)
     {
       const unsigned int piece_index = bitbrdLowestIndexFromMaskGet(piece_mask);
@@ -1842,17 +1871,18 @@ static unsigned long long allBishopRookQueenSquaresFind (
 
         if (unlikely(mask2 & visible_pieces_mask))
         {
-          p2 = pieceTypeGet (whose_move, mask2, bit_brd);
+          p2 = pieceTypeGet (whose_move, mask2, piece);
           num_masks = 2;
           if (move_test_needed && TEST_NEEDED)
           {
             const unsigned long long mask1 = mask2 | from_mask;
-            MOVE_APPLY (bit_brd, whose_move, 2,
+            MOVE_APPLY (piece, 2,
                         p1,p2,0,
                         mask1,mask2,0);
             under_attack = kingInCheck(whose_move,
-                       bit_brd, king_position);
-            MOVE_APPLY (bit_brd, whose_move, 2,
+                       piece, king_position, 
+                       (mover_pieces_mask ^ mask1) | (opponent_pieces_mask ^ mask2));
+            MOVE_APPLY (piece, 2,
                         p1,p2,0,
                         mask1,mask2,0);
           }
@@ -1870,13 +1900,15 @@ static unsigned long long allBishopRookQueenSquaresFind (
             if (!record_undo_info)
             {
               const unsigned long long mask1 = mask2 | from_mask;
-              MOVE_APPLY (bit_brd, whose_move, 2,
+              MOVE_APPLY (piece, 2,
                         p1,p2,0,
                         mask1,mask2,0);
               mn += (last_ply)?
-               allMoveCandidatesLastPlyFind(whose_move ^ 1, bit_brd, 0, next_castle_eligibility):
-               allMovePerft(whose_move ^ 1, bit_brd, 0, next_castle_eligibility, depth, ply);
-              MOVE_APPLY (bit_brd, whose_move, 2,
+               allMoveCandidatesLastPlyFind(whose_move ^ 1, piece, 0, next_castle_eligibility,
+                                    mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2):
+               allMovePerft(whose_move ^ 1, piece, 0, next_castle_eligibility, depth, ply,
+                                    mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2);
+              MOVE_APPLY (piece, 2,
                         p1,p2,0,
                         mask1,mask2,0);
             }
@@ -1886,12 +1918,13 @@ static unsigned long long allBishopRookQueenSquaresFind (
           if (unlikely(move_test_needed && TEST_NEEDED))
           {
             const unsigned long long mask1 = mask2 | from_mask;
-            MOVE_APPLY (bit_brd, whose_move, 1,
+            MOVE_APPLY (piece, 1,
                         p1,0,0,
                         mask1,0,0);
             under_attack = kingInCheck(whose_move,
-                       bit_brd, king_position);
-            MOVE_APPLY (bit_brd, whose_move, 1,
+                       piece, king_position,
+                       (mover_pieces_mask ^ mask1) | opponent_pieces_mask);
+            MOVE_APPLY (piece, 1,
                         p1,0,0,
                         mask1,0,0);
           }
@@ -1900,13 +1933,15 @@ static unsigned long long allBishopRookQueenSquaresFind (
             if (!under_attack)
             {
               const unsigned long long mask1 = mask2 | from_mask;
-              MOVE_APPLY (bit_brd, whose_move, 1,
+              MOVE_APPLY (piece, 1,
                         p1,0,0,
                         mask1,0,0);
               mn += (last_ply)?
-               allMoveCandidatesLastPlyFind(whose_move ^ 1, bit_brd, 0, next_castle_eligibility):
-               allMovePerft(whose_move ^ 1, bit_brd, 0, next_castle_eligibility, depth, ply);
-              MOVE_APPLY (bit_brd, whose_move, 1,
+               allMoveCandidatesLastPlyFind(whose_move ^ 1, piece, 0, next_castle_eligibility,
+                                    mover_pieces_mask ^ mask1, opponent_pieces_mask): 
+               allMovePerft(whose_move ^ 1, piece, 0, next_castle_eligibility, depth, ply,
+                                    mover_pieces_mask ^ mask1, opponent_pieces_mask); 
+              MOVE_APPLY (piece, 1,
                         p1,0,0,
                         mask1,0,0);
             }
@@ -1941,7 +1976,7 @@ static unsigned long long allBishopRookQueenSquaresFind (
   }
   {
     const unsigned char p1 = (unsigned char) ((S_ROOK) | (whose_move << 3));
-    unsigned long long piece_mask = bit_brd->piece[p1];
+    unsigned long long piece_mask = piece[p1];
     while (piece_mask)
     {
       const unsigned int piece_index = bitbrdLowestIndexFromMaskGet(piece_mask);
@@ -1995,17 +2030,18 @@ static unsigned long long allBishopRookQueenSquaresFind (
 
         if (unlikely(mask2 & visible_pieces_mask))
         {
-          p2 = pieceTypeGet (whose_move, mask2, bit_brd);
+          p2 = pieceTypeGet (whose_move, mask2, piece);
           num_masks = 2;
           if (move_test_needed && TEST_NEEDED)
           {
             const unsigned long long mask1 = mask2 | from_mask;
-            MOVE_APPLY (bit_brd, whose_move, 2,
+            MOVE_APPLY (piece, 2,
                         p1,p2,0,
                         mask1,mask2,0);
             under_attack = kingInCheck(whose_move,
-                       bit_brd, king_position);
-            MOVE_APPLY (bit_brd, whose_move, 2,
+                       piece, king_position,
+                       (mover_pieces_mask ^ mask1) | (opponent_pieces_mask ^ mask2));
+            MOVE_APPLY (piece, 2,
                         p1,p2,0,
                         mask1,mask2,0);
           }
@@ -2023,13 +2059,15 @@ static unsigned long long allBishopRookQueenSquaresFind (
             if (!record_undo_info)
             {
               const unsigned long long mask1 = mask2 | from_mask;
-              MOVE_APPLY (bit_brd, whose_move, 2,
+              MOVE_APPLY (piece, 2,
                         p1,p2,0,
                         mask1,mask2,0);
               mn += (last_ply)?
-               allMoveCandidatesLastPlyFind(whose_move ^ 1, bit_brd, 0, next_castle_eligibility):
-               allMovePerft(whose_move ^ 1, bit_brd, 0, next_castle_eligibility, depth, ply);
-              MOVE_APPLY (bit_brd, whose_move, 2,
+               allMoveCandidatesLastPlyFind(whose_move ^ 1, piece, 0, next_castle_eligibility,
+                                               mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2):
+               allMovePerft(whose_move ^ 1, piece, 0, next_castle_eligibility, depth, ply,
+                                               mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2);
+              MOVE_APPLY (piece, 2,
                         p1,p2,0,
                         mask1,mask2,0);
             }
@@ -2039,12 +2077,13 @@ static unsigned long long allBishopRookQueenSquaresFind (
           if (unlikely(move_test_needed && TEST_NEEDED))
           {
             const unsigned long long mask1 = mask2 | from_mask;
-            MOVE_APPLY (bit_brd, whose_move, 1,
+            MOVE_APPLY (piece, 1,
                         p1,0,0,
                         mask1,0,0);
             under_attack = kingInCheck(whose_move,
-                       bit_brd, king_position);
-            MOVE_APPLY (bit_brd, whose_move, 1,
+                       piece, king_position,
+                       (mover_pieces_mask ^ mask1) | opponent_pieces_mask);
+            MOVE_APPLY (piece, 1,
                         p1,0,0,
                         mask1,0,0);
           }
@@ -2053,13 +2092,15 @@ static unsigned long long allBishopRookQueenSquaresFind (
             if (!under_attack)
             {
               const unsigned long long mask1 = mask2 | from_mask;
-              MOVE_APPLY (bit_brd, whose_move, 1,
+              MOVE_APPLY (piece, 1,
                         p1,0,0,
                         mask1,0,0);
               mn += (last_ply)?
-               allMoveCandidatesLastPlyFind(whose_move ^ 1, bit_brd, 0, next_castle_eligibility):
-               allMovePerft(whose_move ^ 1, bit_brd, 0, next_castle_eligibility, depth, ply);
-              MOVE_APPLY (bit_brd, whose_move, 1,
+               allMoveCandidatesLastPlyFind(whose_move ^ 1, piece, 0, next_castle_eligibility,
+                                mover_pieces_mask ^ mask1, opponent_pieces_mask): 
+               allMovePerft(whose_move ^ 1, piece, 0, next_castle_eligibility, depth, ply,
+                                mover_pieces_mask ^ mask1, opponent_pieces_mask); 
+              MOVE_APPLY (piece, 1,
                         p1,0,0,
                         mask1,0,0);
             }
@@ -2094,7 +2135,7 @@ static unsigned long long allBishopRookQueenSquaresFind (
   }
   {
     const unsigned char p1 = (unsigned char) ((S_QUEEN) | (whose_move << 3));
-    unsigned long long piece_mask = bit_brd->piece[p1];
+    unsigned long long piece_mask = piece[p1];
     while (piece_mask)
     {
       const unsigned int piece_index = bitbrdLowestIndexFromMaskGet(piece_mask);
@@ -2144,17 +2185,18 @@ static unsigned long long allBishopRookQueenSquaresFind (
 
         if (unlikely(mask2 & visible_pieces_mask))
         {
-          p2 = pieceTypeGet (whose_move, mask2, bit_brd);
+          p2 = pieceTypeGet (whose_move, mask2, piece);
           num_masks = 2;
           if (move_test_needed && TEST_NEEDED )
           {
             const unsigned long long mask1 = mask2 | from_mask;
-            MOVE_APPLY (bit_brd, whose_move, 2,
+            MOVE_APPLY (piece, 2,
                         p1,p2,0,
                         mask1,mask2,0);
             under_attack = kingInCheck(whose_move,
-                       bit_brd, king_position);
-            MOVE_APPLY (bit_brd, whose_move, 2,
+                       piece, king_position,
+                       (mover_pieces_mask ^ mask1) | (opponent_pieces_mask ^ mask2));
+            MOVE_APPLY (piece, 2,
                         p1,p2,0,
                         mask1,mask2,0);
           }
@@ -2170,13 +2212,15 @@ static unsigned long long allBishopRookQueenSquaresFind (
             if (!record_undo_info)
             {
               const unsigned long long mask1 = mask2 | from_mask;
-              MOVE_APPLY (bit_brd, whose_move, 2,
+              MOVE_APPLY (piece, 2,
                         p1,p2,0,
                         mask1,mask2,0);
               mn += (last_ply)?
-               allMoveCandidatesLastPlyFind(whose_move ^ 1, bit_brd, 0, next_castle_eligibility):
-               allMovePerft(whose_move ^ 1, bit_brd, 0, next_castle_eligibility, depth, ply);
-              MOVE_APPLY (bit_brd, whose_move, 2,
+               allMoveCandidatesLastPlyFind(whose_move ^ 1, piece, 0, next_castle_eligibility,
+                                    mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2):
+               allMovePerft(whose_move ^ 1, piece, 0, next_castle_eligibility, depth, ply,
+                                    mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2);
+              MOVE_APPLY (piece, 2,
                         p1,p2,0,
                         mask1,mask2,0);
             }
@@ -2186,12 +2230,13 @@ static unsigned long long allBishopRookQueenSquaresFind (
           if (unlikely(move_test_needed && TEST_NEEDED))
           {
             const unsigned long long mask1 = mask2 | from_mask;
-            MOVE_APPLY (bit_brd, whose_move, 1,
+            MOVE_APPLY (piece, 1,
                         p1,0,0,
                         mask1,0,0);
             under_attack = kingInCheck(whose_move,
-                       bit_brd, king_position);
-            MOVE_APPLY (bit_brd, whose_move, 1,
+                       piece, king_position,
+                       (mover_pieces_mask ^ mask1) | opponent_pieces_mask);
+            MOVE_APPLY (piece, 1,
                         p1,0,0,
                         mask1,0,0);
           }
@@ -2200,13 +2245,15 @@ static unsigned long long allBishopRookQueenSquaresFind (
             if (!under_attack)
             {
               const unsigned long long mask1 = mask2 | from_mask;
-              MOVE_APPLY (bit_brd, whose_move, 1,
+              MOVE_APPLY (piece, 1,
                         p1,0,0,
                         mask1,0,0);
               mn += (last_ply)?
-               allMoveCandidatesLastPlyFind(whose_move ^ 1, bit_brd, 0, next_castle_eligibility):
-               allMovePerft(whose_move ^ 1, bit_brd, 0, next_castle_eligibility, depth, ply);
-              MOVE_APPLY (bit_brd, whose_move, 1,
+               allMoveCandidatesLastPlyFind(whose_move ^ 1, piece, 0, next_castle_eligibility,
+                            mover_pieces_mask ^ mask1, opponent_pieces_mask):
+               allMovePerft(whose_move ^ 1, piece, 0, next_castle_eligibility, depth, ply,
+                            mover_pieces_mask ^ mask1, opponent_pieces_mask);
+              MOVE_APPLY (piece, 1,
                         p1,0,0,
                         mask1,0,0);
             }
@@ -2252,7 +2299,7 @@ static unsigned long long allBishopRookQueenSquaresFind (
 __attribute__((always_inline)) inline 
 static unsigned long long allBishopRookQueenSquaresLastPlyFind (
                                    const color_e whose_move,
-                                   bitBrd_t *restrict bit_brd,
+                                   unsigned long long *restrict piece,
                                    const unsigned int king_position,
                                    const unsigned long long in_check,
                                    const unsigned long long pin,
@@ -2267,7 +2314,7 @@ static unsigned long long allBishopRookQueenSquaresLastPlyFind (
 
   {
     const unsigned char p1 = (unsigned char) ((S_BISHOP) | (whose_move << 3));
-    unsigned long long piece_mask = bit_brd->piece[p1];
+    unsigned long long piece_mask = piece[p1];
     while (piece_mask)
     {
       const unsigned int piece_index = bitbrdLowestIndexFromMaskGet(piece_mask);
@@ -2306,15 +2353,16 @@ static unsigned long long allBishopRookQueenSquaresLastPlyFind (
       } else
       {
         mn += lastPlyMovesValidate (p1, from_mask, open_and_visible_mask,
-                                    whose_move, bit_brd,
-                                    king_position, opponent_pieces_mask,
+                                    whose_move, piece,
+                                    king_position, 
+                                    mover_pieces_mask, opponent_pieces_mask,
                                     any_color_pieces_mask);
       }
     }
   }
   {
     const unsigned char p1 = (unsigned char) ((S_ROOK) | (whose_move << 3));
-    unsigned long long piece_mask = bit_brd->piece[p1];
+    unsigned long long piece_mask = piece[p1];
     while (piece_mask)
     {
       const unsigned int piece_index = bitbrdLowestIndexFromMaskGet(piece_mask);
@@ -2351,15 +2399,16 @@ static unsigned long long allBishopRookQueenSquaresLastPlyFind (
       } else
       {
         mn += lastPlyMovesValidate (p1, from_mask, open_and_visible_mask,
-                                    whose_move, bit_brd,
-                                    king_position, opponent_pieces_mask,
+                                    whose_move, piece,
+                                    king_position, 
+                                    mover_pieces_mask, opponent_pieces_mask,
                                     any_color_pieces_mask);
       }
     }
   }
   {
     const unsigned char p1 = (unsigned char) ((S_QUEEN) | (whose_move << 3));
-    unsigned long long piece_mask = bit_brd->piece[p1];
+    unsigned long long piece_mask = piece[p1];
     while (piece_mask)
     {
       const unsigned int piece_index = bitbrdLowestIndexFromMaskGet(piece_mask);
@@ -2397,8 +2446,9 @@ static unsigned long long allBishopRookQueenSquaresLastPlyFind (
       } else
       {
         mn += lastPlyMovesValidate (p1, from_mask, open_and_visible_mask,
-                                    whose_move, bit_brd,
-                                    king_position, opponent_pieces_mask,
+                                    whose_move, piece,
+                                    king_position, 
+                                    mover_pieces_mask, opponent_pieces_mask,
                                     any_color_pieces_mask);
       }
     }
@@ -2418,7 +2468,7 @@ static unsigned long long allBishopRookQueenSquaresLastPlyFind (
 __attribute__((always_inline)) inline
 static unsigned long long allKnightSquaresFind (
                                     const color_e whose_move,
-                                    bitBrd_t *restrict bit_brd,
+                                    unsigned long long *restrict piece,
                                     oneMove_t *const next_mv,
                                     const unsigned int king_position,
                                     const unsigned int record_undo_info,
@@ -2433,7 +2483,7 @@ static unsigned long long allKnightSquaresFind (
                                     const unsigned int last_ply)
 {
   const unsigned char p1 = (unsigned char) (S_KNIGHT | (whose_move << 3));
-  unsigned long long piece_mask = bit_brd->piece[p1];
+  unsigned long long piece_mask = piece[p1];
   unsigned long long mn = 0;
   unsigned long long valid_moves = (0 == in_check)?~mover_pieces_mask:
                                                     in_check & ~mover_pieces_mask;
@@ -2485,17 +2535,18 @@ static unsigned long long allKnightSquaresFind (
       if (p1_move_mask & opponent_pieces_mask)
       {
         mask2 = p1_move_mask;
-        p2 = pieceTypeGet (whose_move, p1_move_mask, bit_brd);
+        p2 = pieceTypeGet (whose_move, p1_move_mask, piece);
         num_masks = 2;
         if (unlikely(move_test_needed && in_check))
         {
           const unsigned long long mask1 = p1_move_mask | from_mask;
-          MOVE_APPLY (bit_brd, whose_move, 2,
+          MOVE_APPLY (piece, 2,
                         p1,p2,0,
                         mask1,mask2,0);
           under_attack = kingInCheck(whose_move, 
-                       bit_brd, king_position);
-          MOVE_APPLY (bit_brd, whose_move, 2,
+                       piece, king_position,
+                       (mover_pieces_mask ^ mask1) | (opponent_pieces_mask ^ mask2));
+          MOVE_APPLY (piece, 2,
                         p1,p2,0,
                         mask1,mask2,0);
         } 
@@ -2511,13 +2562,15 @@ static unsigned long long allKnightSquaresFind (
           if (!record_undo_info)
           {
             unsigned long long mask1 = p1_move_mask | from_mask;
-            MOVE_APPLY (bit_brd, whose_move, 2,
+            MOVE_APPLY (piece, 2,
                           p1,p2,0,
                           mask1,mask2,0);
             mn += (last_ply)?
-               allMoveCandidatesLastPlyFind(whose_move ^ 1, bit_brd, 0, next_castle_eligibility):
-               allMovePerft(whose_move ^ 1, bit_brd, 0, next_castle_eligibility, depth, ply);
-            MOVE_APPLY (bit_brd, whose_move, 2,
+               allMoveCandidatesLastPlyFind(whose_move ^ 1, piece, 0, next_castle_eligibility,
+                                    mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2):
+               allMovePerft(whose_move ^ 1, piece, 0, next_castle_eligibility, depth, ply,
+                                    mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2);
+            MOVE_APPLY (piece, 2,
                           p1,p2,0,
                           mask1,mask2,0);
           }
@@ -2527,25 +2580,28 @@ static unsigned long long allKnightSquaresFind (
         if (unlikely(move_test_needed && in_check))
         {
           const unsigned long long mask1 = p1_move_mask | from_mask;
-          MOVE_APPLY (bit_brd, whose_move, 1,
+          MOVE_APPLY (piece, 1,
                         p1,0,0,
                         mask1,0,0);
           under_attack = kingInCheck(whose_move, 
-                       bit_brd, king_position);
-          MOVE_APPLY (bit_brd, whose_move, 1,
+                       piece, king_position,
+                       (mover_pieces_mask ^ mask1) | opponent_pieces_mask);
+          MOVE_APPLY (piece, 1,
                         p1,0,0,
                         mask1,0,0);
         }
         if (!record_undo_info && !under_attack)
         {
           unsigned long long mask1 = p1_move_mask | from_mask;
-          MOVE_APPLY (bit_brd, whose_move, 1,
+          MOVE_APPLY (piece, 1,
                         p1,0,0,
                         mask1,0,0);
           mn += (last_ply)?
-             allMoveCandidatesLastPlyFind(whose_move ^ 1, bit_brd, 0, next_castle_eligibility):
-             allMovePerft(whose_move ^ 1, bit_brd, 0, next_castle_eligibility, depth, ply);
-          MOVE_APPLY (bit_brd, whose_move, 1,
+             allMoveCandidatesLastPlyFind(whose_move ^ 1, piece, 0, next_castle_eligibility,
+                                mover_pieces_mask ^ mask1, opponent_pieces_mask):
+             allMovePerft(whose_move ^ 1, piece, 0, next_castle_eligibility, depth, ply,
+                                mover_pieces_mask ^ mask1, opponent_pieces_mask);
+          MOVE_APPLY (piece, 1,
                         p1,0,0,
                         mask1,0,0);
         }
@@ -2593,7 +2649,7 @@ static unsigned long long allKnightSquaresFind (
 __attribute__((always_inline)) inline
 static unsigned long long allKnightSquaresLastPlyFind (
                                     const color_e whose_move,
-                                    bitBrd_t *restrict bit_brd,
+                                    unsigned long long *restrict piece,
                                     const unsigned int king_position,
                                     const unsigned long long in_check,
                                     const unsigned long long pin,
@@ -2603,7 +2659,7 @@ static unsigned long long allKnightSquaresLastPlyFind (
 {
   const unsigned long long any_color_pieces_mask = mover_pieces_mask | opponent_pieces_mask;
   const unsigned char p1 = (unsigned char) (S_KNIGHT | (whose_move << 3));
-  unsigned long long piece_mask = bit_brd->piece[p1];
+  unsigned long long piece_mask = piece[p1];
   unsigned long long valid_moves = (0 == in_check)?~mover_pieces_mask:
                                                     in_check & ~mover_pieces_mask;
 
@@ -2648,8 +2704,9 @@ static unsigned long long allKnightSquaresLastPlyFind (
     } else
     {
       mn += lastPlyMovesValidate (p1, from_mask, move_candidate_mask,
-                                    whose_move, bit_brd,
-                                    king_position, opponent_pieces_mask,
+                                    whose_move, piece,
+                                    king_position, 
+                                    mover_pieces_mask, opponent_pieces_mask,
                                     any_color_pieces_mask);
     }
   }
@@ -2668,7 +2725,7 @@ static unsigned long long allKnightSquaresLastPlyFind (
 ******************************************************************************/
 __attribute__((always_inline)) inline
 static unsigned long long allWhitePawnSquaresFind (
-                                    bitBrd_t *restrict bit_brd,
+                                    unsigned long long *restrict piece,
                                     oneMove_t *const next_mv,
                                     const unsigned int en_passant_eligible_pawn,
                                     const unsigned int king_position,
@@ -2682,7 +2739,7 @@ static unsigned long long allWhitePawnSquaresFind (
                                     const unsigned long long opponent_pieces_mask,
                                     const unsigned int last_ply)
 {
-  unsigned long long piece_mask = bit_brd->piece[S_PAWN | S_WHITE];
+  unsigned long long piece_mask = piece[S_PAWN | S_WHITE];
 
   const unsigned long long any_color_pieces_mask = mover_pieces_mask | opponent_pieces_mask;
   unsigned long long mn = 0;
@@ -2725,24 +2782,30 @@ static unsigned long long allWhitePawnSquaresFind (
         p2 = S_QUEEN | S_WHITE;
         if (TEST_NEEDED)
         {
-          MOVE_APPLY (bit_brd, MOVE_WHITE, 2,
+          MOVE_APPLY (piece, 2,
                         S_PAWN | S_WHITE,p2,0,
                         mask1,p1_move_mask,0);
-          under_attack = kingInCheck(MOVE_WHITE, bit_brd, king_position);
-          MOVE_APPLY (bit_brd, MOVE_WHITE, 2,
+          under_attack = kingInCheck(MOVE_WHITE, piece, king_position,
+                                    (mover_pieces_mask ^ (mask1 | p1_move_mask)) |
+                                    opponent_pieces_mask);
+          MOVE_APPLY (piece, 2,
                         S_PAWN | S_WHITE,p2,0,
                         mask1,p1_move_mask,0);
         }
 
         if (!record_undo_info && (!under_attack))
         {
-          MOVE_APPLY (bit_brd, MOVE_WHITE, 2,
+          MOVE_APPLY (piece, 2,
                         S_PAWN | S_WHITE,p2,0,
                         mask1,p1_move_mask,0);
           mn += (last_ply)?
-             allMoveCandidatesLastPlyFind(MOVE_BLACK, bit_brd, 0, castle_eligibility):
-             allMovePerft(MOVE_BLACK, bit_brd, 0, castle_eligibility, depth, ply);
-          MOVE_APPLY (bit_brd, MOVE_WHITE, 2,
+             allMoveCandidatesLastPlyFind(MOVE_BLACK, piece, 0, castle_eligibility,
+                                    mover_pieces_mask ^ (mask1 | p1_move_mask),
+                                    opponent_pieces_mask):
+             allMovePerft(MOVE_BLACK, piece, 0, castle_eligibility, depth, ply,
+                                    mover_pieces_mask ^ (mask1 | p1_move_mask),
+                                    opponent_pieces_mask);
+          MOVE_APPLY (piece, 2,
                         S_PAWN | S_WHITE,p2,0,
                         mask1,p1_move_mask,0);
         }
@@ -2763,24 +2826,28 @@ static unsigned long long allWhitePawnSquaresFind (
             under_attack = 1;
           } else
           {
-            MOVE_APPLY (bit_brd, MOVE_WHITE, 1,
+            MOVE_APPLY (piece, 1,
                         S_PAWN | S_WHITE,0,0,
                         mask1,0,0);
-            under_attack = kingInCheck(MOVE_WHITE, bit_brd, king_position);
-            MOVE_APPLY (bit_brd, MOVE_WHITE, 1,
+            under_attack = kingInCheck(MOVE_WHITE, piece, king_position,
+                                        (mover_pieces_mask ^ mask1) |
+                                        opponent_pieces_mask);
+            MOVE_APPLY (piece, 1,
                         S_PAWN | S_WHITE,0,0,
                         mask1,0,0);
           }
         }
         if (!record_undo_info && !under_attack)
         {
-          MOVE_APPLY (bit_brd, MOVE_WHITE, 1,
+          MOVE_APPLY (piece, 1,
                         S_PAWN | S_WHITE,0,0,
                         mask1,0,0);
           mn += (last_ply)?
-             allMoveCandidatesLastPlyFind(MOVE_BLACK, bit_brd, 0, castle_eligibility):
-             allMovePerft(MOVE_BLACK, bit_brd, 0, castle_eligibility, depth, ply);
-          MOVE_APPLY (bit_brd, MOVE_WHITE, 1,
+             allMoveCandidatesLastPlyFind(MOVE_BLACK, piece, 0, castle_eligibility,
+                                    mover_pieces_mask ^ mask1, opponent_pieces_mask):
+             allMovePerft(MOVE_BLACK, piece, 0, castle_eligibility, depth, ply,
+                                    mover_pieces_mask ^ mask1, opponent_pieces_mask);
+          MOVE_APPLY (piece, 1,
                         S_PAWN | S_WHITE,0,0,
                         mask1,0,0);
         }
@@ -2819,23 +2886,27 @@ static unsigned long long allWhitePawnSquaresFind (
               mn++;
             } else
             {
-              MOVE_APPLY (bit_brd, MOVE_WHITE, num_masks,
+              MOVE_APPLY (piece, num_masks,
                             S_PAWN | S_WHITE,p2,0,
                             mask1,p1_move_mask,0);
               mn += (last_ply)?
                    allMoveCandidatesLastPlyFind(
                                 MOVE_BLACK,
-                                bit_brd,
+                                piece,
                                 0,
-                                castle_eligibility):
+                                castle_eligibility,
+                                mover_pieces_mask ^ (mask1 | p1_move_mask),
+                                opponent_pieces_mask):
                    allMovePerft(
                                 MOVE_BLACK,
-                                bit_brd,
+                                piece,
                                 0,
                                 castle_eligibility,
                                 depth,
-                                ply);
-              MOVE_APPLY (bit_brd, MOVE_WHITE, num_masks,
+                                ply,
+                                mover_pieces_mask ^ (mask1 | p1_move_mask),
+                                opponent_pieces_mask);
+              MOVE_APPLY (piece, num_masks,
                             S_PAWN | S_WHITE,p2,0,
                             mask1,p1_move_mask,0);
             }
@@ -2861,11 +2932,13 @@ static unsigned long long allWhitePawnSquaresFind (
           } else
           {
             mask1 = p1_move_mask | from_mask;
-            MOVE_APPLY (bit_brd, MOVE_WHITE, 1,
+            MOVE_APPLY (piece, 1,
                             S_PAWN | S_WHITE,0,0,
                             mask1,0,0);
-            under_attack = kingInCheck(MOVE_WHITE, bit_brd, king_position);
-            MOVE_APPLY (bit_brd, MOVE_WHITE, 1,
+            under_attack = kingInCheck(MOVE_WHITE, piece, king_position,
+                                    (mover_pieces_mask ^ mask1) | 
+                                    opponent_pieces_mask);
+            MOVE_APPLY (piece, 1,
                             S_PAWN | S_WHITE,0,0,
                             mask1,0,0);
           }
@@ -2877,30 +2950,34 @@ static unsigned long long allWhitePawnSquaresFind (
           ** opponent pawn in the same row.
           */
           const unsigned int next_en_passant_eligible_pawn =
-          (blackPawnEnPassantAttack[to_index] & bit_brd->piece[S_PAWN | S_BLACK])?to_index:0;
+          (blackPawnEnPassantAttack[to_index] & piece[S_PAWN | S_BLACK])?to_index:0;
 
           if (!record_undo_info)
           {
             mask1 = p1_move_mask | from_mask;
 
 
-            MOVE_APPLY (bit_brd, MOVE_WHITE, 1,
+            MOVE_APPLY (piece, 1,
                           S_PAWN | S_WHITE,0,0,
                           mask1,0,0);
             mn += (last_ply)?
                      allMoveCandidatesLastPlyFind(
                                   MOVE_BLACK,
-                                  bit_brd,
+                                  piece,
                                   next_en_passant_eligible_pawn,
-                                  castle_eligibility):
+                                  castle_eligibility,
+                                  mover_pieces_mask ^ mask1, 
+                                  opponent_pieces_mask):
                      allMovePerft(
                                   MOVE_BLACK,
-                                  bit_brd,
+                                  piece,
                                   next_en_passant_eligible_pawn,
                                   castle_eligibility,
                                   depth,
-                                  ply);
-            MOVE_APPLY (bit_brd, MOVE_WHITE, 1,
+                                  ply,
+                                  mover_pieces_mask ^ mask1, 
+                                  opponent_pieces_mask);
+            MOVE_APPLY (piece, 1,
                           S_PAWN | S_WHITE,0,0,
                           mask1,0,0);
           } else
@@ -2942,6 +3019,8 @@ static unsigned long long allWhitePawnSquaresFind (
       unsigned char p3 = 0;
       int under_attack = 0;
       castleEligibility_t next_castle_eligibility = castle_eligibility;
+      unsigned long long new_mover_pieces_mask;
+      unsigned long long new_opponent_pieces_mask;
 
 
       /* For en passant capture we know that the captured piece is a pawn.
@@ -2950,20 +3029,25 @@ static unsigned long long allWhitePawnSquaresFind (
       {
         p2 = S_PAWN | S_BLACK;
         mask2 = 1LLU << en_passant_eligible_pawn;
+        new_mover_pieces_mask = mover_pieces_mask ^ mask1;
+        new_opponent_pieces_mask = opponent_pieces_mask ^ mask2;
         if (TEST_NEEDED)
         {
-          MOVE_APPLY (bit_brd, MOVE_WHITE, 2,
+          MOVE_APPLY (piece, 2,
                         S_PAWN | S_WHITE,p2,0,
                         mask1,mask2,0);
-          under_attack = kingInCheck(MOVE_WHITE, bit_brd, king_position); 
-          MOVE_APPLY (bit_brd, MOVE_WHITE, 2,
+          under_attack = kingInCheck(MOVE_WHITE, piece, king_position,
+                                    new_mover_pieces_mask |
+                                    new_opponent_pieces_mask);
+          MOVE_APPLY (piece, 2,
                         S_PAWN | S_WHITE,p2,0,
                         mask1,mask2,0);
         }
       } else
       {
-        p2 = pieceTypeGet (MOVE_WHITE, p1_move_mask, bit_brd);
+        p2 = pieceTypeGet (MOVE_WHITE, p1_move_mask, piece);
         mask2 = p1_move_mask;
+        new_opponent_pieces_mask = opponent_pieces_mask ^ mask2;
 
         constexpr unsigned long long row7_mask = 0xff00000000000000;
 
@@ -2980,25 +3064,31 @@ static unsigned long long allWhitePawnSquaresFind (
           num_masks = 3;
           mask1 = from_mask;
           p3 = S_QUEEN | S_WHITE;
+          new_mover_pieces_mask = mover_pieces_mask ^ (mask1 | p1_move_mask);
           if (TEST_NEEDED)
           {
-            MOVE_APPLY (bit_brd, MOVE_WHITE, 3,
+            MOVE_APPLY (piece, 3,
                         S_PAWN | S_WHITE,p2,p3,
                         mask1,mask2,p1_move_mask);
-            under_attack = kingInCheck(MOVE_WHITE, bit_brd, king_position); 
-            MOVE_APPLY (bit_brd, MOVE_WHITE, 3,
+            under_attack = kingInCheck(MOVE_WHITE, piece, king_position, 
+                                    new_mover_pieces_mask |
+                                    new_opponent_pieces_mask);
+            MOVE_APPLY (piece, 3,
                         S_PAWN | S_WHITE,p2,p3,
                         mask1,mask2,p1_move_mask);
           }
         } else
         {
+          new_mover_pieces_mask = mover_pieces_mask ^ mask1;
           if (TEST_NEEDED)
           {
-            MOVE_APPLY (bit_brd, MOVE_WHITE, 2,
+            MOVE_APPLY (piece, 2,
                         S_PAWN | S_WHITE,p2,0,
                         mask1,mask2,0);
-            under_attack = kingInCheck(MOVE_WHITE, bit_brd, king_position); 
-            MOVE_APPLY (bit_brd, MOVE_WHITE, 2,
+            under_attack = kingInCheck(MOVE_WHITE, piece, king_position, 
+                                new_mover_pieces_mask |
+                                new_opponent_pieces_mask);
+            MOVE_APPLY (piece, 2,
                         S_PAWN | S_WHITE,p2,0,
                         mask1,mask2,0);
           }
@@ -3025,23 +3115,27 @@ static unsigned long long allWhitePawnSquaresFind (
           mn++;
         } else
         {
-          MOVE_APPLY (bit_brd, MOVE_WHITE, num_masks,
+          MOVE_APPLY (piece, num_masks,
                         S_PAWN | S_WHITE,p2,p3,
                         mask1,mask2,p1_move_mask);
           mn += (last_ply)?
                    allMoveCandidatesLastPlyFind(
                                 MOVE_BLACK,
-                                bit_brd,
+                                piece,
                                 0,
-                                next_castle_eligibility):
+                                next_castle_eligibility,
+                                new_mover_pieces_mask,
+                                new_opponent_pieces_mask):
                    allMovePerft(
                                 MOVE_BLACK,
-                                bit_brd,
+                                piece,
                                 0,
                                 next_castle_eligibility,
                                 depth,
-                                ply);
-          MOVE_APPLY (bit_brd, MOVE_WHITE, num_masks,
+                                ply,
+                                new_mover_pieces_mask,
+                                new_opponent_pieces_mask);
+          MOVE_APPLY (piece, num_masks,
                         S_PAWN | S_WHITE,p2,p3,
                         mask1,mask2,p1_move_mask);
         } 
@@ -3061,23 +3155,27 @@ static unsigned long long allWhitePawnSquaresFind (
               mn++;
             } else
             {
-              MOVE_APPLY (bit_brd, MOVE_WHITE, num_masks,
+              MOVE_APPLY (piece, num_masks,
                             S_PAWN | S_WHITE,p2,p3,
                             mask1,mask2,p1_move_mask);
               mn += (last_ply)?
                    allMoveCandidatesLastPlyFind(
                                 MOVE_BLACK,
-                                bit_brd,
+                                piece,
                                 0,
-                                next_castle_eligibility):
+                                next_castle_eligibility,
+                                new_mover_pieces_mask,
+                                new_opponent_pieces_mask):
                    allMovePerft(
                                 MOVE_BLACK,
-                                bit_brd,
+                                piece,
                                 0,
                                 next_castle_eligibility,
                                 depth,
-                                ply);
-              MOVE_APPLY (bit_brd, MOVE_WHITE, num_masks,
+                                ply,
+                                new_mover_pieces_mask,
+                                new_opponent_pieces_mask);
+              MOVE_APPLY (piece, num_masks,
                             S_PAWN | S_WHITE,p2,p3,
                             mask1,mask2,p1_move_mask);
             } 
@@ -3101,6 +3199,8 @@ static unsigned long long allWhitePawnSquaresFind (
       unsigned char p3 = 0;
       int under_attack = 0;
       castleEligibility_t next_castle_eligibility = castle_eligibility;
+      unsigned long long new_mover_pieces_mask;
+      unsigned long long new_opponent_pieces_mask;
 
       /* For en passant capture we know that the captured piece is a pawn.
       */
@@ -3108,20 +3208,25 @@ static unsigned long long allWhitePawnSquaresFind (
       {
         p2 = S_PAWN | S_BLACK;
         mask2 = 1LLU << en_passant_eligible_pawn;
+        new_mover_pieces_mask = mover_pieces_mask ^ mask1;
+        new_opponent_pieces_mask = opponent_pieces_mask ^ mask2;
         if (TEST_NEEDED)
         {
-          MOVE_APPLY (bit_brd, MOVE_WHITE, 2,
+          MOVE_APPLY (piece, 2,
                         S_PAWN | S_WHITE,p2,0,
                         mask1,mask2,0);
-          under_attack = kingInCheck(MOVE_WHITE, bit_brd, king_position); 
-          MOVE_APPLY (bit_brd, MOVE_WHITE, 2,
+          under_attack = kingInCheck(MOVE_WHITE, piece, king_position,
+                                    new_mover_pieces_mask |
+                                    new_opponent_pieces_mask);
+          MOVE_APPLY (piece, 2,
                         S_PAWN | S_WHITE,p2,0,
                         mask1,mask2,0);
         }
       } else
       {
-        p2 = pieceTypeGet (MOVE_WHITE, p1_move_mask, bit_brd);
+        p2 = pieceTypeGet (MOVE_WHITE, p1_move_mask, piece);
         mask2 = p1_move_mask;
+        new_opponent_pieces_mask = opponent_pieces_mask ^ mask2;
 
         constexpr unsigned long long row7_mask = 0xff00000000000000;
 
@@ -3138,25 +3243,31 @@ static unsigned long long allWhitePawnSquaresFind (
           num_masks = 3;
           mask1 = from_mask;
           p3 = S_QUEEN | S_WHITE;
+          new_mover_pieces_mask = mover_pieces_mask ^ (mask1 | p1_move_mask);
           if (TEST_NEEDED)
           {
-            MOVE_APPLY (bit_brd, MOVE_WHITE, 3,
+            MOVE_APPLY (piece, 3,
                         S_PAWN | S_WHITE,p2,p3,
                         mask1,mask2,p1_move_mask);
-            under_attack = kingInCheck(MOVE_WHITE, bit_brd, king_position); 
-            MOVE_APPLY (bit_brd, MOVE_WHITE, 3,
+            under_attack = kingInCheck(MOVE_WHITE, piece, king_position, 
+                                    new_mover_pieces_mask |
+                                    new_opponent_pieces_mask);
+            MOVE_APPLY (piece, 3,
                         S_PAWN | S_WHITE,p2,p3,
                         mask1,mask2,p1_move_mask);
           }
         } else
         {
+          new_mover_pieces_mask = mover_pieces_mask ^ mask1;
           if (TEST_NEEDED)
           {
-            MOVE_APPLY (bit_brd, MOVE_WHITE, 2,
+            MOVE_APPLY (piece, 2,
                         S_PAWN | S_WHITE,p2,0,
                         mask1,mask2,0);
-            under_attack = kingInCheck(MOVE_WHITE, bit_brd, king_position); 
-            MOVE_APPLY (bit_brd, MOVE_WHITE, 2,
+            under_attack = kingInCheck(MOVE_WHITE, piece, king_position, 
+                                    new_mover_pieces_mask |
+                                    new_opponent_pieces_mask);
+            MOVE_APPLY (piece, 2,
                         S_PAWN | S_WHITE,p2,0,
                         mask1,mask2,0);
           }
@@ -3183,23 +3294,27 @@ static unsigned long long allWhitePawnSquaresFind (
           mn++;
         } else 
         {
-          MOVE_APPLY (bit_brd, MOVE_WHITE, num_masks,
+          MOVE_APPLY (piece, num_masks,
                         S_PAWN | S_WHITE,p2,p3,
                         mask1,mask2,p1_move_mask);
           mn += (last_ply)?
                    allMoveCandidatesLastPlyFind(
                                 MOVE_BLACK,
-                                bit_brd,
+                                piece,
                                 0,
-                                next_castle_eligibility):
+                                next_castle_eligibility,
+                                new_mover_pieces_mask,
+                                new_opponent_pieces_mask):
                    allMovePerft(
                                 MOVE_BLACK,
-                                bit_brd,
+                                piece,
                                 0,
                                 next_castle_eligibility,
                                 depth,
-                                ply);
-          MOVE_APPLY (bit_brd, MOVE_WHITE, num_masks,
+                                ply,
+                                new_mover_pieces_mask,
+                                new_opponent_pieces_mask);
+          MOVE_APPLY (piece, num_masks,
                         S_PAWN | S_WHITE,p2,p3,
                         mask1,mask2,p1_move_mask);
         } 
@@ -3220,23 +3335,27 @@ static unsigned long long allWhitePawnSquaresFind (
               mn++;
             } else 
             {
-              MOVE_APPLY (bit_brd, MOVE_WHITE, num_masks,
+              MOVE_APPLY (piece, num_masks,
                             S_PAWN | S_WHITE,p2,p3,
                             mask1,mask2,p1_move_mask);
               mn += (last_ply)?
                    allMoveCandidatesLastPlyFind(
                                 MOVE_BLACK,
-                                bit_brd,
+                                piece,
                                 0,
-                                next_castle_eligibility):
+                                next_castle_eligibility,
+                                new_mover_pieces_mask,
+                                new_opponent_pieces_mask):
                    allMovePerft(
                                 MOVE_BLACK,
-                                bit_brd,
+                                piece,
                                 0,
                                 next_castle_eligibility,
                                 depth,
-                                ply);
-              MOVE_APPLY (bit_brd, MOVE_WHITE, num_masks,
+                                ply,
+                                new_mover_pieces_mask,
+                                new_opponent_pieces_mask);
+              MOVE_APPLY (piece, num_masks,
                             S_PAWN | S_WHITE,p2,p3,
                             mask1,mask2,p1_move_mask);
             } 
@@ -3259,7 +3378,7 @@ static unsigned long long allWhitePawnSquaresFind (
 ******************************************************************************/
 __attribute__((always_inline)) inline
 static unsigned long long allWhitePawnSquaresLastPlyFind (
-                                    bitBrd_t *restrict bit_brd,
+                                    unsigned long long *restrict piece,
                                     const unsigned int en_passant_eligible_pawn,
                                     const unsigned int king_position,
                                     const unsigned long long in_check,
@@ -3268,7 +3387,7 @@ static unsigned long long allWhitePawnSquaresLastPlyFind (
                                     const unsigned long long mover_pieces_mask,
                                     const unsigned long long opponent_pieces_mask)
 {
-  unsigned long long piece_mask = bit_brd->piece[S_PAWN | S_WHITE];
+  unsigned long long piece_mask = piece[S_PAWN | S_WHITE];
 
   const unsigned long long any_color_pieces_mask = mover_pieces_mask | opponent_pieces_mask;
   unsigned long long mn = 0;
@@ -3395,14 +3514,17 @@ static unsigned long long allWhitePawnSquaresLastPlyFind (
 
         if (TEST_NEEDED)
         {
-          MOVE_APPLY (bit_brd, MOVE_WHITE, 2,
+          MOVE_APPLY (piece, 2,
                         S_PAWN | S_WHITE,S_QUEEN | S_WHITE,0,
                         from_mask,p1_move_mask,0);
-          if (kingInCheck(MOVE_WHITE, bit_brd, king_position))
+          if (kingInCheck(MOVE_WHITE, piece, king_position,
+                            (mover_pieces_mask ^ (from_mask | p1_move_mask)) |
+                            opponent_pieces_mask))
+
           {
             mn -= 4;
           }
-          MOVE_APPLY (bit_brd, MOVE_WHITE, 2,
+          MOVE_APPLY (piece, 2,
                         S_PAWN | S_WHITE,S_QUEEN | S_WHITE,0,
                         from_mask,p1_move_mask,0);
         }
@@ -3416,14 +3538,16 @@ static unsigned long long allWhitePawnSquaresLastPlyFind (
         } else if (move_test_needed)
         {
           const unsigned long long mask1 = p1_move_mask | from_mask;
-          MOVE_APPLY (bit_brd, MOVE_WHITE, 1,
+          MOVE_APPLY (piece, 1,
                       S_PAWN | S_WHITE,0,0,
                       mask1,0,0);
-          if (kingInCheck(MOVE_WHITE, bit_brd, king_position))
+          if (kingInCheck(MOVE_WHITE, piece, king_position,
+                            (mover_pieces_mask ^ mask1) |
+                            opponent_pieces_mask))
           {
             mn--;
           }
-          MOVE_APPLY (bit_brd, MOVE_WHITE, 1,
+          MOVE_APPLY (piece, 1,
                       S_PAWN | S_WHITE,0,0,
                       mask1,0,0);
         }
@@ -3444,14 +3568,16 @@ static unsigned long long allWhitePawnSquaresLastPlyFind (
         } else if (move_test_needed)
         {
           const unsigned long long mask1 = p1_move_mask | from_mask;
-          MOVE_APPLY (bit_brd, MOVE_WHITE, 1,
+          MOVE_APPLY (piece, 1,
                           S_PAWN | S_WHITE,0,0,
                           mask1,0,0);
-          if (kingInCheck(MOVE_WHITE, bit_brd, king_position))
+          if (kingInCheck(MOVE_WHITE, piece, king_position,
+                            (mover_pieces_mask ^ mask1) |
+                            opponent_pieces_mask))
           {
             mn--;
           }
-          MOVE_APPLY (bit_brd, MOVE_WHITE, 1,
+          MOVE_APPLY (piece, 1,
                           S_PAWN | S_WHITE,0,0,
                           mask1,0,0);
         }
@@ -3483,11 +3609,14 @@ static unsigned long long allWhitePawnSquaresLastPlyFind (
       {
           const unsigned long long mask1 = p1_move_mask | from_mask;
           const unsigned long long mask2 = 1LLU << en_passant_eligible_pawn;
-          MOVE_APPLY (bit_brd, MOVE_WHITE, 2,
+          MOVE_APPLY (piece, 2,
                         S_PAWN | S_WHITE,S_PAWN | S_BLACK,0,
                         mask1,mask2,0);
-          under_attack = kingInCheck(MOVE_WHITE, bit_brd, king_position); 
-          MOVE_APPLY (bit_brd, MOVE_WHITE, 2,
+          under_attack = kingInCheck(MOVE_WHITE, piece, king_position,
+                                (mover_pieces_mask ^ mask1) |
+                                (opponent_pieces_mask ^ mask2));
+
+          MOVE_APPLY (piece, 2,
                         S_PAWN | S_WHITE,S_PAWN | S_BLACK,0,
                         mask1,mask2,0);
       } else
@@ -3499,12 +3628,14 @@ static unsigned long long allWhitePawnSquaresLastPlyFind (
           pawn_promotion = 1;
           if (TEST_NEEDED)
           {
-            const unsigned char p2 = pieceTypeGet (MOVE_WHITE, p1_move_mask, bit_brd);
-            MOVE_APPLY (bit_brd, MOVE_WHITE, 3,
+            const unsigned char p2 = pieceTypeGet (MOVE_WHITE, p1_move_mask, piece);
+            MOVE_APPLY (piece, 3,
                         S_PAWN | S_WHITE,p2,S_QUEEN | S_WHITE,
                         from_mask,p1_move_mask,p1_move_mask);
-            under_attack = kingInCheck(MOVE_WHITE, bit_brd, king_position); 
-            MOVE_APPLY (bit_brd, MOVE_WHITE, 3,
+            under_attack = kingInCheck(MOVE_WHITE, piece, king_position,
+                                (mover_pieces_mask ^ (from_mask | p1_move_mask)) |
+                                (opponent_pieces_mask ^ p1_move_mask));
+            MOVE_APPLY (piece, 3,
                         S_PAWN | S_WHITE,p2,S_QUEEN | S_WHITE,
                         from_mask,p1_move_mask,p1_move_mask);
           }
@@ -3518,12 +3649,14 @@ static unsigned long long allWhitePawnSquaresLastPlyFind (
           } else if (move_test_needed)
           {
             const unsigned long long mask1 = p1_move_mask | from_mask;
-            const unsigned char p2 = pieceTypeGet (MOVE_WHITE, p1_move_mask, bit_brd);
-            MOVE_APPLY (bit_brd, MOVE_WHITE, 2,
+            const unsigned char p2 = pieceTypeGet (MOVE_WHITE, p1_move_mask, piece);
+            MOVE_APPLY (piece, 2,
                         S_PAWN | S_WHITE,p2,0,
                         mask1,p1_move_mask,0);
-            under_attack = kingInCheck(MOVE_WHITE, bit_brd, king_position); 
-            MOVE_APPLY (bit_brd, MOVE_WHITE, 2,
+            under_attack = kingInCheck(MOVE_WHITE, piece, king_position,
+                                    (mover_pieces_mask ^ mask1) |
+                                    (opponent_pieces_mask ^ p1_move_mask));
+            MOVE_APPLY (piece, 2,
                         S_PAWN | S_WHITE,p2,0,
                         mask1,p1_move_mask,0);
           }
@@ -3563,11 +3696,13 @@ static unsigned long long allWhitePawnSquaresLastPlyFind (
       {
           const unsigned long long mask1 = p1_move_mask | from_mask;
           const unsigned long long mask2 = 1LLU << en_passant_eligible_pawn;
-          MOVE_APPLY (bit_brd, MOVE_WHITE, 2,
+          MOVE_APPLY (piece, 2,
                         S_PAWN | S_WHITE,S_PAWN | S_BLACK,0,
                         mask1,mask2,0);
-          under_attack = kingInCheck(MOVE_WHITE, bit_brd, king_position); 
-          MOVE_APPLY (bit_brd, MOVE_WHITE, 2,
+          under_attack = kingInCheck(MOVE_WHITE, piece, king_position,
+                                    (mover_pieces_mask ^ mask1) |
+                                    (opponent_pieces_mask ^ mask2)); 
+          MOVE_APPLY (piece, 2,
                         S_PAWN | S_WHITE,S_PAWN | S_BLACK,0,
                         mask1,mask2,0);
       } else
@@ -3579,12 +3714,14 @@ static unsigned long long allWhitePawnSquaresLastPlyFind (
           pawn_promotion = 1;
           if (TEST_NEEDED)
           {
-            const unsigned char p2 = pieceTypeGet (MOVE_WHITE, p1_move_mask, bit_brd);
-            MOVE_APPLY (bit_brd, MOVE_WHITE, 3,
+            const unsigned char p2 = pieceTypeGet (MOVE_WHITE, p1_move_mask, piece);
+            MOVE_APPLY (piece, 3,
                         S_PAWN | S_WHITE,p2,S_QUEEN | S_WHITE,
                         from_mask,p1_move_mask,p1_move_mask);
-            under_attack = kingInCheck(MOVE_WHITE, bit_brd, king_position); 
-            MOVE_APPLY (bit_brd, MOVE_WHITE, 3,
+            under_attack = kingInCheck(MOVE_WHITE, piece, king_position,
+                                        (mover_pieces_mask ^ (from_mask | p1_move_mask)) |
+                                        (opponent_pieces_mask ^ p1_move_mask));
+            MOVE_APPLY (piece, 3,
                         S_PAWN | S_WHITE,p2,S_QUEEN | S_WHITE,
                         from_mask,p1_move_mask,p1_move_mask);
           }
@@ -3598,12 +3735,14 @@ static unsigned long long allWhitePawnSquaresLastPlyFind (
           } else if (move_test_needed)
           {
             const unsigned long long mask1 = p1_move_mask | from_mask;
-            const unsigned char p2 = pieceTypeGet (MOVE_WHITE, p1_move_mask, bit_brd);
-            MOVE_APPLY (bit_brd, MOVE_WHITE, 2,
+            const unsigned char p2 = pieceTypeGet (MOVE_WHITE, p1_move_mask, piece);
+            MOVE_APPLY (piece, 2,
                         S_PAWN | S_WHITE,p2,0,
                         mask1,p1_move_mask,0);
-            under_attack = kingInCheck(MOVE_WHITE, bit_brd, king_position); 
-            MOVE_APPLY (bit_brd, MOVE_WHITE, 2,
+            under_attack = kingInCheck(MOVE_WHITE, piece, king_position,
+                                        (mover_pieces_mask ^ mask1) | 
+                                        (opponent_pieces_mask ^ p1_move_mask));
+            MOVE_APPLY (piece, 2,
                         S_PAWN | S_WHITE,p2,0,
                         mask1,p1_move_mask,0);
           }
@@ -3639,7 +3778,7 @@ static unsigned long long allWhitePawnSquaresLastPlyFind (
 ******************************************************************************/
 __attribute__((always_inline)) inline
 static unsigned long long allBlackPawnSquaresFind (
-                                    bitBrd_t *restrict bit_brd,
+                                    unsigned long long *restrict piece,
                                     oneMove_t *const next_mv,
                                     const unsigned int en_passant_eligible_pawn,
                                     const unsigned int king_position,
@@ -3653,7 +3792,7 @@ static unsigned long long allBlackPawnSquaresFind (
                                     const unsigned long long opponent_pieces_mask,
                                     const unsigned int last_ply)
 {
-  unsigned long long piece_mask = bit_brd->piece[S_PAWN | S_BLACK];
+  unsigned long long piece_mask = piece[S_PAWN | S_BLACK];
 
   const unsigned long long any_color_pieces_mask = opponent_pieces_mask | mover_pieces_mask;
   unsigned long long mn = 0;
@@ -3698,24 +3837,30 @@ static unsigned long long allBlackPawnSquaresFind (
         p2 = S_QUEEN | S_BLACK;
         if (TEST_NEEDED)
         {
-          MOVE_APPLY (bit_brd, MOVE_BLACK, 2,
+          MOVE_APPLY (piece, 2,
                         S_PAWN | S_BLACK,p2,0,
                         mask1,p1_move_mask,0);
-          under_attack = kingInCheck(MOVE_BLACK, bit_brd, king_position);
-          MOVE_APPLY (bit_brd, MOVE_BLACK, 2,
+          under_attack = kingInCheck(MOVE_BLACK, piece, king_position,
+                                    (mover_pieces_mask ^ (mask1 | p1_move_mask)) |
+                                    opponent_pieces_mask);
+          MOVE_APPLY (piece, 2,
                         S_PAWN | S_BLACK,p2,0,
                         mask1,p1_move_mask,0);
         }
 
         if (!record_undo_info && (!under_attack))
         {
-          MOVE_APPLY (bit_brd, MOVE_BLACK, 2,
+          MOVE_APPLY (piece, 2,
                         S_PAWN | S_BLACK,p2,0,
                         mask1,p1_move_mask,0);
           mn += (last_ply)?
-             allMoveCandidatesLastPlyFind(MOVE_WHITE, bit_brd, 0, castle_eligibility):
-             allMovePerft(MOVE_WHITE, bit_brd, 0, castle_eligibility, depth, ply);
-          MOVE_APPLY (bit_brd, MOVE_BLACK, 2,
+             allMoveCandidatesLastPlyFind(MOVE_WHITE, piece, 0, castle_eligibility,
+                                    mover_pieces_mask ^ (mask1 | p1_move_mask),
+                                    opponent_pieces_mask):
+             allMovePerft(MOVE_WHITE, piece, 0, castle_eligibility, depth, ply,
+                                    mover_pieces_mask ^ (mask1 | p1_move_mask),
+                                    opponent_pieces_mask);
+          MOVE_APPLY (piece, 2,
                         S_PAWN | S_BLACK,p2,0,
                         mask1,p1_move_mask,0);
         }
@@ -3733,11 +3878,13 @@ static unsigned long long allBlackPawnSquaresFind (
             under_attack = 1;
           } else
           {
-            MOVE_APPLY (bit_brd, MOVE_BLACK, 1,
+            MOVE_APPLY (piece, 1,
                         S_PAWN | S_BLACK,0,0,
                         mask1,0,0);
-            under_attack = kingInCheck(MOVE_BLACK, bit_brd, king_position);
-            MOVE_APPLY (bit_brd, MOVE_BLACK, 1,
+            under_attack = kingInCheck(MOVE_BLACK, piece, king_position,
+                                        (mover_pieces_mask ^ mask1) |
+                                        opponent_pieces_mask);
+            MOVE_APPLY (piece, 1,
                         S_PAWN | S_BLACK,0,0,
                         mask1,0,0);
           }
@@ -3745,13 +3892,15 @@ static unsigned long long allBlackPawnSquaresFind (
 
         if (!record_undo_info && (!under_attack))
         {
-          MOVE_APPLY (bit_brd, MOVE_BLACK, 1,
+          MOVE_APPLY (piece, 1,
                         S_PAWN | S_BLACK,0,0,
                         mask1,0,0);
           mn += (last_ply)?
-             allMoveCandidatesLastPlyFind(MOVE_WHITE, bit_brd, 0, castle_eligibility):
-             allMovePerft(MOVE_WHITE, bit_brd, 0, castle_eligibility, depth, ply);
-          MOVE_APPLY (bit_brd, MOVE_BLACK, 1,
+             allMoveCandidatesLastPlyFind(MOVE_WHITE, piece, 0, castle_eligibility,
+                            mover_pieces_mask ^ mask1, opponent_pieces_mask):
+             allMovePerft(MOVE_WHITE, piece, 0, castle_eligibility, depth, ply,
+                            mover_pieces_mask ^ mask1, opponent_pieces_mask);
+          MOVE_APPLY (piece, 1,
                         S_PAWN | S_BLACK,0,0,
                         mask1,0,0);
         }
@@ -3790,23 +3939,27 @@ static unsigned long long allBlackPawnSquaresFind (
               mn++;
             } else
             {
-              MOVE_APPLY (bit_brd, MOVE_BLACK, num_masks,
+              MOVE_APPLY (piece, num_masks,
                             S_PAWN | S_BLACK,p2,0,
                             mask1,p1_move_mask,0);
               mn += (last_ply)?
                    allMoveCandidatesLastPlyFind(
                                 MOVE_WHITE,
-                                bit_brd,
+                                piece,
                                 0,
-                                castle_eligibility):
+                                castle_eligibility,
+                                mover_pieces_mask ^ (mask1 | p1_move_mask),
+                                opponent_pieces_mask):
                    allMovePerft(
                                 MOVE_WHITE,
-                                bit_brd,
+                                piece,
                                 0,
                                 castle_eligibility,
                                 depth,
-                                ply);
-              MOVE_APPLY (bit_brd, MOVE_BLACK, num_masks,
+                                ply,
+                                mover_pieces_mask ^ (mask1 | p1_move_mask),
+                                opponent_pieces_mask);
+              MOVE_APPLY (piece, num_masks,
                             S_PAWN | S_BLACK,p2,0,
                             mask1,p1_move_mask,0);
             }
@@ -3834,11 +3987,13 @@ static unsigned long long allBlackPawnSquaresFind (
           } else
           {
             mask1 = p1_move_mask | from_mask;
-            MOVE_APPLY (bit_brd, MOVE_BLACK, 1,
+            MOVE_APPLY (piece, 1,
                           S_PAWN | S_BLACK,0,0,
                           mask1,0,0);
-            under_attack = kingInCheck(MOVE_BLACK, bit_brd, king_position);
-            MOVE_APPLY (bit_brd, MOVE_BLACK, 1,
+            under_attack = kingInCheck(MOVE_BLACK, piece, king_position,
+                                    (mover_pieces_mask ^ mask1) |
+                                    opponent_pieces_mask);
+            MOVE_APPLY (piece, 1,
                           S_PAWN | S_BLACK,0,0,
                           mask1,0,0);
           }
@@ -3850,29 +4005,33 @@ static unsigned long long allBlackPawnSquaresFind (
           ** opponent pawn in the same row.
           */
           const unsigned int next_en_passant_eligible_pawn =
-          (whitePawnEnPassantAttack[to_index] & bit_brd->piece[S_PAWN | S_WHITE])?to_index:0;
+          (whitePawnEnPassantAttack[to_index] & piece[S_PAWN | S_WHITE])?to_index:0;
 
           if (!record_undo_info)
           {
             mask1 = p1_move_mask | from_mask;
 
-            MOVE_APPLY (bit_brd, MOVE_BLACK, 1,
+            MOVE_APPLY (piece, 1,
                           S_PAWN | S_BLACK,0,0,
                           mask1,0,0);
             mn += (last_ply)?
                      allMoveCandidatesLastPlyFind(
                                   MOVE_WHITE,
-                                  bit_brd,
+                                  piece,
                                   next_en_passant_eligible_pawn,
-                                  castle_eligibility):
+                                  castle_eligibility,
+                                  mover_pieces_mask ^ mask1, 
+                                  opponent_pieces_mask):
                      allMovePerft(
                                   MOVE_WHITE,
-                                  bit_brd,
+                                  piece,
                                   next_en_passant_eligible_pawn,
                                   castle_eligibility,
                                   depth,
-                                  ply);
-            MOVE_APPLY (bit_brd, MOVE_BLACK, 1,
+                                  ply,
+                                  mover_pieces_mask ^ mask1, 
+                                  opponent_pieces_mask);
+            MOVE_APPLY (piece, 1,
                           S_PAWN | S_BLACK,0,0,
                           mask1,0,0);
           } else
@@ -3915,6 +4074,8 @@ static unsigned long long allBlackPawnSquaresFind (
       unsigned char p3 = 0;
       int under_attack = 0;
       castleEligibility_t next_castle_eligibility = castle_eligibility;
+      unsigned long long new_mover_pieces_mask;
+      unsigned long long new_opponent_pieces_mask;
 
 
       /* For en passant capture we know that the captured piece is a pawn.
@@ -3923,20 +4084,25 @@ static unsigned long long allBlackPawnSquaresFind (
       {
         p2 = S_PAWN | S_WHITE;
         mask2 = 1LLU << en_passant_eligible_pawn;
+        new_mover_pieces_mask = mover_pieces_mask ^ mask1;
+        new_opponent_pieces_mask = opponent_pieces_mask ^ mask2;
         if (TEST_NEEDED)
         {
-          MOVE_APPLY (bit_brd, MOVE_BLACK, 2,
+          MOVE_APPLY (piece, 2,
                         S_PAWN | S_BLACK,p2,0,
                         mask1,mask2,0);
-          under_attack = kingInCheck(MOVE_BLACK, bit_brd, king_position);
-          MOVE_APPLY (bit_brd, MOVE_BLACK, 2,
+          under_attack = kingInCheck(MOVE_BLACK, piece, king_position,
+                                new_mover_pieces_mask |
+                                new_opponent_pieces_mask);
+          MOVE_APPLY (piece, 2,
                         S_PAWN | S_BLACK,p2,0,
                         mask1,mask2,0);
         }
       } else
       {
-        p2 = pieceTypeGet (MOVE_BLACK, p1_move_mask, bit_brd);
+        p2 = pieceTypeGet (MOVE_BLACK, p1_move_mask, piece);
         mask2 = p1_move_mask;
+        new_opponent_pieces_mask = opponent_pieces_mask ^ mask2;
 
         constexpr unsigned long long row0_mask = 0x00000000000000ff;
 
@@ -3953,25 +4119,31 @@ static unsigned long long allBlackPawnSquaresFind (
           num_masks = 3;
           mask1 = from_mask;
           p3 = S_QUEEN | S_BLACK;
+          new_mover_pieces_mask = mover_pieces_mask ^ (mask1 | p1_move_mask);
           if (TEST_NEEDED)
           {
-            MOVE_APPLY (bit_brd, MOVE_BLACK, 3,
+            MOVE_APPLY (piece, 3,
                         S_PAWN | S_BLACK,p2,p3,
                         mask1,mask2,p1_move_mask);
-            under_attack = kingInCheck(MOVE_BLACK, bit_brd, king_position);
-            MOVE_APPLY (bit_brd, MOVE_BLACK, 3,
+            under_attack = kingInCheck(MOVE_BLACK, piece, king_position,
+                                    new_mover_pieces_mask |
+                                    new_opponent_pieces_mask);
+            MOVE_APPLY (piece, 3,
                         S_PAWN | S_BLACK,p2,p3,
                         mask1,mask2,p1_move_mask);
           }
         } else
         {
+          new_mover_pieces_mask = mover_pieces_mask ^ mask1;
           if (TEST_NEEDED)
           {
-            MOVE_APPLY (bit_brd, MOVE_BLACK, 2,
+            MOVE_APPLY (piece, 2,
                         S_PAWN | S_BLACK,p2,0,
                         mask1,mask2,0);
-            under_attack = kingInCheck(MOVE_BLACK, bit_brd, king_position);
-            MOVE_APPLY (bit_brd, MOVE_BLACK, 2,
+            under_attack = kingInCheck(MOVE_BLACK, piece, king_position,
+                                        new_mover_pieces_mask |
+                                        new_opponent_pieces_mask);
+            MOVE_APPLY (piece, 2,
                         S_PAWN | S_BLACK,p2,0,
                         mask1,mask2,0);
           }
@@ -3998,23 +4170,27 @@ static unsigned long long allBlackPawnSquaresFind (
           mn++;
         } else
         {
-          MOVE_APPLY (bit_brd, MOVE_BLACK, num_masks,
+          MOVE_APPLY (piece, num_masks,
                         S_PAWN | S_BLACK,p2,p3,
                         mask1,mask2, p1_move_mask);
           mn += (last_ply)?
                    allMoveCandidatesLastPlyFind(
                                 MOVE_WHITE,
-                                bit_brd,
+                                piece,
                                 0,
-                                next_castle_eligibility):
+                                next_castle_eligibility,
+                                new_mover_pieces_mask,
+                                new_opponent_pieces_mask):
                    allMovePerft(
                                 MOVE_WHITE,
-                                bit_brd,
+                                piece,
                                 0,
                                 next_castle_eligibility,
                                 depth,
-                                ply);
-          MOVE_APPLY (bit_brd, MOVE_BLACK, num_masks,
+                                ply,
+                                new_mover_pieces_mask,
+                                new_opponent_pieces_mask);
+          MOVE_APPLY (piece, num_masks,
                         S_PAWN | S_BLACK,p2,p3,
                         mask1,mask2, p1_move_mask);
         } 
@@ -4035,23 +4211,27 @@ static unsigned long long allBlackPawnSquaresFind (
               mn++;
             } else
             {
-              MOVE_APPLY (bit_brd, MOVE_BLACK, num_masks,
+              MOVE_APPLY (piece, num_masks,
                             S_PAWN | S_BLACK,p2,p3,
                             mask1,mask2, p1_move_mask);
               mn += (last_ply)?
                    allMoveCandidatesLastPlyFind(
                                 MOVE_WHITE,
-                                bit_brd,
+                                piece,
                                 0,
-                                next_castle_eligibility):
+                                next_castle_eligibility,
+                                new_mover_pieces_mask,
+                                new_opponent_pieces_mask):
                    allMovePerft(
                                 MOVE_WHITE,
-                                bit_brd,
+                                piece,
                                 0,
                                 next_castle_eligibility,
                                 depth,
-                                ply);
-              MOVE_APPLY (bit_brd, MOVE_BLACK, num_masks,
+                                ply,
+                                new_mover_pieces_mask,
+                                new_opponent_pieces_mask);
+              MOVE_APPLY (piece, num_masks,
                             S_PAWN | S_BLACK,p2,p3,
                             mask1,mask2, p1_move_mask);
             } 
@@ -4076,6 +4256,8 @@ static unsigned long long allBlackPawnSquaresFind (
       unsigned char p3 = 0;
       int under_attack = 0;
       castleEligibility_t next_castle_eligibility = castle_eligibility;
+      unsigned long long new_mover_pieces_mask;
+      unsigned long long new_opponent_pieces_mask;
 
       /* For en passant capture we know that the captured piece is a pawn.
       */
@@ -4083,20 +4265,25 @@ static unsigned long long allBlackPawnSquaresFind (
       {
         p2 = S_PAWN | S_WHITE;
         mask2 = 1LLU << en_passant_eligible_pawn;
+        new_mover_pieces_mask = mover_pieces_mask ^ mask1;
+        new_opponent_pieces_mask = opponent_pieces_mask ^ mask2;
         if (TEST_NEEDED)
         {
-          MOVE_APPLY (bit_brd, MOVE_BLACK, 2,
+          MOVE_APPLY (piece, 2,
                         S_PAWN | S_BLACK,p2,0,
                         mask1,mask2,0);
-          under_attack = kingInCheck(MOVE_BLACK, bit_brd, king_position);
-          MOVE_APPLY (bit_brd, MOVE_BLACK, 2,
+          under_attack = kingInCheck(MOVE_BLACK, piece, king_position,
+                            new_mover_pieces_mask |
+                            new_opponent_pieces_mask);
+          MOVE_APPLY (piece, 2,
                         S_PAWN | S_BLACK,p2,0,
                         mask1,mask2,0);
         }
       } else
       {
-        p2 = pieceTypeGet (MOVE_BLACK, p1_move_mask, bit_brd);
+        p2 = pieceTypeGet (MOVE_BLACK, p1_move_mask, piece);
         mask2 = p1_move_mask;
+        new_opponent_pieces_mask = opponent_pieces_mask ^ mask2;
 
         constexpr unsigned long long row0_mask = 0x00000000000000ff;
 
@@ -4113,25 +4300,31 @@ static unsigned long long allBlackPawnSquaresFind (
           num_masks = 3;
           mask1 = from_mask;
           p3 = S_QUEEN | S_BLACK;
+          new_mover_pieces_mask = mover_pieces_mask ^ (mask1 | p1_move_mask);
           if (TEST_NEEDED)
           {
-            MOVE_APPLY (bit_brd, MOVE_BLACK, 3,
+            MOVE_APPLY (piece, 3,
                         S_PAWN | S_BLACK,p2,p3,
                         mask1,mask2,p1_move_mask);
-            under_attack = kingInCheck(MOVE_BLACK, bit_brd, king_position);
-            MOVE_APPLY (bit_brd, MOVE_BLACK, 3,
+            under_attack = kingInCheck(MOVE_BLACK, piece, king_position,
+                                    new_mover_pieces_mask |
+                                    new_opponent_pieces_mask);
+            MOVE_APPLY (piece, 3,
                         S_PAWN | S_BLACK,p2,p3,
                         mask1,mask2,p1_move_mask);
           }
         } else
         {
+          new_mover_pieces_mask = mover_pieces_mask ^ mask1;
           if (TEST_NEEDED)
           {
-            MOVE_APPLY (bit_brd, MOVE_BLACK, 2,
+            MOVE_APPLY (piece, 2,
                         S_PAWN | S_BLACK,p2,0,
                         mask1,mask2,0);
-            under_attack = kingInCheck(MOVE_BLACK, bit_brd, king_position);
-            MOVE_APPLY (bit_brd, MOVE_BLACK, 2,
+            under_attack = kingInCheck(MOVE_BLACK, piece, king_position,
+                                new_mover_pieces_mask |
+                                new_opponent_pieces_mask);
+            MOVE_APPLY (piece, 2,
                         S_PAWN | S_BLACK,p2,0,
                         mask1,mask2,0);
           }
@@ -4158,23 +4351,27 @@ static unsigned long long allBlackPawnSquaresFind (
           mn++;
         } else
         {
-          MOVE_APPLY (bit_brd, MOVE_BLACK, num_masks,
+          MOVE_APPLY (piece, num_masks,
                         S_PAWN | S_BLACK,p2,p3,
                         mask1,mask2, p1_move_mask);
           mn += (last_ply)?
                    allMoveCandidatesLastPlyFind(
                                 MOVE_WHITE,
-                                bit_brd,
+                                piece,
                                 0,
-                                next_castle_eligibility):
+                                next_castle_eligibility,
+                                new_mover_pieces_mask,
+                                new_opponent_pieces_mask):
                    allMovePerft(
                                 MOVE_WHITE,
-                                bit_brd,
+                                piece,
                                 0,
                                 next_castle_eligibility,
                                 depth,
-                                ply);
-          MOVE_APPLY (bit_brd, MOVE_BLACK, num_masks,
+                                ply,
+                                new_mover_pieces_mask,
+                                new_opponent_pieces_mask);
+          MOVE_APPLY (piece, num_masks,
                         S_PAWN | S_BLACK,p2,p3,
                         mask1,mask2, p1_move_mask);
         } 
@@ -4195,23 +4392,27 @@ static unsigned long long allBlackPawnSquaresFind (
               mn++;
             } else
             {
-              MOVE_APPLY (bit_brd, MOVE_BLACK, num_masks,
+              MOVE_APPLY (piece, num_masks,
                             S_PAWN | S_BLACK,p2,p3,
                             mask1,mask2, p1_move_mask);
               mn += (last_ply)?
                    allMoveCandidatesLastPlyFind(
                                 MOVE_WHITE,
-                                bit_brd,
+                                piece,
                                 0,
-                                next_castle_eligibility):
+                                next_castle_eligibility,
+                                new_mover_pieces_mask,
+                                new_opponent_pieces_mask):
                    allMovePerft(
                                 MOVE_WHITE,
-                                bit_brd,
+                                piece,
                                 0,
                                 next_castle_eligibility,
                                 depth,
-                                ply);
-              MOVE_APPLY (bit_brd, MOVE_BLACK, num_masks,
+                                ply,
+                                new_mover_pieces_mask,
+                                new_opponent_pieces_mask);
+              MOVE_APPLY (piece, num_masks,
                             S_PAWN | S_BLACK,p2,p3,
                             mask1,mask2, p1_move_mask);
             } 
@@ -4234,7 +4435,7 @@ static unsigned long long allBlackPawnSquaresFind (
 ******************************************************************************/
 __attribute__((always_inline)) inline
 static unsigned long long allBlackPawnSquaresLastPlyFind (
-                                    bitBrd_t *restrict bit_brd,
+                                    unsigned long long *restrict piece,
                                     const unsigned int en_passant_eligible_pawn,
                                     const unsigned int king_position,
                                     const unsigned long long in_check,
@@ -4243,7 +4444,7 @@ static unsigned long long allBlackPawnSquaresLastPlyFind (
                                     const unsigned long long mover_pieces_mask,
                                     const unsigned long long opponent_pieces_mask)
 {
-  unsigned long long piece_mask = bit_brd->piece[S_PAWN | S_BLACK];
+  unsigned long long piece_mask = piece[S_PAWN | S_BLACK];
 
   const unsigned long long any_color_pieces_mask = opponent_pieces_mask | mover_pieces_mask;
   unsigned long long mn = 0;
@@ -4370,14 +4571,16 @@ static unsigned long long allBlackPawnSquaresLastPlyFind (
         mn += 3;
         if (TEST_NEEDED)
         {
-          MOVE_APPLY (bit_brd, MOVE_BLACK, 2,
+          MOVE_APPLY (piece, 2,
                         S_PAWN | S_BLACK,S_QUEEN | S_BLACK,0,
                         from_mask,p1_move_mask,0);
-          if (kingInCheck(MOVE_BLACK, bit_brd, king_position))
+          if (kingInCheck(MOVE_BLACK, piece, king_position,
+                            (mover_pieces_mask ^ (from_mask | p1_move_mask)) |
+                            opponent_pieces_mask))
           {
             mn -= 4;
           }
-          MOVE_APPLY (bit_brd, MOVE_BLACK, 2,
+          MOVE_APPLY (piece, 2,
                         S_PAWN | S_BLACK,S_QUEEN | S_BLACK,0,
                         from_mask,p1_move_mask,0);
         }
@@ -4391,14 +4594,16 @@ static unsigned long long allBlackPawnSquaresLastPlyFind (
         } else if (move_test_needed)
         {
           const unsigned long long mask1 = p1_move_mask | from_mask;
-          MOVE_APPLY (bit_brd, MOVE_BLACK, 1,
+          MOVE_APPLY (piece, 1,
                         S_PAWN | S_BLACK,0,0,
                         mask1,0,0);
-          if (kingInCheck(MOVE_BLACK, bit_brd, king_position))
+          if (kingInCheck(MOVE_BLACK, piece, king_position,
+                            (mover_pieces_mask ^ mask1) |
+                            opponent_pieces_mask))
           {
             mn--;
           }
-          MOVE_APPLY (bit_brd, MOVE_BLACK, 1,
+          MOVE_APPLY (piece, 1,
                         S_PAWN | S_BLACK,0,0,
                         mask1,0,0);
         }
@@ -4419,14 +4624,16 @@ static unsigned long long allBlackPawnSquaresLastPlyFind (
         } else if (move_test_needed)
         {
           const unsigned long long mask1 = p1_move_mask | from_mask;
-          MOVE_APPLY (bit_brd, MOVE_BLACK, 1,
+          MOVE_APPLY (piece, 1,
                           S_PAWN | S_BLACK,0,0,
                           mask1,0,0);
-          if (kingInCheck(MOVE_BLACK, bit_brd, king_position))
+          if (kingInCheck(MOVE_BLACK, piece, king_position,
+                        (mover_pieces_mask ^ mask1) | 
+                        opponent_pieces_mask))
           {
             mn--;
           }
-          MOVE_APPLY (bit_brd, MOVE_BLACK, 1,
+          MOVE_APPLY (piece, 1,
                           S_PAWN | S_BLACK,0,0,
                           mask1,0,0);
         }
@@ -4458,11 +4665,13 @@ static unsigned long long allBlackPawnSquaresLastPlyFind (
       {
           const unsigned long long mask1 = p1_move_mask | from_mask;
           unsigned long long mask2 = 1LLU << en_passant_eligible_pawn;
-          MOVE_APPLY (bit_brd, MOVE_BLACK, 2,
+          MOVE_APPLY (piece, 2,
                         S_PAWN | S_BLACK,S_PAWN | S_WHITE,0,
                         mask1,mask2,0);
-          under_attack = kingInCheck(MOVE_BLACK, bit_brd, king_position);
-          MOVE_APPLY (bit_brd, MOVE_BLACK, 2,
+          under_attack = kingInCheck(MOVE_BLACK, piece, king_position,
+                                (mover_pieces_mask ^ mask1) |
+                                (opponent_pieces_mask ^ mask2));
+          MOVE_APPLY (piece, 2,
                         S_PAWN | S_BLACK,S_PAWN | S_WHITE,0,
                         mask1,mask2,0);
       } else
@@ -4475,12 +4684,14 @@ static unsigned long long allBlackPawnSquaresLastPlyFind (
           pawn_promotion = 1;
           if (TEST_NEEDED)
           {
-            const unsigned char p2 = pieceTypeGet (MOVE_BLACK, p1_move_mask, bit_brd);
-            MOVE_APPLY (bit_brd, MOVE_BLACK, 3,
+            const unsigned char p2 = pieceTypeGet (MOVE_BLACK, p1_move_mask, piece);
+            MOVE_APPLY (piece, 3,
                         S_PAWN | S_BLACK,p2,S_QUEEN | S_BLACK,
                         from_mask,p1_move_mask,p1_move_mask);
-            under_attack = kingInCheck(MOVE_BLACK, bit_brd, king_position);
-            MOVE_APPLY (bit_brd, MOVE_BLACK, 3,
+            under_attack = kingInCheck(MOVE_BLACK, piece, king_position,
+                                    (mover_pieces_mask ^ (from_mask | p1_move_mask)) |
+                                    (opponent_pieces_mask ^ p1_move_mask));
+            MOVE_APPLY (piece, 3,
                         S_PAWN | S_BLACK,p2,S_QUEEN | S_BLACK,
                         from_mask,p1_move_mask,p1_move_mask);
           }
@@ -4494,12 +4705,14 @@ static unsigned long long allBlackPawnSquaresLastPlyFind (
           } else if (move_test_needed)
           {
             const unsigned long long mask1 = p1_move_mask | from_mask;
-            const unsigned char p2 = pieceTypeGet (MOVE_BLACK, p1_move_mask, bit_brd);
-            MOVE_APPLY (bit_brd, MOVE_BLACK, 2,
+            const unsigned char p2 = pieceTypeGet (MOVE_BLACK, p1_move_mask, piece);
+            MOVE_APPLY (piece, 2,
                         S_PAWN | S_BLACK,p2,0,
                         mask1,p1_move_mask,0);
-            under_attack = kingInCheck(MOVE_BLACK, bit_brd, king_position);
-            MOVE_APPLY (bit_brd, MOVE_BLACK, 2,
+            under_attack = kingInCheck(MOVE_BLACK, piece, king_position,
+                                    (mover_pieces_mask ^ mask1) |
+                                    (opponent_pieces_mask ^ p1_move_mask));
+            MOVE_APPLY (piece, 2,
                         S_PAWN | S_BLACK,p2,0,
                         mask1,p1_move_mask,0);
           }
@@ -4538,11 +4751,13 @@ static unsigned long long allBlackPawnSquaresLastPlyFind (
       {
           const unsigned long long mask1 = p1_move_mask | from_mask;
           const unsigned long long mask2 = 1LLU << en_passant_eligible_pawn;
-          MOVE_APPLY (bit_brd, MOVE_BLACK, 2,
+          MOVE_APPLY (piece, 2,
                         S_PAWN | S_BLACK,S_PAWN | S_WHITE,0,
                         mask1,mask2,0);
-          under_attack = kingInCheck(MOVE_BLACK, bit_brd, king_position);
-          MOVE_APPLY (bit_brd, MOVE_BLACK, 2,
+          under_attack = kingInCheck(MOVE_BLACK, piece, king_position,
+                                    (mover_pieces_mask ^ mask1) |
+                                    (opponent_pieces_mask ^ mask2));
+          MOVE_APPLY (piece, 2,
                         S_PAWN | S_BLACK,S_PAWN | S_WHITE,0,
                         mask1,mask2,0);
       } else
@@ -4554,13 +4769,15 @@ static unsigned long long allBlackPawnSquaresLastPlyFind (
           pawn_promotion = 1;
           if (TEST_NEEDED)
           {
-            const unsigned char p2 = pieceTypeGet (MOVE_BLACK, p1_move_mask, bit_brd);
+            const unsigned char p2 = pieceTypeGet (MOVE_BLACK, p1_move_mask, piece);
 
-            MOVE_APPLY (bit_brd, MOVE_BLACK, 3,
+            MOVE_APPLY (piece, 3,
                         S_PAWN | S_BLACK,p2,S_QUEEN | S_BLACK,
                         from_mask,p1_move_mask,p1_move_mask);
-            under_attack = kingInCheck(MOVE_BLACK, bit_brd, king_position);
-            MOVE_APPLY (bit_brd, MOVE_BLACK, 3,
+            under_attack = kingInCheck(MOVE_BLACK, piece, king_position,
+                                    (mover_pieces_mask ^ (from_mask | p1_move_mask)) |
+                                    (opponent_pieces_mask ^ p1_move_mask));
+            MOVE_APPLY (piece, 3,
                         S_PAWN | S_BLACK,p2,S_QUEEN | S_BLACK,
                         from_mask,p1_move_mask,p1_move_mask);
           }
@@ -4574,13 +4791,15 @@ static unsigned long long allBlackPawnSquaresLastPlyFind (
           } else if (move_test_needed)
           {
             const unsigned long long mask1 = p1_move_mask | from_mask;
-            const unsigned char p2 = pieceTypeGet (MOVE_BLACK, p1_move_mask, bit_brd);
+            const unsigned char p2 = pieceTypeGet (MOVE_BLACK, p1_move_mask, piece);
 
-            MOVE_APPLY (bit_brd, MOVE_BLACK, 2,
+            MOVE_APPLY (piece, 2,
                         S_PAWN | S_BLACK,p2,0,
                         mask1,p1_move_mask,0);
-            under_attack = kingInCheck(MOVE_BLACK, bit_brd, king_position);
-            MOVE_APPLY (bit_brd, MOVE_BLACK, 2,
+            under_attack = kingInCheck(MOVE_BLACK, piece, king_position,
+                                    (mover_pieces_mask ^ mask1) |
+                                    (opponent_pieces_mask ^ p1_move_mask));
+            MOVE_APPLY (piece, 2,
                         S_PAWN | S_BLACK,p2,0,
                         mask1,p1_move_mask,0);
           }
@@ -4658,42 +4877,42 @@ unsigned long long allMoveCandidatesFind (
     if (!attack_helper.in_check && !attack_helper.pin)
     {
       num_moves += whiteKingSquaresFind(king_position, attack_helper.move_candidate_mask,
-                       bit_brd, &dest[num_moves],
+                       bit_brd->piece, &dest[num_moves],
                        castle_eligibility, 1, 0, 0,
-                       opponent_pieces_mask, 0,
+                       mover_pieces_mask, opponent_pieces_mask, 0,
                        king_attack_mask);
 
-      num_moves += allWhitePawnSquaresFind(bit_brd, &dest[num_moves],
+      num_moves += allWhitePawnSquaresFind(bit_brd->piece, &dest[num_moves],
                                     en_passant_eligible_pawn, king_position,
                                     1, 0, 0,
                                     castle_eligibility, 0, 0,
                                     mover_pieces_mask, opponent_pieces_mask, 0);
-      num_moves += allKnightSquaresFind(MOVE_WHITE, bit_brd, &dest[num_moves], king_position,
+      num_moves += allKnightSquaresFind(MOVE_WHITE, bit_brd->piece, &dest[num_moves], king_position,
                                         1, 0, 0, 0,
                                         castle_eligibility, 0, 0,
                                         mover_pieces_mask, opponent_pieces_mask, 0);
-      num_moves += allBishopRookQueenSquaresFind(MOVE_WHITE, bit_brd,
+      num_moves += allBishopRookQueenSquaresFind(MOVE_WHITE, bit_brd->piece,
                                         &dest[num_moves], king_position, 1, 0, 0, 0,
                                         castle_eligibility, 0, 0,
                                         mover_pieces_mask, opponent_pieces_mask, 0);
     } else
     {
       num_moves += whiteKingSquaresFind(king_position, attack_helper.move_candidate_mask,
-                       bit_brd, &dest[num_moves],
+                       bit_brd->piece, &dest[num_moves],
                        castle_eligibility, 1, 0, 0,
-                       opponent_pieces_mask, 0,
+                       mover_pieces_mask, opponent_pieces_mask, 0,
                        king_attack_mask);
 
-      num_moves += allWhitePawnSquaresFind(bit_brd, &dest[num_moves],
+      num_moves += allWhitePawnSquaresFind(bit_brd->piece, &dest[num_moves],
                                     en_passant_eligible_pawn, king_position,
                                     1, attack_helper.in_check, attack_helper.pin,
                                     castle_eligibility, 0, 0,
                                     mover_pieces_mask, opponent_pieces_mask, 0);
-      num_moves += allKnightSquaresFind(MOVE_WHITE, bit_brd, &dest[num_moves], king_position,
+      num_moves += allKnightSquaresFind(MOVE_WHITE, bit_brd->piece, &dest[num_moves], king_position,
                                         1, attack_helper.in_check, attack_helper.pin, attack_helper.move_test_needed,
                                         castle_eligibility, 0, 0, 
                                         mover_pieces_mask, opponent_pieces_mask, 0);
-      num_moves += allBishopRookQueenSquaresFind(MOVE_WHITE, bit_brd,
+      num_moves += allBishopRookQueenSquaresFind(MOVE_WHITE, bit_brd->piece,
                 &dest[num_moves], king_position, 1, attack_helper.in_check, attack_helper.pin, attack_helper.move_test_needed,
                 castle_eligibility, 0, 0,
                 mover_pieces_mask, opponent_pieces_mask, 0);
@@ -4722,42 +4941,42 @@ unsigned long long allMoveCandidatesFind (
     if (!attack_helper.in_check && !attack_helper.pin)
     {
       num_moves += blackKingSquaresFind(king_position, attack_helper.move_candidate_mask,
-                       bit_brd, &dest[num_moves],
+                       bit_brd->piece, &dest[num_moves],
                        castle_eligibility, 1, 0, 0,
-                       opponent_pieces_mask, 0,
+                       mover_pieces_mask, opponent_pieces_mask, 0,
                        king_attack_mask);
 
-      num_moves += allBlackPawnSquaresFind(bit_brd, &dest[num_moves],
+      num_moves += allBlackPawnSquaresFind(bit_brd->piece, &dest[num_moves],
                                     en_passant_eligible_pawn, king_position,
                                     1, 0, 0,
                                     castle_eligibility, 0, 0,
                                     mover_pieces_mask, opponent_pieces_mask, 0);
-      num_moves += allKnightSquaresFind(MOVE_BLACK, bit_brd, &dest[num_moves], king_position,
+      num_moves += allKnightSquaresFind(MOVE_BLACK, bit_brd->piece, &dest[num_moves], king_position,
                                         1, 0, 0, 0,
                                         castle_eligibility, 0, 0,
                                         mover_pieces_mask, opponent_pieces_mask, 0);
-      num_moves += allBishopRookQueenSquaresFind(MOVE_BLACK, bit_brd,
+      num_moves += allBishopRookQueenSquaresFind(MOVE_BLACK, bit_brd->piece,
                                         &dest[num_moves], king_position, 1, 0, 0, 0,
                                         castle_eligibility, 0, 0,
                                         mover_pieces_mask, opponent_pieces_mask, 0);
     } else
     {
       num_moves += blackKingSquaresFind(king_position, attack_helper.move_candidate_mask,
-                       bit_brd, &dest[num_moves],
+                       bit_brd->piece, &dest[num_moves],
                        castle_eligibility, 1, 0, 0,
-                       opponent_pieces_mask, 0,
+                       mover_pieces_mask, opponent_pieces_mask, 0,
                        king_attack_mask);
 
-      num_moves += allBlackPawnSquaresFind(bit_brd, &dest[num_moves],
+      num_moves += allBlackPawnSquaresFind(bit_brd->piece, &dest[num_moves],
                                     en_passant_eligible_pawn, king_position,
                                     1, attack_helper.in_check, attack_helper.pin,
                                     castle_eligibility, 0, 0,
                                     mover_pieces_mask, opponent_pieces_mask, 0);
-      num_moves += allKnightSquaresFind(MOVE_BLACK, bit_brd, &dest[num_moves], king_position,
+      num_moves += allKnightSquaresFind(MOVE_BLACK, bit_brd->piece, &dest[num_moves], king_position,
                                         1, attack_helper.in_check, attack_helper.pin, attack_helper.move_test_needed,
                                         castle_eligibility, 0, 0,
                                         mover_pieces_mask, opponent_pieces_mask, 0);
-      num_moves += allBishopRookQueenSquaresFind(MOVE_BLACK, bit_brd,
+      num_moves += allBishopRookQueenSquaresFind(MOVE_BLACK, bit_brd->piece,
              &dest[num_moves], king_position, 1, attack_helper.in_check, attack_helper.pin, attack_helper.move_test_needed,
              castle_eligibility, 0, 0,
              mover_pieces_mask, opponent_pieces_mask, 0);
@@ -4781,20 +5000,20 @@ unsigned long long allMoveCandidatesFind (
 ******************************************************************************/
 __attribute__((noinline)) 
 unsigned long long allWhiteMovePerft (
-                           bitBrd_t *restrict bit_brd,
+                           unsigned long long *restrict piece,
                            const unsigned int en_passant_eligible_pawn,
                            const castleEligibility_t castle_eligibility,
                            const unsigned int depth,
-                           unsigned int ply)
+                           unsigned int ply,
+                           const unsigned long long mover_pieces_mask,
+                           const unsigned long long opponent_pieces_mask)
 {
   unsigned long long num_moves = 0;
   kingAttackHelper_t attack_helper;
   const unsigned int next_ply_is_last = (depth == ++ply);
-  const unsigned long long  king_mask = bit_brd->piece[S_KING | S_WHITE];
+  const unsigned long long  king_mask = piece[S_KING | S_WHITE];
   const unsigned int   king_position = bitbrdLowestIndexFromMaskGet(king_mask);
   const unsigned long long  king_attack_mask = kingAttack[king_position];
-  const unsigned long long  opponent_pieces_mask = bit_brd->color[MOVE_BLACK];
-  const unsigned long long  mover_pieces_mask = bit_brd->color[MOVE_WHITE];
   const unsigned long long any_color_pieces_mask = opponent_pieces_mask | mover_pieces_mask;
 
     /* Determine if the king is currently in check. When the king is not in check 
@@ -4803,7 +5022,7 @@ unsigned long long allWhiteMovePerft (
     ** parameter is set to the pin mask.
     */
   attack_helper = pinCompute (
-                            MOVE_WHITE, bit_brd->piece, king_position, king_mask,
+                            MOVE_WHITE, piece, king_position, king_mask,
                             en_passant_eligible_pawn,
                             mover_pieces_mask, any_color_pieces_mask,
                             king_attack_mask, castle_eligibility);
@@ -4813,42 +5032,42 @@ unsigned long long allWhiteMovePerft (
       if (next_ply_is_last)
       {
         num_moves += whiteKingSquaresFind(king_position, attack_helper.move_candidate_mask,
-                       bit_brd, 0,
+                       piece, 0,
                        castle_eligibility, 0, depth, ply,
-                       opponent_pieces_mask, 1,
+                       mover_pieces_mask, opponent_pieces_mask, 1,
                        king_attack_mask);
 
-        num_moves += allWhitePawnSquaresFind(bit_brd, 0,
+        num_moves += allWhitePawnSquaresFind(piece, 0,
                                     en_passant_eligible_pawn, king_position,
                                     0, 0, 0,
                                     castle_eligibility, depth, ply,
                                     mover_pieces_mask, opponent_pieces_mask, 1);
-        num_moves += allKnightSquaresFind(MOVE_WHITE, bit_brd, 0, king_position,
+        num_moves += allKnightSquaresFind(MOVE_WHITE, piece, 0, king_position,
                                         0, 0, 0, 0,
                                         castle_eligibility, depth, ply,
                                         mover_pieces_mask, opponent_pieces_mask, 1);
-        num_moves += allBishopRookQueenSquaresFind(MOVE_WHITE, bit_brd,
+        num_moves += allBishopRookQueenSquaresFind(MOVE_WHITE, piece,
                                         0, king_position, 0, 0, 0, 0,
                                         castle_eligibility, depth, ply,
                                         mover_pieces_mask, opponent_pieces_mask, 1);
       } else
       {
         num_moves += whiteKingSquaresFind(king_position, attack_helper.move_candidate_mask,
-                       bit_brd, 0,
+                       piece, 0,
                        castle_eligibility, 0, depth, ply,
-                       opponent_pieces_mask, 0,
+                       mover_pieces_mask, opponent_pieces_mask, 0,
                        king_attack_mask);
 
-        num_moves += allWhitePawnSquaresFind(bit_brd, 0,
+        num_moves += allWhitePawnSquaresFind(piece, 0,
                                     en_passant_eligible_pawn, king_position,
                                     0, 0, 0,
                                     castle_eligibility, depth, ply,
                                     mover_pieces_mask, opponent_pieces_mask, 0);
-        num_moves += allKnightSquaresFind(MOVE_WHITE, bit_brd, 0, king_position,
+        num_moves += allKnightSquaresFind(MOVE_WHITE, piece, 0, king_position,
                                         0, 0, 0, 0,
                                         castle_eligibility, depth, ply,
                                         mover_pieces_mask, opponent_pieces_mask, 0);
-        num_moves += allBishopRookQueenSquaresFind(MOVE_WHITE, bit_brd,
+        num_moves += allBishopRookQueenSquaresFind(MOVE_WHITE, piece,
                                         0, king_position, 0, 0, 0, 0,
                                         castle_eligibility, depth, ply,
                                         mover_pieces_mask, opponent_pieces_mask, 0);
@@ -4856,21 +5075,21 @@ unsigned long long allWhiteMovePerft (
     } else
     {
       num_moves += whiteKingSquaresFind(king_position, attack_helper.move_candidate_mask,
-                       bit_brd, 0,
+                       piece, 0,
                        castle_eligibility, 0, depth, ply,
-                       opponent_pieces_mask, next_ply_is_last,
+                       mover_pieces_mask, opponent_pieces_mask, next_ply_is_last,
                        king_attack_mask);
 
-      num_moves += allWhitePawnSquaresFind(bit_brd, 0,
+      num_moves += allWhitePawnSquaresFind(piece, 0,
                                     en_passant_eligible_pawn, king_position,
                                     0, attack_helper.in_check, attack_helper.pin,
                                     castle_eligibility, depth, ply,
                                     mover_pieces_mask, opponent_pieces_mask, next_ply_is_last);
-      num_moves += allKnightSquaresFind(MOVE_WHITE, bit_brd, 0, king_position,
+      num_moves += allKnightSquaresFind(MOVE_WHITE, piece, 0, king_position,
                                         0, attack_helper.in_check, attack_helper.pin, attack_helper.move_test_needed,
                                         castle_eligibility, depth, ply,
                                         mover_pieces_mask, opponent_pieces_mask, next_ply_is_last);
-      num_moves += allBishopRookQueenSquaresFind(MOVE_WHITE, bit_brd,
+      num_moves += allBishopRookQueenSquaresFind(MOVE_WHITE, piece,
                              0, king_position, 0, attack_helper.in_check, attack_helper.pin, attack_helper.move_test_needed,
                              castle_eligibility, depth, ply,
                              mover_pieces_mask, opponent_pieces_mask, next_ply_is_last);
@@ -4892,20 +5111,20 @@ unsigned long long allWhiteMovePerft (
 ******************************************************************************/
 __attribute__((noinline)) 
 unsigned long long allBlackMovePerft (
-                           bitBrd_t *restrict bit_brd,
+                           unsigned long long *restrict piece,
                            const unsigned int en_passant_eligible_pawn,
                            const castleEligibility_t castle_eligibility,
                            const unsigned int depth,
-                           unsigned int ply)
+                           unsigned int ply,
+                           const unsigned long long mover_pieces_mask,
+                           const unsigned long long opponent_pieces_mask)
 {
   unsigned long long num_moves = 0;
   kingAttackHelper_t attack_helper;
   const unsigned int next_ply_is_last = (depth == ++ply);
-  const unsigned long long  king_mask = bit_brd->piece[S_KING | S_BLACK];
+  const unsigned long long  king_mask = piece[S_KING | S_BLACK];
   const unsigned int   king_position = bitbrdLowestIndexFromMaskGet(king_mask);
   const unsigned long long  king_attack_mask = kingAttack[king_position];
-  const unsigned long long  mover_pieces_mask = bit_brd->color[MOVE_BLACK];
-  const unsigned long long  opponent_pieces_mask = bit_brd->color[MOVE_WHITE];
   const unsigned long long any_color_pieces_mask = opponent_pieces_mask | mover_pieces_mask;
 
     /* Determine if the king is currently in check. When the king is not in check 
@@ -4914,7 +5133,7 @@ unsigned long long allBlackMovePerft (
     ** parameter is set to the pin mask.
     */
     attack_helper = pinCompute (
-                            MOVE_BLACK, bit_brd->piece, king_position, king_mask,
+                            MOVE_BLACK, piece, king_position, king_mask,
                             en_passant_eligible_pawn,
                             mover_pieces_mask, any_color_pieces_mask,
                             king_attack_mask, castle_eligibility);
@@ -4924,42 +5143,42 @@ unsigned long long allBlackMovePerft (
       if (next_ply_is_last)
       {
         num_moves += blackKingSquaresFind(king_position, attack_helper.move_candidate_mask,
-                       bit_brd, 0,
+                       piece, 0,
                        castle_eligibility, 0, depth, ply,
-                       opponent_pieces_mask, 1,
+                       mover_pieces_mask, opponent_pieces_mask, 1,
                        king_attack_mask);
 
-        num_moves += allBlackPawnSquaresFind(bit_brd, 0,
+        num_moves += allBlackPawnSquaresFind(piece, 0,
                                     en_passant_eligible_pawn, king_position,
                                     0, 0, 0,
                                     castle_eligibility, depth, ply,
                                     mover_pieces_mask, opponent_pieces_mask, 1);
-        num_moves += allKnightSquaresFind(MOVE_BLACK, bit_brd, 0, king_position,
+        num_moves += allKnightSquaresFind(MOVE_BLACK, piece, 0, king_position,
                                         0, 0, 0, 0,
                                         castle_eligibility, depth, ply,
                                         mover_pieces_mask, opponent_pieces_mask, 1);
-        num_moves += allBishopRookQueenSquaresFind(MOVE_BLACK, bit_brd,
+        num_moves += allBishopRookQueenSquaresFind(MOVE_BLACK, piece,
                                         0, king_position, 0, 0, 0, 0,
                                         castle_eligibility, depth, ply,
                                         mover_pieces_mask, opponent_pieces_mask, 1);
       } else
       {
         num_moves += blackKingSquaresFind(king_position, attack_helper.move_candidate_mask,
-                       bit_brd, 0,
+                       piece, 0,
                        castle_eligibility, 0, depth, ply,
-                       opponent_pieces_mask, 0,
+                       mover_pieces_mask, opponent_pieces_mask, 0,
                        king_attack_mask);
 
-        num_moves += allBlackPawnSquaresFind(bit_brd, 0,
+        num_moves += allBlackPawnSquaresFind(piece, 0,
                                     en_passant_eligible_pawn, king_position,
                                     0, 0, 0,
                                     castle_eligibility, depth, ply,
                                     mover_pieces_mask, opponent_pieces_mask, 0);
-        num_moves += allKnightSquaresFind(MOVE_BLACK, bit_brd, 0, king_position,
+        num_moves += allKnightSquaresFind(MOVE_BLACK, piece, 0, king_position,
                                         0, 0, 0, 0,
                                         castle_eligibility, depth, ply,
                                         mover_pieces_mask, opponent_pieces_mask, 0);
-        num_moves += allBishopRookQueenSquaresFind(MOVE_BLACK, bit_brd,
+        num_moves += allBishopRookQueenSquaresFind(MOVE_BLACK, piece,
                                         0, king_position, 0, 0, 0, 0,
                                         castle_eligibility, depth, ply,
                                         mover_pieces_mask, opponent_pieces_mask, 0);
@@ -4967,21 +5186,21 @@ unsigned long long allBlackMovePerft (
     } else
     {
       num_moves += blackKingSquaresFind(king_position, attack_helper.move_candidate_mask,
-                       bit_brd, 0,
+                       piece, 0,
                        castle_eligibility, 0, depth, ply,
-                       opponent_pieces_mask, next_ply_is_last,
+                       mover_pieces_mask, opponent_pieces_mask, next_ply_is_last,
                        king_attack_mask);
 
-      num_moves += allBlackPawnSquaresFind(bit_brd, 0,
+      num_moves += allBlackPawnSquaresFind(piece, 0,
                                     en_passant_eligible_pawn, king_position,
                                     0, attack_helper.in_check, attack_helper.pin,
                                     castle_eligibility, depth, ply,
                                     mover_pieces_mask, opponent_pieces_mask, next_ply_is_last);
-      num_moves += allKnightSquaresFind(MOVE_BLACK, bit_brd, 0, king_position,
+      num_moves += allKnightSquaresFind(MOVE_BLACK, piece, 0, king_position,
                                         0, attack_helper.in_check, attack_helper.pin, attack_helper.move_test_needed,
                                         castle_eligibility, depth, ply,
                                         mover_pieces_mask, opponent_pieces_mask, next_ply_is_last);
-      num_moves += allBishopRookQueenSquaresFind(MOVE_BLACK, bit_brd,
+      num_moves += allBishopRookQueenSquaresFind(MOVE_BLACK, piece,
                            0, king_position, 0, attack_helper.in_check, attack_helper.pin, attack_helper.move_test_needed,
                            castle_eligibility, depth, ply,
                            mover_pieces_mask, opponent_pieces_mask, next_ply_is_last);
@@ -4997,7 +5216,7 @@ unsigned long long allBlackMovePerft (
 ******************************************************************************/
 __attribute__((always_inline)) inline
 static unsigned long long allWhiteLastPlyInLine(
-                           bitBrd_t *restrict bit_brd,
+                           unsigned long long *restrict piece,
                            const unsigned int en_passant_eligible_pawn,
                            const unsigned int king_position,
                            const kingAttackHelper_t *const attack_helper,
@@ -5011,13 +5230,13 @@ static unsigned long long allWhiteLastPlyInLine(
   {
     if (0 == en_passant_eligible_pawn)
     {
-      num_moves = allWhitePawnSquaresLastPlyFind(bit_brd,
+      num_moves = allWhitePawnSquaresLastPlyFind(piece,
                                     0, king_position,
                                     0, attack_helper->pin, 0,
                                     mover_pieces_mask, opponent_pieces_mask); 
     } else
     {
-      num_moves = allWhitePawnSquaresLastPlyFind(bit_brd,
+      num_moves = allWhitePawnSquaresLastPlyFind(piece,
                                     en_passant_eligible_pawn, king_position,
                                     0, attack_helper->pin, 0,
                                     mover_pieces_mask, opponent_pieces_mask); 
@@ -5026,23 +5245,23 @@ static unsigned long long allWhiteLastPlyInLine(
     num_moves += allBRQNSquaresLastPlyFindPinned (
                                    MOVE_WHITE,
                                    attack_helper->pin,
-                                   bit_brd->piece,
+                                   piece,
                                    mover_pieces_mask,
                                    mover_pieces_mask | opponent_pieces_mask
                                    );
   } else
   {
-    num_moves = allWhitePawnSquaresLastPlyFind(bit_brd,
+    num_moves = allWhitePawnSquaresLastPlyFind(piece,
                                     en_passant_eligible_pawn, king_position,
                                     attack_helper->in_check, attack_helper->pin, attack_helper->move_test_needed,
                                     mover_pieces_mask, opponent_pieces_mask);
 
-    num_moves += allKnightSquaresLastPlyFind(MOVE_WHITE, bit_brd, king_position,
+    num_moves += allKnightSquaresLastPlyFind(MOVE_WHITE, piece, king_position,
                                         attack_helper->in_check, attack_helper->pin, 
                                         attack_helper->move_test_needed,
                                         mover_pieces_mask, opponent_pieces_mask
                                         );
-    num_moves += allBishopRookQueenSquaresLastPlyFind(MOVE_WHITE, bit_brd,
+    num_moves += allBishopRookQueenSquaresLastPlyFind(MOVE_WHITE, piece,
                                         king_position, attack_helper->in_check, attack_helper->pin, 
                                         attack_helper->move_test_needed,
                                         mover_pieces_mask, opponent_pieces_mask
@@ -5057,14 +5276,14 @@ static unsigned long long allWhiteLastPlyInLine(
 __attribute__((noinline)) 
 //__attribute__((always_inline)) inline
 static unsigned long long allWhiteLastPly(
-                           bitBrd_t *restrict bit_brd,
+                           unsigned long long *restrict piece,
                            const unsigned int en_passant_eligible_pawn,
                            const unsigned int king_position,
                            const kingAttackHelper_t *const attack_helper,
                            const unsigned long long mover_pieces_mask,
                            const unsigned long long opponent_pieces_mask)
 {
-  return allWhiteLastPlyInLine (bit_brd, en_passant_eligible_pawn, 
+  return allWhiteLastPlyInLine (piece, en_passant_eligible_pawn, 
                                 king_position, attack_helper,
                                 mover_pieces_mask, opponent_pieces_mask
                                 );
@@ -5076,7 +5295,7 @@ static unsigned long long allWhiteLastPly(
 ******************************************************************************/
 __attribute__((always_inline)) inline
 static unsigned long long allBlackLastPlyInLine(
-                           bitBrd_t *restrict bit_brd,
+                           unsigned long long *restrict piece,
                            const unsigned int en_passant_eligible_pawn,
                            const unsigned int king_position,
                            const kingAttackHelper_t *const attack_helper,
@@ -5090,13 +5309,13 @@ static unsigned long long allBlackLastPlyInLine(
   {
     if (0 == en_passant_eligible_pawn)
     {
-      num_moves = allBlackPawnSquaresLastPlyFind(bit_brd,
+      num_moves = allBlackPawnSquaresLastPlyFind(piece,
                                     0, king_position,
                                     0, attack_helper->pin, 0,
                                     mover_pieces_mask, opponent_pieces_mask); 
     } else
     {
-      num_moves = allBlackPawnSquaresLastPlyFind(bit_brd,
+      num_moves = allBlackPawnSquaresLastPlyFind(piece,
                                     en_passant_eligible_pawn, king_position,
                                     0, attack_helper->pin, 0,
                                     mover_pieces_mask, opponent_pieces_mask); 
@@ -5105,23 +5324,23 @@ static unsigned long long allBlackLastPlyInLine(
     num_moves += allBRQNSquaresLastPlyFindPinned (
                                    MOVE_BLACK,
                                    attack_helper->pin,
-                                   bit_brd->piece,
+                                   piece,
                                    mover_pieces_mask,
                                    mover_pieces_mask | opponent_pieces_mask
                                    );
   } else
   {
-    num_moves = allBlackPawnSquaresLastPlyFind(bit_brd,
+    num_moves = allBlackPawnSquaresLastPlyFind(piece,
                                     en_passant_eligible_pawn, king_position,
                                     attack_helper->in_check, attack_helper->pin, attack_helper->move_test_needed,
                                     mover_pieces_mask, opponent_pieces_mask); 
 
-    num_moves += allKnightSquaresLastPlyFind(MOVE_BLACK, bit_brd, king_position,
+    num_moves += allKnightSquaresLastPlyFind(MOVE_BLACK, piece, king_position,
                                         attack_helper->in_check, attack_helper->pin,
                                         attack_helper->move_test_needed,
                                         mover_pieces_mask, opponent_pieces_mask
                                         );
-    num_moves += allBishopRookQueenSquaresLastPlyFind(MOVE_BLACK, bit_brd,
+    num_moves += allBishopRookQueenSquaresLastPlyFind(MOVE_BLACK, piece,
                                         king_position, attack_helper->in_check, attack_helper->pin,
                                         attack_helper->move_test_needed,
                                         mover_pieces_mask, opponent_pieces_mask
@@ -5134,14 +5353,14 @@ static unsigned long long allBlackLastPlyInLine(
 __attribute__((noinline))
 //__attribute__((always_inline)) inline
 static unsigned long long allBlackLastPly(
-                           bitBrd_t *restrict bit_brd,
+                           unsigned long long *restrict piece,
                            const unsigned int en_passant_eligible_pawn,
                            const unsigned int king_position,
                            const kingAttackHelper_t *const attack_helper,
                            const unsigned long long mover_pieces_mask,
                            const unsigned long long opponent_pieces_mask)
 {
-  return allBlackLastPlyInLine (bit_brd, en_passant_eligible_pawn,
+  return allBlackLastPlyInLine (piece, en_passant_eligible_pawn,
                                 king_position, attack_helper,
                                 mover_pieces_mask, opponent_pieces_mask
                                 );
@@ -5165,16 +5384,16 @@ static unsigned long long allBlackLastPly(
 __attribute__((always_inline)) inline
 static unsigned long long allMoveCandidatesLastPlyFind (
                            const color_e whose_move,
-                           bitBrd_t *restrict bit_brd,
+                           unsigned long long *restrict piece,
                            const unsigned int en_passant_eligible_pawn,
-                           const castleEligibility_t castle_eligibility)
+                           const castleEligibility_t castle_eligibility,
+                           const unsigned long long opponent_pieces_mask,
+                           const unsigned long long mover_pieces_mask)
 {     
   unsigned long long num_moves = 0;
-  const unsigned long long king_mask = bit_brd->piece [S_KING | (whose_move << 3)];
+  const unsigned long long king_mask = piece [S_KING | (whose_move << 3)];
   const unsigned int king_position = bitbrdLowestIndexFromMaskGet(king_mask);
   const unsigned long long  king_attack_mask = kingAttack[king_position];
-  const unsigned long long mover_pieces_mask = bit_brd->color[whose_move];
-  const unsigned long long opponent_pieces_mask = bit_brd->color[whose_move ^ 1];
   const unsigned long long any_color_pieces_mask = opponent_pieces_mask | mover_pieces_mask;
 
   /* Determine if the king is currently in check. When the king is not in check 
@@ -5183,7 +5402,7 @@ static unsigned long long allMoveCandidatesLastPlyFind (
   ** parameter is set to the pin mask.
   */                              
   const kingAttackHelper_t attack_helper = pinCompute (
-                            whose_move, bit_brd->piece, king_position, king_mask,
+                            whose_move, piece, king_position, king_mask,
                             en_passant_eligible_pawn,
                             mover_pieces_mask, any_color_pieces_mask,
                             king_attack_mask, castle_eligibility);
@@ -5195,12 +5414,12 @@ static unsigned long long allMoveCandidatesLastPlyFind (
   {
     if (!attack_helper.in_check && !attack_helper.pin)
     {
-      num_moves += allBRQNPSquaresLastPlyFindNoTest (MOVE_WHITE, bit_brd->piece, en_passant_eligible_pawn,
+      num_moves += allBRQNPSquaresLastPlyFindNoTest (MOVE_WHITE, piece, en_passant_eligible_pawn,
                                             mover_pieces_mask,opponent_pieces_mask, 
                                             any_color_pieces_mask);
     } else
     {
-      num_moves += allWhiteLastPly (bit_brd, en_passant_eligible_pawn,
+      num_moves += allWhiteLastPly (piece, en_passant_eligible_pawn,
                                     king_position,
                                     &attack_helper, 
                                     mover_pieces_mask, opponent_pieces_mask);
@@ -5209,12 +5428,12 @@ static unsigned long long allMoveCandidatesLastPlyFind (
   {
     if (!attack_helper.in_check && !attack_helper.pin)
     {
-      num_moves +=  allBRQNPSquaresLastPlyFindNoTest (MOVE_BLACK, bit_brd->piece, en_passant_eligible_pawn,
+      num_moves +=  allBRQNPSquaresLastPlyFindNoTest (MOVE_BLACK, piece, en_passant_eligible_pawn,
                                             mover_pieces_mask,opponent_pieces_mask, 
                                             any_color_pieces_mask);
     } else
     {
-      num_moves += allBlackLastPly (bit_brd, en_passant_eligible_pawn,
+      num_moves += allBlackLastPly (piece, en_passant_eligible_pawn,
                                     king_position,
                                     &attack_helper, 
                                     mover_pieces_mask, opponent_pieces_mask);
@@ -5244,8 +5463,11 @@ unsigned long long allMoveCandidatesLastPlyFindApi (
                            const unsigned int en_passant_eligible_pawn,
                            const castleEligibility_t castle_eligibility)
 {
-  return allMoveCandidatesLastPlyFind (whose_move, bit_brd, 
-                            en_passant_eligible_pawn, castle_eligibility);
+  return allMoveCandidatesLastPlyFind (whose_move, bit_brd->piece, 
+                            en_passant_eligible_pawn, castle_eligibility,
+                            bit_brd->color[whose_move ^ 1],
+                            bit_brd->color[whose_move]);
+
 }
 
 /******************************************************************************
@@ -6010,7 +6232,7 @@ void squareUnderAttackGenerate(void)
 **
 ******************************************************************************/
 __attribute__((noinline))
-void bitbrdPrint (const bitBrd_t *restrict bit_brd)
+void bitbrdPrint (const unsigned long long *const piece)
 {
   brd_t brd;
   unsigned char p1;
@@ -6020,7 +6242,7 @@ void bitbrdPrint (const bitBrd_t *restrict bit_brd)
   memset (&brd, 0, sizeof(brd_t));
   for (p1 = 0; p1 < 16; p1++)
   {
-    mask = bit_brd->piece[p1];
+    mask = piece[p1];
     if (0 == mask)
                 continue;
     for (index = 0; index < 64; index++)

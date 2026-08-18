@@ -198,10 +198,12 @@ static unsigned long long positionSearch(const unsigned int depth,
 #endif
     {
       num_positions_at_depth = allMovePerft (last_ply->whose_move, 
-                                        &brd_entry->u.key.bit_brd, 
+                                        brd_entry->u.key.bit_brd.piece, 
                                         brd_entry->u.key.en_passant_eligible_pawn, 
                                         brd_entry->u.key.castle_eligibility, 
-                                        new_depth - 1, 0);
+                                        new_depth - 1, 0,
+                                        brd_entry->u.key.bit_brd.color[last_ply->whose_move ^ 1],
+                                        brd_entry->u.key.bit_brd.color[last_ply->whose_move]);
     }
 
     /* Store the computed number of positions in the database entry. We overwrite 

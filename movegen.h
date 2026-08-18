@@ -255,11 +255,13 @@ unsigned long long allMoveCandidatesFind (
 ** Total number of move candidates in this position. Note that this could be 0.
 ******************************************************************************/
 unsigned long long allWhiteMovePerft (
-                           bitBrd_t *restrict bit_brd,
+                           unsigned long long *restrict piece,
                            const unsigned int en_passant_eligible_pawn,
                            const castleEligibility_t castle_eligibility,
                            const unsigned int depth,
-                           const unsigned int ply);
+                           const unsigned int ply,
+                           const unsigned long long mover_pieces_mask,
+                           const unsigned long long opponent_pieces_mask);
 
 /******************************************************************************
 ** Generate a list of all black piece move candidates in the position.
@@ -272,11 +274,13 @@ unsigned long long allWhiteMovePerft (
 ** Total number of move candidates in this position. Note that this could be 0.
 ******************************************************************************/
 unsigned long long allBlackMovePerft (
-                           bitBrd_t *restrict bit_brd,
+                           unsigned long long *restrict piece,
                            const unsigned int en_passant_eligible_pawn,
                            const castleEligibility_t castle_eligibility,
                            const unsigned int depth,
-                           const unsigned int ply);
+                           const unsigned int ply,
+                           const unsigned long long mover_pieces_mask,
+                           const unsigned long long opponent_pieces_mask);
 
 /******************************************************************************
 ** Generate a list of all move candidates in the position.
@@ -292,17 +296,22 @@ unsigned long long allBlackMovePerft (
 __attribute__((always_inline)) inline
 unsigned long long allMovePerft (
                            const color_e whose_move,
-                           bitBrd_t *restrict bit_brd,
+                           unsigned long long *restrict piece,
                            const unsigned int en_passant_eligible_pawn,
                            const castleEligibility_t castle_eligibility,
                            const unsigned int depth,
-                           const unsigned int ply)
+                           const unsigned int ply,
+                           const unsigned long long opponent_pieces_mask,
+                           const unsigned long long mover_pieces_mask)
+
 {
   return (whose_move == MOVE_WHITE)?
-                allWhiteMovePerft (bit_brd, en_passant_eligible_pawn,
-                                castle_eligibility, depth, ply):
-                allBlackMovePerft (bit_brd, en_passant_eligible_pawn,
-                                castle_eligibility, depth, ply);
+                allWhiteMovePerft (piece, en_passant_eligible_pawn,
+                                castle_eligibility, depth, ply,
+                                mover_pieces_mask, opponent_pieces_mask):
+                allBlackMovePerft (piece, en_passant_eligible_pawn,
+                                castle_eligibility, depth, ply,
+                                mover_pieces_mask, opponent_pieces_mask);
 }
 
 
@@ -322,7 +331,10 @@ unsigned long long allMovePerft (
 ******************************************************************************/
 int kingInCheckApi(const color_e whose_move,
                              const bitBrd_t *restrict bit_brd,
-                             const unsigned int index);
+                             const unsigned int index,
+                             const unsigned long long mover_pieces_mask,
+                             const unsigned long long opponent_pieces_mask);
+
 
 /******************************************************************************
 ** Generate a list of all move candidates in the position.
@@ -353,7 +365,7 @@ unsigned long long allMoveCandidatesLastPlyFindApi (
 ** This function is ony used for debugging.
 **
 ******************************************************************************/
-void bitbrdPrint (const bitBrd_t *restrict bit_brd);
+void bitbrdPrint (const unsigned long long *const piece);
 
 
 #endif /* MOVEGEN_H_INCLUDED */

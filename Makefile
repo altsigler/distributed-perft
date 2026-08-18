@@ -5,10 +5,10 @@ OPTFLAG=-O3
 CFLAG=-std=c23 -Wall -Wextra -Werror -Wshadow -Wconversion
 
 DEBUG=-g
-#DEBUG=-g -O0
-#DEBUG=-g -O0 -fsanitize=address -fsanitize=undefined
+#DEBUG=-g -Og
+#DEBUG=-g -Og -fsanitize=address -fsanitize=undefined
 #DEBUG= -fanalyzer
-#DEBUG=-g -O0 --coverage
+#DEBUG=-g -Og --coverage
 
 #
 # Enable static analysis. Must be used with gcc-10 or newer compilers.

@@ -448,7 +448,7 @@ void run_tests(void)
       }
     }
 
-    bitbrdPrint (&bit_brd);
+    bitbrdPrint (bit_brd.piece);
   }
 
   /* Perft tests.
