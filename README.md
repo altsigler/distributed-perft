@@ -55,8 +55,7 @@ Ply 4 (72,078/46,444), Ply 5 (822,518/974/871), Ply 6 (9,417,683/10,779,500),
 Ply 7 (96,400,335/160,579,818), Ply 8 (988,192,872/1,593,495,486), 
 Ply 9 (XXX/YYY).
 
-In order to compute "perft 14" and higher, I use the "ply 9" position tree. I rented time on 
-a 1TB server to generate the ply 9 position tree. Once the tree is generated it can 
+Once the tree for ply 9 is generated it can 
 be used on 128GB machine to perform workload generartion and final perft count 
 aggregation. The single core move counting machines can have just 1GB of DRAM and
 are not impacted by the position tree size.
