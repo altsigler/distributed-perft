@@ -150,6 +150,18 @@ void code_coverage_test(void)
   assert (400 == bytebrdPerft (2, &brd, &info, 1));
   assert (0 == bytebrdPerft (0, &brd, &info, 1));
 
+#if 1 
+  /* Miscelaneous pin tests.
+  */
+  brdutilFenToBrdConvert ("r3k2r/p1pb1pp1/2p5/4q3/Q1PNpPnp/2N1P2K/PB1P2P1/R4R2 b kq f3  0 1",
+                        &brd, &info);
+  brdutilFenPrint (&brd, &info);
+  brdutilBoardInfoPrint (&info);
+  brdutilBoardPrint (&brd);
+  assert (2'336'083 == bytebrdPerft (4, &brd, &info, 0));
+
+#endif
+
 #if 1
   /* Double pin tests.
   */
@@ -183,6 +195,15 @@ void code_coverage_test(void)
 
 #if 1
   brdutilFenToBrdConvert ("n1n5/PPPk4/8/8/8/8/4Kppp/5N1N b - - 0 1",
+                        &brd, &info);
+  brdutilFenPrint (&brd, &info);
+  brdutilBoardInfoPrint (&info);
+  brdutilBoardPrint (&brd);
+  assert (71179139 == bytebrdPerft (6, &brd, &info, 0)); // Expected: 71,179,139
+#endif
+
+#if 1
+  brdutilFenToBrdConvert ("n1n5/PPPk4/8/8/8/8/4Kppp/5N1N w - - 0 1",
                         &brd, &info);
   brdutilFenPrint (&brd, &info);
   brdutilBoardInfoPrint (&info);

@@ -785,153 +785,19 @@ static unsigned long long kingSquaresLastPlyFind (
 }
 
 /******************************************************************************
-** Find all eligible square to which the Bishop, Rook, and Queen can move.
-** This variant of the move counting function handles Bishop/Rook/Queen/Knight
-** when a single pin is detected. 
-** The position cannot have any checks or multiple pins.
+** Count all eligible squares to which the Pawn, Knight, Bishop, Rook, 
+** and Queen can move. 
+** This function handles move counting when there are no checks or pins, and 
+** when one piece is pinned.
 **
-** Return Values:
-******************************************************************************/
-__attribute__((always_inline)) inline
-//__attribute__((noinline)) 
-static unsigned long long allBRQNSquaresLastPlyFindPinned (
-                                   const color_e whose_move,
-                                   const unsigned long long pin,
-                                   const unsigned long long *restrict piece,
-                                   const unsigned long long mover_pieces_mask,
-                                   const unsigned long long any_color_pieces_mask)
-{
-  unsigned long long mn = 0;
-  unsigned long long knight_piece_mask = piece[S_KNIGHT | (whose_move << 3)];
-  unsigned long long bishop_piece_mask = piece[S_BISHOP | (whose_move << 3)];
-  unsigned long long rook_piece_mask = piece[S_ROOK | (whose_move << 3)];
-  unsigned long long queen_piece_mask = piece[S_QUEEN | (whose_move << 3)];
-    
-
-  while (bishop_piece_mask)
-  {
-    const unsigned int piece_index = bitbrdLowestIndexFromMaskGet(bishop_piece_mask);
-#if defined(USE_BMI)
-    const unsigned long long piece_mask = _blsi_u64(bishop_piece_mask);
-    bishop_piece_mask = _blsr_u64(bishop_piece_mask);
-#else
-    const unsigned long long piece_mask = 1LLU << piece_index;
-    bishop_piece_mask ^= piece_mask;
-#endif
-
-
-    const unsigned long long lookup_index = 
-                   lookupKeyCompute (any_color_pieces_mask, diagonalAttack[piece_index]);
-
-    unsigned long long open_and_visible_mask = diagonalVisibilityMap[piece_index][lookup_index] &
-                                                      ~mover_pieces_mask;
-
-    if (pin & piece_mask)
-    {
-      open_and_visible_mask &= pin;  
-    }
-
-    /* Add all open and visible opponent squares to the move count.
-    */
-    mn += (unsigned long long) __builtin_popcountll (open_and_visible_mask);
-
-  }
-
-  while (rook_piece_mask)
-  {
-    const unsigned int piece_index = bitbrdLowestIndexFromMaskGet(rook_piece_mask);
-#if defined(USE_BMI)
-    const unsigned long long piece_mask = _blsi_u64(rook_piece_mask);
-    rook_piece_mask = _blsr_u64(rook_piece_mask);
-#else
-    const unsigned long long piece_mask = 1LLU << piece_index;
-    rook_piece_mask ^= piece_mask; 
-#endif
-
-    const unsigned long long lookup_index = 
-                   lookupKeyCompute (any_color_pieces_mask, udlrAttack[piece_index]);
-
-    unsigned long long open_and_visible_mask = udlrVisibilityMap[piece_index][lookup_index] &
-                                                      ~mover_pieces_mask;
-
-    if (pin & piece_mask)
-    {
-      open_and_visible_mask &= pin;  
-    }
-
-    /* Add all open and visible opponent squares to the move count.
-    */
-    mn += (unsigned long long) __builtin_popcountll (open_and_visible_mask);
-
-  }
-
-  while (knight_piece_mask)
-  {
-    /* Any squares that already have same color pieces must be excluded from the
-    ** move candidates.
-    */
-    const unsigned int piece_index = bitbrdLowestIndexFromMaskGet(knight_piece_mask);
-    const unsigned long long move_candidate_mask =
-                knightAttack[piece_index] &
-                      ~mover_pieces_mask;
-
-#if defined(USE_BMI)
-    const unsigned long long piece_mask = _blsi_u64(knight_piece_mask);
-    knight_piece_mask = _blsr_u64(knight_piece_mask);
-#else
-    const unsigned long long piece_mask = 1LLU << piece_index;
-    knight_piece_mask ^= piece_mask;
-#endif
-
-    /* Pinned knight cannot move.
-    */
-    if (0 == (pin & piece_mask))
-    {
-      /* If Knight is not pinned and king is not in check
-      ** then we can take a short cut for counting destination squares.
-      */
-      mn += (unsigned long long) __builtin_popcountll (move_candidate_mask);
-
-    }
-  }
-
-  while (queen_piece_mask)
-  {
-    const unsigned int piece_index = bitbrdLowestIndexFromMaskGet(queen_piece_mask);
-#if defined(USE_BMI)
-    const unsigned long long piece_mask = _blsi_u64(queen_piece_mask);
-    queen_piece_mask = _blsr_u64(queen_piece_mask);
-#else
-    const unsigned long long piece_mask = 1LLU << piece_index;
-    queen_piece_mask ^= piece_mask;
-#endif
-
-    const aggregateAttack_t *const aggregateAttackVal = &aggregateAttack[piece_index];
-    const unsigned long long lookup_index = 
-                   lookupKeyCompute (any_color_pieces_mask, aggregateAttackVal->diagonalAttack);
-    const unsigned long long udlr_lookup_index = 
-                   lookupKeyCompute (any_color_pieces_mask, aggregateAttackVal->udlrAttack);
-
-    unsigned long long open_and_visible_mask = (udlrVisibilityMap[piece_index][udlr_lookup_index] |
-                                                diagonalVisibilityMap[piece_index][lookup_index]) &
-                                                        ~mover_pieces_mask;
-
-    if (pin & piece_mask)
-    {
-      open_and_visible_mask &= pin;  
-    }
-
-    /* Add all open and visible opponent squares to the move count.
-    */
-    mn += (unsigned long long) __builtin_popcountll (open_and_visible_mask);
-
-  }
-
-  return mn;
-}
-/******************************************************************************
-** Find all eligible square to which the Bishop, Rook, and Queen can move.
+** The pin conditions are tested prior to calling this function, so the 
+** pin_mode flag is set at compile time, which means that testing the pin_mode 
+** flag costs 0 CPU cycles inside this function.
 **
+** The valid settings for the pin_mode flag are:
+**  0 - No Pin
+**  1 - Pawn is Pinned.  
+**  2 - Some other piece besides the pawn is pinned.
 **
 ** Return Values:
 ******************************************************************************/
@@ -943,7 +809,9 @@ static unsigned long long allBRQNPSquaresLastPlyFindNoTest (
                                    const unsigned int en_passant_eligible_pawn,
                                    const unsigned long long mover_pieces_mask,
                                    const unsigned long long opponent_pieces_mask,
-                                   const unsigned long long any_color_pieces_mask)
+                                   const unsigned long long any_color_pieces_mask,
+                                   const unsigned int pin_mode,
+                                   const unsigned long long pin_mask)
 {
   unsigned long long mn = 0;
   unsigned long long piece_mask = piece[S_PAWN | (whose_move << 3)];
@@ -957,8 +825,14 @@ static unsigned long long allBRQNPSquaresLastPlyFindNoTest (
   {
     const unsigned int piece_index = bitbrdLowestIndexFromMaskGet(bishop_piece_mask);
 #if defined(USE_BMI)
+    unsigned long long current_piece;
+    if (pin_mode > 1)
+    {
+      current_piece = _blsi_u64(bishop_piece_mask);
+    }
     bishop_piece_mask = _blsr_u64(bishop_piece_mask);
 #else
+    const unsigned long long current_piece = 1LLU << piece_index;
     bishop_piece_mask ^= 1LLU << piece_index;
 #endif
 
@@ -966,8 +840,16 @@ static unsigned long long allBRQNPSquaresLastPlyFindNoTest (
     const unsigned long long lookup_index = 
                    lookupKeyCompute (any_color_pieces_mask, diagonalAttack[piece_index]);
 
-    const unsigned long long open_and_visible_mask = diagonalVisibilityMap[piece_index][lookup_index] &
+    unsigned long long open_and_visible_mask = diagonalVisibilityMap[piece_index][lookup_index] &
                                                       ~mover_pieces_mask;
+
+    if (pin_mode > 1)
+    {
+      if (pin_mask & current_piece)
+      {
+        open_and_visible_mask &= pin_mask;  
+      }
+    }
 
     /* Add all open and visible opponent squares to the move count.
     */
@@ -979,17 +861,30 @@ static unsigned long long allBRQNPSquaresLastPlyFindNoTest (
   {
     const unsigned int piece_index = bitbrdLowestIndexFromMaskGet(rook_piece_mask);
 #if defined(USE_BMI)
+    unsigned long long current_piece;
+    if (pin_mode > 1)
+    {
+      current_piece = _blsi_u64(rook_piece_mask);
+    }
     rook_piece_mask = _blsr_u64(rook_piece_mask);
 #else
+    const unsigned long long current_piece = 1LLU << piece_index;
     rook_piece_mask ^= 1LLU << piece_index;
 #endif
 
     const unsigned long long lookup_index = 
                    lookupKeyCompute (any_color_pieces_mask, udlrAttack[piece_index]);
 
-    const unsigned long long open_and_visible_mask = udlrVisibilityMap[piece_index][lookup_index] &
+    unsigned long long open_and_visible_mask = udlrVisibilityMap[piece_index][lookup_index] &
                                                       ~mover_pieces_mask;
 
+    if (pin_mode > 1)
+    {
+      if (pin_mask & current_piece)
+      {
+        open_and_visible_mask &= pin_mask;  
+      }
+    }
     /* Add all open and visible opponent squares to the move count.
     */
     mn += (unsigned long long) __builtin_popcountll (open_and_visible_mask);
@@ -1006,16 +901,30 @@ static unsigned long long allBRQNPSquaresLastPlyFindNoTest (
                       ~mover_pieces_mask;
 
 #if defined(USE_BMI)
+    unsigned long long current_piece;
+    if (pin_mode > 1)
+    {
+      current_piece = _blsi_u64(knight_piece_mask);
+    }
     knight_piece_mask = _blsr_u64(knight_piece_mask);
 #else
     const unsigned int piece_index = bitbrdLowestIndexFromMaskGet(knight_piece_mask);
-    knight_piece_mask ^= 1LLU << piece_index;
+    const unsigned long long current_piece = 1LLU << piece_index;
+    knight_piece_mask ^= current_piece;
 #endif
 
-    /* If Knight is not pinned and king is not in check
-    ** then we can take a short cut for counting destination squares.
-    */
-    mn += (unsigned long long) __builtin_popcountll (move_candidate_mask);
+    if (pin_mode > 1)
+    {
+      /* Pinned knights cannot move.
+      */
+      if (0 == (pin_mask & current_piece))
+      {
+        mn += (unsigned long long) __builtin_popcountll (move_candidate_mask);
+      }
+    } else
+    {
+      mn += (unsigned long long) __builtin_popcountll (move_candidate_mask);
+    }
 
   }
 
@@ -1023,8 +932,14 @@ static unsigned long long allBRQNPSquaresLastPlyFindNoTest (
   {
     const unsigned int piece_index = bitbrdLowestIndexFromMaskGet(queen_piece_mask);
 #if defined(USE_BMI)
+    unsigned long long current_piece;
+    if (pin_mode > 1)
+    {
+      current_piece = _blsi_u64(queen_piece_mask);
+    }
     queen_piece_mask = _blsr_u64(queen_piece_mask);
 #else
+    const unsigned long long current_piece = 1LLU << piece_index;
     queen_piece_mask ^= 1LLU << piece_index;
 #endif
 
@@ -1034,10 +949,17 @@ static unsigned long long allBRQNPSquaresLastPlyFindNoTest (
     const unsigned long long udlr_lookup_index = 
                    lookupKeyCompute (any_color_pieces_mask, aggregateAttackVal->udlrAttack);
 
-    const unsigned long long open_and_visible_mask = (udlrVisibilityMap[piece_index][udlr_lookup_index] |
+    unsigned long long open_and_visible_mask = (udlrVisibilityMap[piece_index][udlr_lookup_index] |
                                                 diagonalVisibilityMap[piece_index][lookup_index]) &
                                                         ~mover_pieces_mask;
 
+    if (pin_mode > 1)
+    {
+      if (pin_mask & current_piece)
+      {
+        open_and_visible_mask &= pin_mask;  
+      }
+    }
     /* Add all open and visible opponent squares to the move count.
     */
     mn += (unsigned long long) __builtin_popcountll (open_and_visible_mask);
@@ -1051,6 +973,16 @@ static unsigned long long allBRQNPSquaresLastPlyFindNoTest (
 
     // Remove pawns eligible for promotion.
     unsigned long long shortcut_pawns = (piece_mask & ~row6_mask);
+    unsigned long long pinned_pawn;
+
+    if (pin_mode == 1)
+    {
+      /* Remove pinned pawn from the pawn mask. The pinned pawns are checked separately.
+      */
+      pinned_pawn = piece_mask & pin_mask;
+      shortcut_pawns &= ~pin_mask;
+      piece_mask &= ~pin_mask;
+    }
 
     if (unlikely(en_passant_eligible_pawn))
     {
@@ -1094,29 +1026,121 @@ static unsigned long long allBRQNPSquaresLastPlyFindNoTest (
     // The remaining pawns can move forward two squares.
     mn += (unsigned long long) __builtin_popcountll (shortcut_pawns);
 
-    if (likely(!piece_mask))
+    if (unlikely(0 != piece_mask))
     {
-      return mn;
+      /* At this point the only pawns left in the piece_mask are pawns that are
+      ** eligible for promotion.
+      ** Compute the move counts for these pawns.
+      */
+      capture_1 = piece_mask & ((opponent_pieces_mask & ~col0_mask) >> 9);
+      capture_2 = piece_mask & ((opponent_pieces_mask & ~col7_mask) >> 7);
+
+      /* Add 4 moves for each capture.
+      */
+      mn += (unsigned long long) (__builtin_popcountll (capture_1) << 2);
+      mn += (unsigned long long) (__builtin_popcountll (capture_2) << 2);
+
+      /* Determine which pawns can move one square forward
+      ** and add four moves per pawn.
+      */
+      piece_mask &= ~(any_color_pieces_mask >> 8);
+      mn += (unsigned long long) (__builtin_popcountll (piece_mask) << 2);
     }
 
-
-    /* At this point the only pawns left in the piece_mask are pawns that are
-    ** eligible for promotion.
-    ** Compute the move counts for these pawns.
+    /* Handle pinned pawn.
     */
-    capture_1 = piece_mask & ((opponent_pieces_mask & ~col0_mask) >> 9);
-    capture_2 = piece_mask & ((opponent_pieces_mask & ~col7_mask) >> 7);
+    if (pin_mode == 1)
+    {
+      piece_mask = pinned_pawn;
+      shortcut_pawns = (piece_mask & ~row6_mask);
 
-    /* Add 4 moves for each capture.
-    */
-    mn += (unsigned long long) (__builtin_popcountll (capture_1) << 2);
-    mn += (unsigned long long) (__builtin_popcountll (capture_2) << 2);
+      if (unlikely(en_passant_eligible_pawn))
+      {
+        // Determine whch pawns can perform an en passant capture.
+        const unsigned long long ep_mask = 1LLU << en_passant_eligible_pawn;
+        const unsigned long long ep_capable_1 = shortcut_pawns & ((ep_mask & ~col0_mask) >> 1);
+        const unsigned long long ep_capable_2 = shortcut_pawns & ((ep_mask & ~col7_mask) << 1);
 
-    /* Determine which pawns can move one square forward
-    ** and add four moves per pawn.
-    */
-    piece_mask &= ~(any_color_pieces_mask >> 8);
-    mn += (unsigned long long) (__builtin_popcountll (piece_mask) << 2);
+        if (ep_capable_1)
+        {
+          /* Pawn must move one rank forward and to the left. Make sure that the destination
+          ** square is in the pin mask.
+          */
+          if ((shortcut_pawns << 9) & pin_mask)
+          {
+            mn++;
+          }
+        }
+
+        if (ep_capable_2)
+        {
+          /* Pawn must move one rank forward and to the right. Make sure that the destination
+          ** square is in the pin mask.
+          */
+          if ((shortcut_pawns << 7) & pin_mask)
+          {
+            mn++;
+          }
+        }
+      }
+
+      // Determine if pinned pawn can perform a capture move.
+      // The only way captures can happen is if the pawn caputures the pinning piece.
+      unsigned long long pinning_piece = opponent_pieces_mask & pin_mask;
+      capture_1 = shortcut_pawns & ((pinning_piece & ~col0_mask) >> 9);
+      capture_2 = shortcut_pawns & ((pinning_piece & ~col7_mask) >> 7);
+
+      mn += (unsigned long long) __builtin_popcountll (capture_1);
+      mn += (unsigned long long) __builtin_popcountll (capture_2);
+
+      /* Adjust piece mask to contain only those pawns that can't
+      ** be handled with a shortcut.
+      */
+      piece_mask ^= shortcut_pawns;
+
+      /* Determine which pawns can move one square forward.
+      ** The destination square must be empty in order for a pawn to be
+      ** eligible for that move.
+      */
+      shortcut_pawns &= ~(any_color_pieces_mask >> 8);
+
+      // The remaining pawns can move forward one square if that
+      // square is in the pin mask.
+      if ((shortcut_pawns << 8) & pin_mask)
+      {
+        mn += (unsigned long long) __builtin_popcountll (shortcut_pawns);
+      }
+
+      // Only pawns in row 1 can move forward two squares.
+      // The second square must be empty in order for a pawn to move two rows.
+      shortcut_pawns &= row1_mask & ~(any_color_pieces_mask >> 16);
+
+      // The remaining pawns can move forward two squares.
+      if ((shortcut_pawns << 16) & pin_mask)
+      {
+        mn += (unsigned long long) __builtin_popcountll (shortcut_pawns);
+      }
+
+      if (unlikely(0 != piece_mask))
+      {
+        /* At this point the only pawns left in the piece_mask are pawns that are
+        ** eligible for promotion.
+        ** Compute the move counts for these pawns.
+        */
+        capture_1 = piece_mask & ((pinning_piece & ~col0_mask) >> 9);
+        capture_2 = piece_mask & ((pinning_piece & ~col7_mask) >> 7);
+
+        /* Add 4 moves for each capture.
+        */
+        mn += (unsigned long long) (__builtin_popcountll (capture_1) << 2);
+        mn += (unsigned long long) (__builtin_popcountll (capture_2) << 2);
+
+        /* Note that a pinned white pawn in rank 7 can never move forward because 
+        ** the forward square is either blocked by the pinning piece or 
+        ** moving the pawn would expose the king.
+        */
+      }
+    }
 
   } 
 
@@ -1127,7 +1151,16 @@ static unsigned long long allBRQNPSquaresLastPlyFindNoTest (
 
     // Remove pawns eligible for promotion.
     unsigned long long shortcut_pawns = (piece_mask & ~row1_mask);
+    unsigned long long pinned_pawn;
 
+    if (pin_mode == 1)
+    {
+      /* Remove pinned pawn from the pawn mask. The pinned pawns are checked separately.
+      */
+      pinned_pawn = piece_mask & pin_mask;
+      shortcut_pawns &= ~pin_mask;
+      piece_mask &= ~pin_mask;
+    }
 
     // Determine whch pawns can perform an en passant capture.
     if (unlikely(en_passant_eligible_pawn))
@@ -1173,24 +1206,117 @@ static unsigned long long allBRQNPSquaresLastPlyFindNoTest (
     // The remaining pawns can move forward two squares.
     mn += (unsigned long long) __builtin_popcountll (shortcut_pawns);
 
-    if (likely(!piece_mask))
+    if (unlikely(0 != piece_mask))
     {
-      return mn;
+      capture_1 = piece_mask & ((opponent_pieces_mask & ~col0_mask) << 7);
+      capture_2 = piece_mask & ((opponent_pieces_mask & ~col7_mask) << 9);
+
+
+      mn += (unsigned long long) (__builtin_popcountll (capture_1) << 2);
+      mn += (unsigned long long) (__builtin_popcountll (capture_2) << 2);
+
+      piece_mask &= ~(any_color_pieces_mask << 8);
+
+      // The remaining pawns can move forward one square.
+      mn += (unsigned long long) (__builtin_popcountll (piece_mask) << 2);
     }
 
-    capture_1 = piece_mask & ((opponent_pieces_mask & ~col0_mask) << 7);
-    capture_2 = piece_mask & ((opponent_pieces_mask & ~col7_mask) << 9);
+    /* Handle pinned pawn.
+    */
+    if (pin_mode == 1)
+    {
+      piece_mask = pinned_pawn;
+      shortcut_pawns = (piece_mask & ~row1_mask);
 
+      if (unlikely(en_passant_eligible_pawn))
+      {
+        // Determine whch pawns can perform an en passant capture.
+        const unsigned long long ep_mask = 1LLU << en_passant_eligible_pawn;
+        const unsigned long long ep_capable_1 = shortcut_pawns & ((ep_mask & ~col0_mask) >> 1);
+        const unsigned long long ep_capable_2 = shortcut_pawns & ((ep_mask & ~col7_mask) << 1);
 
-    mn += (unsigned long long) (__builtin_popcountll (capture_1) << 2);
-    mn += (unsigned long long) (__builtin_popcountll (capture_2) << 2);
+        if (ep_capable_1)
+        {
+          /* Pawn must move one rank forward and to the left. Make sure that the destination
+          ** square is in the pin mask.
+          */
+          if ((shortcut_pawns >> 7) & pin_mask)
+          {
+            mn++;
+          }
+        }
 
-    piece_mask &= ~(any_color_pieces_mask << 8);
+        if (ep_capable_2)
+        {
+          /* Pawn must move one rank forward and to the right. Make sure that the destination
+          ** square is in the pin mask.
+          */
+          if ((shortcut_pawns >> 9) & pin_mask)
+          {
+            mn++;
+          }
+        }
+      }
 
-    // The remaining pawns can move forward one square.
-    mn += (unsigned long long) (__builtin_popcountll (piece_mask) << 2);
+      // Determine if pinned pawn can perform a capture move.
+      // The only way captures can happen is if the pawn caputures the pinning piece.
+      unsigned long long pinning_piece = opponent_pieces_mask & pin_mask;
+      capture_1 = shortcut_pawns & ((pinning_piece & ~col0_mask) << 7);
+      capture_2 = shortcut_pawns & ((pinning_piece & ~col7_mask) << 9);
 
+      mn += (unsigned long long) __builtin_popcountll (capture_1);
+      mn += (unsigned long long) __builtin_popcountll (capture_2);
+
+      /* Adjust piece mask to contain only those pawns that can't
+      ** be handled with a shortcut.
+      */
+      piece_mask ^= shortcut_pawns;
+
+      /* Determine which pawns can move one square forward.
+      ** The destination square must be empty in order for a pawn to be
+      ** eligible for that move.
+      */
+      shortcut_pawns &= ~(any_color_pieces_mask << 8);
+
+      // The remaining pawns can move forward one square if that
+      // square is in the pin mask.
+      if ((shortcut_pawns >> 8) & pin_mask)
+      {
+        mn += (unsigned long long) __builtin_popcountll (shortcut_pawns);
+      }
+
+      // Only pawns in row 6 can move forward two squares.
+      // The second square must be empty in order for a pawn to move two rows.
+      shortcut_pawns &= row6_mask & ~(any_color_pieces_mask << 16);
+
+      // The remaining pawns can move forward two squares.
+      if ((shortcut_pawns >> 16) & pin_mask)
+      {
+        mn += (unsigned long long) __builtin_popcountll (shortcut_pawns);
+      }
+
+      if (unlikely(0 != piece_mask))
+      {
+        /* At this point the only pawns left in the piece_mask are pawns that are
+        ** eligible for promotion.
+        ** Compute the move counts for these pawns.
+        */
+        capture_1 = piece_mask & ((pinning_piece & ~col0_mask) << 7);
+        capture_2 = piece_mask & ((pinning_piece & ~col7_mask) << 9);
+
+        /* Add 4 moves for each capture.
+        */
+        mn += (unsigned long long) (__builtin_popcountll (capture_1) << 2);
+        mn += (unsigned long long) (__builtin_popcountll (capture_2) << 2);
+
+        /* Note that a pinned black pawn in rank 2 can never move forward because 
+        ** the forward square is either blocked by the pinning piece or 
+        ** moving the pawn would expose the king.
+        */
+      }
+    }
   }
+
 
   return mn;
 }
@@ -5224,47 +5350,21 @@ static unsigned long long allWhiteLastPlyInLine(
   unsigned long long num_moves;
 
 
-  if (!attack_helper->in_check && !attack_helper->move_test_needed)
-  {
-    if (0 == en_passant_eligible_pawn)
-    {
-      num_moves = allWhitePawnSquaresLastPlyFind(piece,
-                                    0, king_position,
-                                    0, attack_helper->pin, 0,
-                                    mover_pieces_mask, opponent_pieces_mask); 
-    } else
-    {
-      num_moves = allWhitePawnSquaresLastPlyFind(piece,
-                                    en_passant_eligible_pawn, king_position,
-                                    0, attack_helper->pin, 0,
-                                    mover_pieces_mask, opponent_pieces_mask); 
-    }
-
-    num_moves += allBRQNSquaresLastPlyFindPinned (
-                                   MOVE_WHITE,
-                                   attack_helper->pin,
-                                   piece,
-                                   mover_pieces_mask,
-                                   mover_pieces_mask | opponent_pieces_mask
-                                   );
-  } else
-  {
-    num_moves = allWhitePawnSquaresLastPlyFind(piece,
+  num_moves = allWhitePawnSquaresLastPlyFind(piece,
                                     en_passant_eligible_pawn, king_position,
                                     attack_helper->in_check, attack_helper->pin, attack_helper->move_test_needed,
                                     mover_pieces_mask, opponent_pieces_mask);
 
-    num_moves += allKnightSquaresLastPlyFind(MOVE_WHITE, piece, king_position,
+  num_moves += allKnightSquaresLastPlyFind(MOVE_WHITE, piece, king_position,
                                         attack_helper->in_check, attack_helper->pin, 
                                         attack_helper->move_test_needed,
                                         mover_pieces_mask, opponent_pieces_mask
                                         );
-    num_moves += allBishopRookQueenSquaresLastPlyFind(MOVE_WHITE, piece,
+  num_moves += allBishopRookQueenSquaresLastPlyFind(MOVE_WHITE, piece,
                                         king_position, attack_helper->in_check, attack_helper->pin, 
                                         attack_helper->move_test_needed,
                                         mover_pieces_mask, opponent_pieces_mask
                                         );
-  }
 
   return num_moves;
 }
@@ -5303,47 +5403,21 @@ static unsigned long long allBlackLastPlyInLine(
   unsigned long long num_moves;
 
 
-  if (!attack_helper->in_check && !attack_helper->move_test_needed)
-  {
-    if (0 == en_passant_eligible_pawn)
-    {
-      num_moves = allBlackPawnSquaresLastPlyFind(piece,
-                                    0, king_position,
-                                    0, attack_helper->pin, 0,
-                                    mover_pieces_mask, opponent_pieces_mask); 
-    } else
-    {
-      num_moves = allBlackPawnSquaresLastPlyFind(piece,
-                                    en_passant_eligible_pawn, king_position,
-                                    0, attack_helper->pin, 0,
-                                    mover_pieces_mask, opponent_pieces_mask); 
-    }
-
-    num_moves += allBRQNSquaresLastPlyFindPinned (
-                                   MOVE_BLACK,
-                                   attack_helper->pin,
-                                   piece,
-                                   mover_pieces_mask,
-                                   mover_pieces_mask | opponent_pieces_mask
-                                   );
-  } else
-  {
-    num_moves = allBlackPawnSquaresLastPlyFind(piece,
+  num_moves = allBlackPawnSquaresLastPlyFind(piece,
                                     en_passant_eligible_pawn, king_position,
                                     attack_helper->in_check, attack_helper->pin, attack_helper->move_test_needed,
                                     mover_pieces_mask, opponent_pieces_mask); 
 
-    num_moves += allKnightSquaresLastPlyFind(MOVE_BLACK, piece, king_position,
+  num_moves += allKnightSquaresLastPlyFind(MOVE_BLACK, piece, king_position,
                                         attack_helper->in_check, attack_helper->pin,
                                         attack_helper->move_test_needed,
                                         mover_pieces_mask, opponent_pieces_mask
                                         );
-    num_moves += allBishopRookQueenSquaresLastPlyFind(MOVE_BLACK, piece,
+  num_moves += allBishopRookQueenSquaresLastPlyFind(MOVE_BLACK, piece,
                                         king_position, attack_helper->in_check, attack_helper->pin,
                                         attack_helper->move_test_needed,
                                         mover_pieces_mask, opponent_pieces_mask
                                         );
-  }
 
   return num_moves;
 }
@@ -5414,13 +5488,29 @@ static unsigned long long allMoveCandidatesLastPlyFind (
     {
       num_moves += allBRQNPSquaresLastPlyFindNoTest (MOVE_WHITE, piece, en_passant_eligible_pawn,
                                             mover_pieces_mask,opponent_pieces_mask, 
-                                            any_color_pieces_mask);
+                                            any_color_pieces_mask, 0, 0);
     } else
     {
-      num_moves += allWhiteLastPly (piece, en_passant_eligible_pawn,
+      if (!attack_helper.in_check && !attack_helper.move_test_needed)
+      {
+        if (attack_helper.pin & piece[S_PAWN | S_WHITE])
+        {
+          num_moves += allBRQNPSquaresLastPlyFindNoTest (MOVE_WHITE, piece, en_passant_eligible_pawn,
+                                            mover_pieces_mask,opponent_pieces_mask, 
+                                            any_color_pieces_mask, 1, attack_helper.pin);
+        } else
+        {
+          num_moves += allBRQNPSquaresLastPlyFindNoTest (MOVE_WHITE, piece, en_passant_eligible_pawn,
+                                            mover_pieces_mask,opponent_pieces_mask, 
+                                            any_color_pieces_mask, 2, attack_helper.pin);
+        }
+      } else
+      {
+        num_moves += allWhiteLastPly (piece, en_passant_eligible_pawn,
                                     king_position,
                                     &attack_helper, 
                                     mover_pieces_mask, opponent_pieces_mask);
+      }
     }
   } else 
   {
@@ -5428,13 +5518,29 @@ static unsigned long long allMoveCandidatesLastPlyFind (
     {
       num_moves +=  allBRQNPSquaresLastPlyFindNoTest (MOVE_BLACK, piece, en_passant_eligible_pawn,
                                             mover_pieces_mask,opponent_pieces_mask, 
-                                            any_color_pieces_mask);
+                                            any_color_pieces_mask, 0, 0);
     } else
     {
-      num_moves += allBlackLastPly (piece, en_passant_eligible_pawn,
+      if (!attack_helper.in_check && !attack_helper.move_test_needed)
+      {
+        if (attack_helper.pin & piece[S_PAWN | S_BLACK])
+        {
+          num_moves += allBRQNPSquaresLastPlyFindNoTest (MOVE_BLACK, piece, en_passant_eligible_pawn,
+                                            mover_pieces_mask,opponent_pieces_mask, 
+                                            any_color_pieces_mask, 1, attack_helper.pin);
+        } else
+        {
+          num_moves += allBRQNPSquaresLastPlyFindNoTest (MOVE_BLACK, piece, en_passant_eligible_pawn,
+                                            mover_pieces_mask,opponent_pieces_mask, 
+                                            any_color_pieces_mask, 2, attack_helper.pin);
+        }
+      } else
+      {
+        num_moves += allBlackLastPly (piece, en_passant_eligible_pawn,
                                     king_position,
                                     &attack_helper, 
                                     mover_pieces_mask, opponent_pieces_mask);
+      }
     }                                   
   } 
 

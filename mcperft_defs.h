@@ -192,12 +192,15 @@ typedef struct __attribute__((packed))
   unsigned char high;
   unsigned int low;
 } hashEntry_t;
+
+__attribute__((always_inline))
 inline hashEntry_t hashIndexToEntry (const unsigned long long index)
 {
   const hashEntry_t hash_entry = {(unsigned char) (index >> 32), (unsigned int) index};
   return hash_entry;
 } 
 
+__attribute__((always_inline))
 inline unsigned long long hashEntryToIndex (const hashEntry_t hash_entry)
 {
   return ((unsigned long long) hash_entry.high << 32) | (unsigned long long) hash_entry.low;
@@ -208,12 +211,15 @@ typedef struct __attribute__((packed))
   unsigned char high;
   unsigned int low;
 } moveEntry_t;
+
+__attribute__((always_inline))
 inline moveEntry_t moveIndexToEntry (const unsigned long long index)
 { 
   const moveEntry_t move_entry = {(unsigned char) (index >> 32), (unsigned int) index};
   return move_entry; 
 }
   
+__attribute__((always_inline))
 inline unsigned long long moveEntryToIndex (const moveEntry_t move_entry)
 { 
   return ((unsigned long long) move_entry.high << 32) | (unsigned long long) move_entry.low;
