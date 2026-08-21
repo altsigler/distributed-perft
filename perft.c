@@ -767,8 +767,8 @@ void test_9(void)
 
 void run_tests(void)
 {
-//  test_1();  /* Standard Starting Position */
-  test_2();  /* Castle Test */
+  test_1();  /* Standard Starting Position */
+//  test_2();  /* Castle Test */
 //  test_3();  /* Pawn Promotion Test */
 //  test_4();  /* Fen Tests */
 //  test_5();  /* No Pawn Test */
@@ -778,12 +778,12 @@ void run_tests(void)
 //  test_9();  /* 10 Queen Test */
 //  test_m_1(); /* Developed Middle Game */
 //  test_m_2(); /* Early Middle Game */
-//  test_m_3(); /* Kiwi */
-//  test_m_4(); /* Leaderboard Test */
-//  test_e_1(); /* End Game with King/Rook/Bishop vs King/Queen */
+  test_m_3(); /* Kiwi */
+  test_m_4(); /* Leaderboard Test */
+  test_e_1(); /* End Game with King/Rook/Bishop vs King/Queen */
 //  test_e_2(); /* End Game with King vs King/Bishop/Knight */
-//  test_e_3(); /* End Game with King/Pawns vs King/Pawns */
-//  test_e_4(); /* End Game with only two kings */
+  test_e_3(); /* End Game with King/Pawns vs King/Pawns */
+  test_e_4(); /* End Game with only two kings */
 
 }
 

@@ -379,17 +379,16 @@ static void castleEligibilityRookCaptureCheck (const color_e whose_move,
 ** Check if there is a pin between the mover king and attacker.
 ******************************************************************************/
 __attribute__((always_inline)) inline
-static void pinUpdate (unsigned long long *restrict pin,
+static unsigned int pinUpdate (unsigned long long *restrict pin,
                        unsigned int *restrict move_test_needed,
                         const color_e whose_move,
                         const unsigned long long *restrict piece,
-                        const unsigned int position_index,
                         const unsigned int attacker_index,
                         const unsigned int en_passant_eligible_pawn,
                         const unsigned long long mover_pieces_mask,
-                        const unsigned long long any_color_pieces_mask)
+                        const unsigned long long any_color_pieces_mask,
+                        const unsigned long long attack_lane)
 {
-  const unsigned long long attack_lane = attackLanes[position_index][attacker_index];
   const unsigned long long detected_pieces = attack_lane & any_color_pieces_mask;
 
   /* The piece is pinned if it is the only piece between the king
@@ -407,6 +406,7 @@ static void pinUpdate (unsigned long long *restrict pin,
         *move_test_needed = 1;
       }
       *pin |= (attack_lane | (1LLU << attacker_index));
+      return 1;
     } else if ((2 == num_pinned_pieces) &&
             en_passant_eligible_pawn &&
             ((1LLU << en_passant_eligible_pawn) & detected_pieces) &&
@@ -420,8 +420,11 @@ static void pinUpdate (unsigned long long *restrict pin,
       */
       *move_test_needed = 1;
       *pin |= (attack_lane | (1LLU << attacker_index));
+      return 1;
     }
   }
+
+  return 0;
 }
 
 
@@ -559,19 +562,24 @@ static kingAttackHelper_t pinCompute (
   while (unlikely(opponent_knight_mask))
   {
     const unsigned int index = bitbrdLowestIndexFromMaskGet(opponent_knight_mask);
-#if defined(USE_BMI)
-    opponent_knight_mask = _blsr_u64(opponent_knight_mask);
-#else
-    opponent_knight_mask ^= 1LLU << index;
-#endif
   
     const unsigned long long knight_attack = knightAttack[index];
     attack_mask |= knight_attack;
 
     if (knight_attack & mover_king_mask)
     {               
+#if defined(USE_BMI)
+      attack_helper.in_check |= _blsi_u64(opponent_knight_mask);
+#else
       attack_helper.in_check |= (1LLU << index);
+#endif
     }               
+
+#if defined(USE_BMI)
+    opponent_knight_mask = _blsr_u64(opponent_knight_mask);
+#else
+    opponent_knight_mask ^= 1LLU << index;
+#endif
   }
 
     // Bishop/Queen Attack
@@ -582,39 +590,49 @@ static kingAttackHelper_t pinCompute (
   while (opponent_bishop_mask)
   {
     const unsigned int index = bitbrdLowestIndexFromMaskGet(opponent_bishop_mask);
-#if defined(USE_BMI)
-    opponent_bishop_mask = _blsr_u64(opponent_bishop_mask);
-#else
-    opponent_bishop_mask ^= 1LLU << index;
-#endif
 
     const unsigned long long diagonal_attack = diagonalAttack[index];
-    const unsigned long long diagonal_lookup_key =
-                   lookupKeyCompute (any_color_pieces_mask, diagonal_attack);
-    const unsigned long long visibility_mask = diagonalVisibilityMap[index][diagonal_lookup_key];
-
-    attack_mask |= visibility_mask;
 
     /* If the mover king is in the attack lanes of this piece then check if there 
-    ** is a pin.
+    ** is a pin or check.
     */
     if (mover_king_mask & diagonal_attack)
     {
-      if (mover_king_mask & visibility_mask)
+      const unsigned long long attack_lane = attackLanes[position_index][index];
+      if (0 == (attack_lane & any_color_pieces_mask))
       {
         if (attack_helper.in_check)
         {
           attack_helper.move_test_needed = 1;
         }
-        attack_helper.in_check |= (attackLanes[position_index][index] | (1LLU << index));
+#if defined(USE_BMI)
+        attack_helper.in_check |= (attack_lane | _blsi_u64(opponent_bishop_mask));
+#else
+        attack_helper.in_check |= (attack_lane | (1LLU << index));
+#endif
+        attack_mask |= diagonal_attack;
       } else
       {
-        pinUpdate (&attack_helper.pin, &attack_helper.move_test_needed, 
+        if (0 == pinUpdate (&attack_helper.pin, &attack_helper.move_test_needed, 
                     whose_move, piece,  
-                    position_index, index, en_passant_eligible_pawn,
-                    mover_pieces_mask, any_color_pieces_mask);
+                    index, en_passant_eligible_pawn,
+                    mover_pieces_mask, any_color_pieces_mask,
+                    attack_lane))
+        {
+          attack_mask |= diagonalVisibilityMap[index]
+                                        [lookupKeyCompute (any_color_pieces_mask, diagonal_attack)];
+        }
       }
+    } else
+    {
+      attack_mask |= diagonalVisibilityMap[index]
+                                        [lookupKeyCompute (any_color_pieces_mask, diagonal_attack)];
     }
+#if defined(USE_BMI)
+    opponent_bishop_mask = _blsr_u64(opponent_bishop_mask);
+#else
+    opponent_bishop_mask ^= 1LLU << index;
+#endif
   }
 
   // Rook/Queen Attack
@@ -623,39 +641,49 @@ static kingAttackHelper_t pinCompute (
   while (unlikely(opponent_rook_mask))
   {
     const unsigned int index = bitbrdLowestIndexFromMaskGet(opponent_rook_mask);
-#if defined(USE_BMI)
-    opponent_rook_mask = _blsr_u64(opponent_rook_mask);
-#else
-    opponent_rook_mask ^= 1LLU << index;
-#endif
   
     const unsigned long long udlr_attack = udlrAttack[index];
-    const unsigned long long udlr_lookup_key =
-                     lookupKeyCompute (any_color_pieces_mask, udlr_attack);
-    const unsigned long long visibility_mask = udlrVisibilityMap[index][udlr_lookup_key];
-
-    attack_mask |= visibility_mask;
 
     /* If the mover king is in the attack lanes of this piece then check if there 
-    ** is a pin.
+    ** is a pin or check.
     */
     if (mover_king_mask & udlr_attack)
     {
-      if (mover_king_mask & visibility_mask)
+      const unsigned long long attack_lane = attackLanes[position_index][index];
+      if (0 == (attack_lane & any_color_pieces_mask))
       {
         if (attack_helper.in_check)
         {
           attack_helper.move_test_needed = 1;
         }
-        attack_helper.in_check |= (attackLanes[position_index][index] | (1LLU << index));
+#if defined(USE_BMI)
+        attack_helper.in_check |= (attack_lane | _blsi_u64(opponent_rook_mask));
+#else
+        attack_helper.in_check |= (attack_lane | (1LLU << index));
+#endif
+        attack_mask |= udlr_attack;
       } else
       {
-        pinUpdate (&attack_helper.pin, &attack_helper.move_test_needed,
+        if (0 == pinUpdate (&attack_helper.pin, &attack_helper.move_test_needed,
                     whose_move, piece,
-                    position_index, index, en_passant_eligible_pawn,
-                    mover_pieces_mask, any_color_pieces_mask);
-      }
+                    index, en_passant_eligible_pawn,
+                    mover_pieces_mask, any_color_pieces_mask,
+                    attack_lane))
+        {
+          attack_mask |= udlrVisibilityMap[index]
+                                    [lookupKeyCompute (any_color_pieces_mask, udlr_attack)];
+        }
+      } 
+    } else
+    {
+      attack_mask |= udlrVisibilityMap[index]
+                                    [lookupKeyCompute (any_color_pieces_mask, udlr_attack)];
     }
+#if defined(USE_BMI)
+    opponent_rook_mask = _blsr_u64(opponent_rook_mask);
+#else
+    opponent_rook_mask ^= 1LLU << index;
+#endif
   }
   
   attack_helper.move_candidate_mask &= ~attack_mask;
