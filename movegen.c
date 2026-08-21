@@ -26,7 +26,9 @@ static unsigned long long whitePawnCapture[BRDS*BRDS];
 
 static unsigned long long kingAttack[BRDS*BRDS];
 static unsigned long long diagonalAttack[BRDS*BRDS]; /* Used for Bishop and Queen */
+static unsigned long long diagonalBlocker[BRDS*BRDS]; /* Same as diagonal attack without edge square */
 static unsigned long long udlrAttack[BRDS*BRDS]; /* Used for Rook and Queen */
+static unsigned long long udlrBlocker[BRDS*BRDS]; /* Same as udlr attack without edge square */
 static unsigned long long attackLanes[BRDS*BRDS][BRDS*BRDS];
 
 /* In some code paths we need to look at all the attack vectors 
@@ -43,8 +45,8 @@ typedef struct
   unsigned long long blackPawnAttack;
   unsigned long long knightAttack;
   unsigned long long kingAttack;
-  unsigned long long pad1;
-  unsigned long long pad2;
+  unsigned long long diagonalBlocker;
+  unsigned long long udlrBlocker;
 } aggregateAttack_t __attribute__((aligned(64)));;
 
 aggregateAttack_t aggregateAttack[BRDS*BRDS];
@@ -53,25 +55,17 @@ aggregateAttack_t aggregateAttack[BRDS*BRDS];
 /* These maps are used for shortcut move counting for bishop, rook, and queen.
 */
 
-/* The maximum number of squares visible to bishop or queen on diagonals
-** is 13. Therefore 2^13 = 8192 is how many possible combinations of visible
-** pieces there are for each board position on diagonal files.
-** For up/down/left/right the max squares is 14.
-**
-** When support for PEXT is not available then the hash table is set to 2^19.
-** The 524,288 hash table is big, especially considering that we need a separate
-** table for each square. Luckily the table is very sparse, so the use of physical
-** memory is not as big as the virtual allocation.
-** The reason we need this large table is that our hash function leverages the
-** hardware CRC computation, which needs the large table to avoid hash collisions.
+/* Hash tables for looking up bit masks specifying to which squares bishop/rook
+** can move given certain board occupancy.
 */
 #ifdef USE_BMI2
-#define MAX_HASH_INDEX (1 << 14)
+#define MAX_UDLR_HASH_INDEX (1 << 12)
+#define MAX_DIAG_HASH_INDEX (1 << 11)
 #else
-#define MAX_HASH_INDEX (1 << 19)
+#error Missing support for BMI2
 #endif
-static unsigned long long *diagonalVisibilityMap[BRDS*BRDS];
-static unsigned long long *udlrVisibilityMap[BRDS*BRDS];
+static unsigned long long diagonalVisibilityMap[BRDS*BRDS][MAX_DIAG_HASH_INDEX];
+static unsigned long long udlrVisibilityMap[BRDS*BRDS][MAX_UDLR_HASH_INDEX];
 
 /* This table is used for testing whether the king is in check and to which
 ** squares the king can move.
@@ -88,22 +82,6 @@ static unsigned long long *udlrVisibilityMap[BRDS*BRDS];
 ** already located.
 */
 static dangerMap_t dangerMap[BRDS*BRDS];
-
-
-/******************************************************************************
-** Free memory allocated for tables when the program exits.
-******************************************************************************/
-static void cleanup(void)
-{
-  for (unsigned int i = 0; i < BRDS*BRDS; i++)
-  {
-    if (diagonalVisibilityMap[i])
-                        free (diagonalVisibilityMap[i]);
-    if (udlrVisibilityMap[i])
-                        free (udlrVisibilityMap[i]);
-  }
-}
-
 
 
 #define POSITION_TO_BITMASK_LOOKUP(m_row,m_col)\
@@ -164,12 +142,6 @@ lookupKeyCompute (const unsigned long long val, const unsigned long long mask)
 {
 #if defined(USE_BMI2)
     return  _pext_u64 (val, mask);
-#elif defined(__SSE4_1__)
-    const unsigned int crc = (unsigned int) __builtin_ia32_crc32di(0, val & mask);
-    return (((crc ^ (crc >> 16)) << 3) | (crc & 0x7)) & (MAX_HASH_INDEX - 1);
-#elif defined(__ARM_FEATURE_CRC32)
-    const unsigned int crc = (unsigned int) __crc32cd(0, val & mask);
-    return (((crc ^ (crc >> 16)) << 3) | (crc & 0x7)) & (MAX_HASH_INDEX - 1);
 #else
 #error Missing hardware support for PEXT and CRC32.
 #endif
@@ -222,7 +194,7 @@ kingInCheck(const color_e whose_move,
   if (attack_rook_or_queen & udlr_attack)
   {
     const unsigned long long udlr_lookup_key =
-                     lookupKeyCompute (any_color_pieces_mask, udlr_attack);
+                     lookupKeyCompute (any_color_pieces_mask, udlrBlocker[index]);
     const unsigned long long udlr_visibility_mask = udlrVisibilityMap[index][udlr_lookup_key];
     if (udlr_visibility_mask & attack_rook_or_queen)
                             return -1;
@@ -232,7 +204,7 @@ kingInCheck(const color_e whose_move,
   if (attack_bishop_or_queen & diagonal_attack)
   {
     const unsigned long long diagonal_lookup_key =
-                     lookupKeyCompute (any_color_pieces_mask, diagonal_attack);
+                     lookupKeyCompute (any_color_pieces_mask, diagonalBlocker[index]);
     const unsigned long long visibility_mask = diagonalVisibilityMap[index][diagonal_lookup_key];
     if (visibility_mask & attack_bishop_or_queen)
                             return -1;
@@ -377,6 +349,10 @@ static void castleEligibilityRookCaptureCheck (const color_e whose_move,
 
 /******************************************************************************
 ** Check if there is a pin between the mover king and attacker.
+**
+** Return Value
+**  The function returns whether the potential pinning piece can threaten 
+**  one of the squares to which the king can move.
 ******************************************************************************/
 __attribute__((always_inline)) inline
 static unsigned int pinUpdate (unsigned long long *restrict pin,
@@ -406,7 +382,6 @@ static unsigned int pinUpdate (unsigned long long *restrict pin,
         *move_test_needed = 1;
       }
       *pin |= (attack_lane | (1LLU << attacker_index));
-      return 1;
     } else if ((2 == num_pinned_pieces) &&
             en_passant_eligible_pawn &&
             ((1LLU << en_passant_eligible_pawn) & detected_pieces) &&
@@ -420,8 +395,8 @@ static unsigned int pinUpdate (unsigned long long *restrict pin,
       */
       *move_test_needed = 1;
       *pin |= (attack_lane | (1LLU << attacker_index));
-      return 1;
     }
+    return 1;
   }
 
   return 0;
@@ -453,7 +428,7 @@ static int squareUnderAttack(
   if (attack_bishop_or_queen & aggregateAttackVal->diagonalAttack)
   {
     const unsigned long long diagonal_lookup_key =
-                     lookupKeyCompute (any_color_pieces_mask, aggregateAttackVal->diagonalAttack);
+                     lookupKeyCompute (any_color_pieces_mask, aggregateAttackVal->diagonalBlocker);
     const unsigned long long visibility_mask = diagonalVisibilityMap[index][diagonal_lookup_key];
     if (visibility_mask & attack_bishop_or_queen)
                             return -1;
@@ -465,7 +440,7 @@ static int squareUnderAttack(
   if (attack_rook_or_queen & aggregateAttackVal->udlrAttack)
   {
     const unsigned long long udlr_lookup_key =
-                     lookupKeyCompute (any_color_pieces_mask, aggregateAttackVal->udlrAttack);
+                     lookupKeyCompute (any_color_pieces_mask, aggregateAttackVal->udlrBlocker);
     const unsigned long long udlr_visibility_mask = udlrVisibilityMap[index][udlr_lookup_key];
     if (udlr_visibility_mask & attack_rook_or_queen)
                             return -1;
@@ -620,13 +595,13 @@ static kingAttackHelper_t pinCompute (
                     attack_lane))
         {
           attack_mask |= diagonalVisibilityMap[index]
-                                        [lookupKeyCompute (any_color_pieces_mask, diagonal_attack)];
+                                        [lookupKeyCompute (any_color_pieces_mask, diagonalBlocker[index])];
         }
       }
     } else
     {
       attack_mask |= diagonalVisibilityMap[index]
-                                        [lookupKeyCompute (any_color_pieces_mask, diagonal_attack)];
+                                        [lookupKeyCompute (any_color_pieces_mask, diagonalBlocker[index])];
     }
 #if defined(USE_BMI)
     opponent_bishop_mask = _blsr_u64(opponent_bishop_mask);
@@ -671,13 +646,13 @@ static kingAttackHelper_t pinCompute (
                     attack_lane))
         {
           attack_mask |= udlrVisibilityMap[index]
-                                    [lookupKeyCompute (any_color_pieces_mask, udlr_attack)];
+                                    [lookupKeyCompute (any_color_pieces_mask, udlrBlocker[index])];
         }
       } 
     } else
     {
       attack_mask |= udlrVisibilityMap[index]
-                                    [lookupKeyCompute (any_color_pieces_mask, udlr_attack)];
+                                    [lookupKeyCompute (any_color_pieces_mask, udlrBlocker[index])];
     }
 #if defined(USE_BMI)
     opponent_rook_mask = _blsr_u64(opponent_rook_mask);
@@ -866,7 +841,7 @@ static unsigned long long allBRQNPSquaresLastPlyFindNoTest (
 
 
     const unsigned long long lookup_index = 
-                   lookupKeyCompute (any_color_pieces_mask, diagonalAttack[piece_index]);
+                   lookupKeyCompute (any_color_pieces_mask, diagonalBlocker[piece_index]);
 
     unsigned long long open_and_visible_mask = diagonalVisibilityMap[piece_index][lookup_index] &
                                                       ~mover_pieces_mask;
@@ -901,7 +876,7 @@ static unsigned long long allBRQNPSquaresLastPlyFindNoTest (
 #endif
 
     const unsigned long long lookup_index = 
-                   lookupKeyCompute (any_color_pieces_mask, udlrAttack[piece_index]);
+                   lookupKeyCompute (any_color_pieces_mask, udlrBlocker[piece_index]);
 
     unsigned long long open_and_visible_mask = udlrVisibilityMap[piece_index][lookup_index] &
                                                       ~mover_pieces_mask;
@@ -973,9 +948,9 @@ static unsigned long long allBRQNPSquaresLastPlyFindNoTest (
 
     const aggregateAttack_t *const aggregateAttackVal = &aggregateAttack[piece_index];
     const unsigned long long lookup_index = 
-                   lookupKeyCompute (any_color_pieces_mask, aggregateAttackVal->diagonalAttack);
+                   lookupKeyCompute (any_color_pieces_mask, aggregateAttackVal->diagonalBlocker);
     const unsigned long long udlr_lookup_index = 
-                   lookupKeyCompute (any_color_pieces_mask, aggregateAttackVal->udlrAttack);
+                   lookupKeyCompute (any_color_pieces_mask, aggregateAttackVal->udlrBlocker);
 
     unsigned long long open_and_visible_mask = (udlrVisibilityMap[piece_index][udlr_lookup_index] |
                                                 diagonalVisibilityMap[piece_index][lookup_index]) &
@@ -1990,7 +1965,7 @@ static unsigned long long allBishopRookQueenSquaresFind (
 #endif
 
       const unsigned long long lookup_index =  
-                     lookupKeyCompute (any_color_pieces_mask, diagonalAttack[piece_index]);
+                     lookupKeyCompute (any_color_pieces_mask, diagonalBlocker[piece_index]);
                                                                          
 
       unsigned long long piece_move_mask = 
@@ -2141,7 +2116,7 @@ static unsigned long long allBishopRookQueenSquaresFind (
 #endif
 
       const unsigned long long lookup_index =  
-                     lookupKeyCompute (any_color_pieces_mask, udlrAttack[piece_index]);
+                     lookupKeyCompute (any_color_pieces_mask, udlrBlocker[piece_index]);
                                                                          
       unsigned long long piece_move_mask = 
                     udlrVisibilityMap[piece_index][lookup_index] & valid_moves;
@@ -2301,9 +2276,9 @@ static unsigned long long allBishopRookQueenSquaresFind (
 
       const aggregateAttack_t *const aggregateAttackVal = &aggregateAttack[piece_index];
       const unsigned long long lookup_index =  
-                     lookupKeyCompute (any_color_pieces_mask, aggregateAttackVal->diagonalAttack);
+                     lookupKeyCompute (any_color_pieces_mask, aggregateAttackVal->diagonalBlocker);
       const unsigned long long udlr_lookup_index =  
-                     lookupKeyCompute (any_color_pieces_mask, aggregateAttackVal->udlrAttack);
+                     lookupKeyCompute (any_color_pieces_mask, aggregateAttackVal->udlrBlocker);
 
       unsigned long long piece_move_mask = 
                     (diagonalVisibilityMap[piece_index][lookup_index] |
@@ -2480,7 +2455,7 @@ static unsigned long long allBishopRookQueenSquaresLastPlyFind (
 
 
       const unsigned long long lookup_index =  
-                     lookupKeyCompute (any_color_pieces_mask, diagonalAttack[piece_index]);
+                     lookupKeyCompute (any_color_pieces_mask, diagonalBlocker[piece_index]);
                                                                          
       unsigned long long open_and_visible_mask = diagonalVisibilityMap[piece_index][lookup_index] &
                                                         valid_moves;
@@ -2527,7 +2502,7 @@ static unsigned long long allBishopRookQueenSquaresLastPlyFind (
 #endif
 
       const unsigned long long lookup_index = 
-                     lookupKeyCompute (any_color_pieces_mask, udlrAttack[piece_index]);
+                     lookupKeyCompute (any_color_pieces_mask, udlrBlocker[piece_index]);
 
       unsigned long long open_and_visible_mask = udlrVisibilityMap[piece_index][lookup_index] &
                                                         valid_moves;
@@ -2574,9 +2549,9 @@ static unsigned long long allBishopRookQueenSquaresLastPlyFind (
 
       const aggregateAttack_t *const aggregateAttackVal = &aggregateAttack[piece_index];
       const unsigned long long lookup_index =  
-                     lookupKeyCompute (any_color_pieces_mask, aggregateAttackVal->diagonalAttack);
+                     lookupKeyCompute (any_color_pieces_mask, aggregateAttackVal->diagonalBlocker);
       const unsigned long long udlr_lookup_index =  
-                     lookupKeyCompute (any_color_pieces_mask, aggregateAttackVal->udlrAttack);
+                     lookupKeyCompute (any_color_pieces_mask, aggregateAttackVal->udlrBlocker);
 
       unsigned long long open_and_visible_mask = (udlrVisibilityMap[piece_index][udlr_lookup_index] |
                                                   diagonalVisibilityMap[piece_index][lookup_index]) &
@@ -5609,21 +5584,16 @@ unsigned long long allMoveCandidatesLastPlyFindApi (
 __attribute__((noinline))
 static void udlrSquaresMapCreate (void)
 {
-  for (unsigned int i = 0; i < BRDS*BRDS; i++)
-  {
-    udlrVisibilityMap[i] = malloc (MAX_HASH_INDEX * sizeof(unsigned long long));
-    assert (udlrVisibilityMap[i]);
-  }
   for (unsigned int index = 0; index < BRDS*BRDS; index++)
   {
-    unsigned long long attack_mask = udlrAttack[index];
-    const unsigned int num_bits = (unsigned int) __builtin_popcountll (attack_mask);
+    unsigned long long blocker_mask = udlrBlocker[index];
+    const unsigned int num_bits = (unsigned int) __builtin_popcountll (blocker_mask);
     unsigned int bit_index[num_bits];
 
     for (unsigned int i = 0; i < num_bits; i++)
     {
-      bit_index[i] = bitbrdLowestIndexFromMaskGet(attack_mask);
-      attack_mask ^= (1LLU << bit_index[i]);
+      bit_index[i] = bitbrdLowestIndexFromMaskGet(blocker_mask);
+      blocker_mask ^= (1LLU << bit_index[i]);
     }
 
     /* Derive every possible permutation of bits in the attack mask.
@@ -5639,7 +5609,7 @@ static void udlrSquaresMapCreate (void)
       }
       /* With PEXT instruction there are no hash collisions.
       */
-      const unsigned long long hash_index =  lookupKeyCompute (visibility_mask, udlrAttack[index]);
+      const unsigned long long hash_index =  lookupKeyCompute (visibility_mask, udlrBlocker[index]);
 
       udlrVisibilityMap[index][hash_index] = 0;
 
@@ -5734,22 +5704,16 @@ static void udlrSquaresMapCreate (void)
 __attribute__((noinline))
 static void diagonalSquaresMapCreate (void)
 {
-  for (unsigned int i = 0; i < BRDS*BRDS; i++)
-  {
-    diagonalVisibilityMap[i] = malloc (MAX_HASH_INDEX * sizeof(unsigned long long));
-    assert (diagonalVisibilityMap[i]);
-  }
-
   for (unsigned int index = 0; index < BRDS*BRDS; index++)
   {
-    unsigned long long attack_mask = diagonalAttack[index];
-    const unsigned int num_bits = (unsigned int) __builtin_popcountll (attack_mask);
+    unsigned long long blocker_mask = diagonalBlocker[index];
+    const unsigned int num_bits = (unsigned int) __builtin_popcountll (blocker_mask);
     unsigned int bit_index[num_bits];
 
     for (unsigned int i = 0; i < num_bits; i++)
     {
-      bit_index[i] = bitbrdLowestIndexFromMaskGet(attack_mask);
-      attack_mask ^= (1LLU << bit_index[i]);
+      bit_index[i] = bitbrdLowestIndexFromMaskGet(blocker_mask);
+      blocker_mask ^= (1LLU << bit_index[i]);
     }
 
     /* Derive every possible permutation of bits in the attack mask.
@@ -5765,7 +5729,7 @@ static void diagonalSquaresMapCreate (void)
       }
       /* With PEXT instruction there are no hash collisions.
       */
-      const unsigned long long hash_index =  lookupKeyCompute (visibility_mask, diagonalAttack[index]);
+      const unsigned long long hash_index =  lookupKeyCompute (visibility_mask, diagonalBlocker[index]);
 
       diagonalVisibilityMap[index][hash_index] = 0;
 
@@ -6158,6 +6122,10 @@ void squareUnderAttackGenerate(void)
         mask = bitbrdMaskFromPositionGet (i, j);
         diagonalAttack[index] |= mask;
 
+        if ((i > 0) && (j > 0))
+        {
+          diagonalBlocker[index] |= mask;
+        }
 
       } while (1);
       /* Upper Left Diagonal
@@ -6174,6 +6142,10 @@ void squareUnderAttackGenerate(void)
         mask = bitbrdMaskFromPositionGet (i, j);
         diagonalAttack[index] |= mask;
 
+        if ((i < 7) && (j > 0))
+        {
+          diagonalBlocker[index] |= mask;
+        }
 
       } while (1);
 
@@ -6191,6 +6163,10 @@ void squareUnderAttackGenerate(void)
         mask = bitbrdMaskFromPositionGet (i, j);
         diagonalAttack[index] |= mask;
 
+        if ((i < 7) && (j < 7))
+        {
+          diagonalBlocker[index] |= mask;
+        }
 
       } while (1);
 
@@ -6207,6 +6183,11 @@ void squareUnderAttackGenerate(void)
         j++;
         mask = bitbrdMaskFromPositionGet (i, j);
         diagonalAttack[index] |= mask;
+
+        if ((i > 0) && (j < 7))
+        {
+          diagonalBlocker[index] |= mask;
+        }
 
 
       } while (1);
@@ -6236,6 +6217,10 @@ void squareUnderAttackGenerate(void)
         mask = bitbrdMaskFromPositionGet (i, j);
         udlrAttack[index] |= mask;
 
+        if (j > 0)
+        {
+          udlrBlocker[index] |= mask;
+        }
 
       } while (1);
 
@@ -6252,6 +6237,10 @@ void squareUnderAttackGenerate(void)
         mask = bitbrdMaskFromPositionGet (i, j);
         udlrAttack[index] |= mask;
 
+        if (j < 7)
+        {
+          udlrBlocker[index] |= mask;
+        }
 
       } while (1);
 
@@ -6268,6 +6257,10 @@ void squareUnderAttackGenerate(void)
         mask = bitbrdMaskFromPositionGet (i, j);
         udlrAttack[index] |= mask;
 
+        if (i < 7)
+        {
+          udlrBlocker[index] |= mask;
+        }
 
       } while (1);
 
@@ -6285,6 +6278,11 @@ void squareUnderAttackGenerate(void)
         mask = bitbrdMaskFromPositionGet (i, j);
         udlrAttack[index] |= mask;
 
+
+        if (i > 0)
+        {
+          udlrBlocker[index] |= mask;
+        }
 
       } while (1);
     }
@@ -6340,6 +6338,8 @@ void squareUnderAttackGenerate(void)
   */
   for (int i = 0; i < BRDS*BRDS; i++)
   {
+    aggregateAttack[i].udlrBlocker = udlrBlocker[i];
+    aggregateAttack[i].diagonalBlocker = diagonalBlocker[i];
     aggregateAttack[i].udlrAttack = udlrAttack[i];
     aggregateAttack[i].diagonalAttack = diagonalAttack[i];
     aggregateAttack[i].knightAttack = knightAttack[i];
@@ -6348,7 +6348,6 @@ void squareUnderAttackGenerate(void)
     aggregateAttack[i].blackPawnAttack = blackPawnAttack[i];
   }
 
-  (void) atexit (cleanup);
   diagonalSquaresMapCreate ();
   udlrSquaresMapCreate ();
   dangerMapCreate ();
