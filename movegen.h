@@ -211,6 +211,34 @@ typedef struct
 } oneMove_t __attribute__((aligned(64)));
 
 /******************************************************************************
+** Determine if this position has the standard complement of pieces.
+** The pawns are not considered in this determination.
+******************************************************************************/
+__attribute__((always_inline)) inline
+unsigned int pieceStandardComplement(const unsigned long long *piece)
+{
+  unsigned int def_piece_compliment = 0;
+
+  if ((2 == __builtin_popcountll(piece[S_WHITE | S_KNIGHT])) &&
+      (2 == __builtin_popcountll(piece[S_WHITE | S_BISHOP])) &&
+      (2 == __builtin_popcountll(piece[S_WHITE | S_ROOK])) &&
+      (1 == __builtin_popcountll(piece[S_WHITE | S_QUEEN])))
+  {
+    def_piece_compliment |= (1U << MOVE_WHITE);
+  }
+
+  if ((2 == __builtin_popcountll(piece[S_BLACK | S_KNIGHT])) &&
+      (2 == __builtin_popcountll(piece[S_BLACK | S_BISHOP])) &&
+      (2 == __builtin_popcountll(piece[S_BLACK | S_ROOK])) &&
+      (1 == __builtin_popcountll(piece[S_BLACK | S_QUEEN])))
+  {
+    def_piece_compliment |= (1U << MOVE_BLACK);
+  }
+
+  return def_piece_compliment;
+}
+
+/******************************************************************************
 ** Create bit maps for attacking squares for all 64 board positions.
 ** These maps can be quickly compared to the bit mask of opponent
 ** pieces to see if the square is under attack.
@@ -261,7 +289,8 @@ unsigned long long allWhiteMovePerft (
                            const unsigned int depth,
                            const unsigned int ply,
                            const unsigned long long mover_pieces_mask,
-                           const unsigned long long opponent_pieces_mask);
+                           const unsigned long long opponent_pieces_mask,
+                           const unsigned int def_piece_compliment);
 
 /******************************************************************************
 ** Generate a list of all black piece move candidates in the position.
@@ -280,7 +309,8 @@ unsigned long long allBlackMovePerft (
                            const unsigned int depth,
                            const unsigned int ply,
                            const unsigned long long mover_pieces_mask,
-                           const unsigned long long opponent_pieces_mask);
+                           const unsigned long long opponent_pieces_mask,
+                           const unsigned int def_piece_compliment);
 
 /******************************************************************************
 ** Generate a list of all move candidates in the position.
@@ -302,16 +332,17 @@ unsigned long long allMovePerft (
                            const unsigned int depth,
                            const unsigned int ply,
                            const unsigned long long opponent_pieces_mask,
-                           const unsigned long long mover_pieces_mask)
+                           const unsigned long long mover_pieces_mask,
+                           const unsigned int def_piece_compliment)
 
 {
   return (whose_move == MOVE_WHITE)?
                 allWhiteMovePerft (piece, en_passant_eligible_pawn,
                                 castle_eligibility, depth, ply,
-                                mover_pieces_mask, opponent_pieces_mask):
+                                mover_pieces_mask, opponent_pieces_mask, def_piece_compliment):
                 allBlackMovePerft (piece, en_passant_eligible_pawn,
                                 castle_eligibility, depth, ply,
-                                mover_pieces_mask, opponent_pieces_mask);
+                                mover_pieces_mask, opponent_pieces_mask, def_piece_compliment);
 }
 
 

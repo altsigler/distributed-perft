@@ -128,7 +128,8 @@ static unsigned long long movesRapidFind(
                                                                depth - 2,
                                                                0,
                                                                bit_brd->color[whose_move],
-                                                               bit_brd->color[whose_move ^ 1]);
+                                                               bit_brd->color[whose_move ^ 1],
+                                                               pieceStandardComplement(bit_brd->piece));
     moveResultsShow (&one_move[i], bit_brd, total_moves_per_move);
     total_moves_at_depth += total_moves_per_move;
 
@@ -217,7 +218,8 @@ static unsigned long long positionSearch(const unsigned int depth,
             allMovePerft (whose_move, input_bit_brd.piece, 
                         en_passant_eligible_pawn, castle_eligibility, depth - 1, 0,
                         input_bit_brd.color[whose_move ^ 1],   
-                        input_bit_brd.color[whose_move]);      
+                        input_bit_brd.color[whose_move],
+                        pieceStandardComplement(input_bit_brd.piece));
 
   }
 
@@ -538,7 +540,7 @@ unsigned int bytebrdNextMoveGet (
   constexpr bytebrdMove_t zero_move = {};
 
   searchSetup (brd, info, &input_bit_brd, 
-               &castle_eligibility, &en_passant_eligible_pawn);
+               &castle_eligibility, &en_passant_eligible_pawn); 
 
   num_moves = (unsigned int) allMoveCandidatesFind (whose_move, &input_bit_brd, mv,
                         en_passant_eligible_pawn, 

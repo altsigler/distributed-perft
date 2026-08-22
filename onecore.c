@@ -150,6 +150,7 @@ static void searchSetup (const brd_t *const brd,
   {
     *en_passant_eligible_pawn = 0;
   }
+
 }
 
 /******************************************************************************
@@ -203,7 +204,8 @@ static unsigned long long positionSearch(const unsigned int depth,
                                         brd_entry->u.key.castle_eligibility, 
                                         new_depth - 1, 0,
                                         brd_entry->u.key.bit_brd.color[last_ply->whose_move ^ 1],
-                                        brd_entry->u.key.bit_brd.color[last_ply->whose_move]);
+                                        brd_entry->u.key.bit_brd.color[last_ply->whose_move],
+                                        pieceStandardComplement(brd_entry->u.key.bit_brd.piece));
     }
 
     /* Store the computed number of positions in the database entry. We overwrite 
@@ -302,7 +304,7 @@ static void ocBrdDbShow (ocBrdDb_t *brd_db,
 ** 0 - No duplicate found.
 ** 1 - Duplicate Found.
 ******************************************************************************/
-unsigned int duplicateDetect (ocBrdDb_t *const brd_db, 
+static unsigned int duplicateDetect (ocBrdDb_t *const brd_db, 
                               ocBrdDbEntry_t *const brd_entry, 
                               unsigned int *const next_board_index)
 {
