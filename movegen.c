@@ -14,6 +14,21 @@
 #include "brdutil_api.h"
 #include "movegen.h"
 
+/* The compiler optimization sometimes does weird things. 
+** For example we can remove logic which is not 
+** needed in the code and reduce the number of 
+** operations required to perform certain function, but 
+** the code becomes slower instead of faster because the compiler 
+** changes how it optimizes the register to variable assignment. 
+** 
+** The FORCE_TOUCH macro is an optimization hint to the 
+** compiler to keep the specified variable in a register without
+** actually consuming any CPU time. 
+** This macro helped me to recover good performance when
+** faced with the above scenario.
+*/
+#define FORCE_TOUCH(x) __asm__ volatile("" : : "g"(x))
+
 static unsigned long long knightAttack[BRDS*BRDS];
 static unsigned long long blackPawnAttack[BRDS*BRDS];
 static unsigned long long blackPawnEnPassantAttack[BRDS*BRDS];
@@ -152,7 +167,7 @@ lookupKeyCompute (const unsigned long long val, const unsigned long long mask)
 
 /******************************************************************************
 ** Determine if mover king is in check. 
-** This function is very similar to squareUnderAttack, except that it 
+** This function 
 ** doesn't check for attack from opponent king. Ths is because a king 
 ** cannot put opponent king in check.
 **
@@ -408,51 +423,6 @@ static unsigned int pinUpdate (unsigned long long *restrict pin,
 
 
 /******************************************************************************
-** Determine if specified square is under attack.
-**
-**    my_color - (Input) The attackers color is the opposite of my_color.
-**    bit_brd - (Input) The current position.
-**    index - (Input) Location of this square.
-**
-** Return Values:
-**    0 - Square is not under attack.
-**    -1 - Square is under attack.
-******************************************************************************/
-inline __attribute__((always_inline))
-//__attribute__((noinline))
-static int squareUnderAttack(
-                             const unsigned long long attack_bishop_or_queen,
-                             const unsigned long long attack_rook_or_queen,
-                             const unsigned long long any_color_pieces_mask,
-                             const unsigned long long attack_knight,
-                             const unsigned int index)
-{
-
-  const aggregateAttack_t *const aggregateAttackVal = &aggregateAttack[index];
-  if (attack_bishop_or_queen & aggregateAttackVal->diagonalAttack)
-  {
-    const unsigned long long diagonal_lookup_key =
-                     lookupKeyCompute (any_color_pieces_mask, aggregateAttackVal->diagonalBlocker);
-    const unsigned long long visibility_mask = diagonalVisibilityMap[index][diagonal_lookup_key];
-    if (visibility_mask & attack_bishop_or_queen)
-                            return -1;
-  }
-
-  if (unlikely((attack_knight & aggregateAttackVal->knightAttack)))
-                return -1;
-
-  if (attack_rook_or_queen & aggregateAttackVal->udlrAttack)
-  {
-    const unsigned long long udlr_lookup_key =
-                     lookupKeyCompute (any_color_pieces_mask, aggregateAttackVal->udlrBlocker);
-    const unsigned long long udlr_visibility_mask = udlrVisibilityMap[index][udlr_lookup_key];
-    if (udlr_visibility_mask & attack_rook_or_queen)
-                            return -1;
-  }
-
-  return 0;
-}
-/******************************************************************************
 ** Determine if the mover king is in check.
 ** Determine legal moves that the king can take.
 ** Determine which pieces are pinned.
@@ -690,15 +660,15 @@ static kingAttackHelper_t pinCompute (
                                           POSITION_TO_BITMASK_LOOKUP(0, 4) |
                                           POSITION_TO_BITMASK_LOOKUP(0, 3) |
                                           POSITION_TO_BITMASK_LOOKUP(0, 2);
+
   
+
     if (!castle_eligibility.white_short_ineligible)
     {
       if ((0 == (any_color_pieces_mask & white_short_castle_mask)) &&
-          (0 == (attack_mask & white_short_move_mask)) &&
-          (0 == squareUnderAttack(attack_bishop_or_queen, attack_rook_or_queen,
-                                        any_color_pieces_mask, 
-                                        attack_knight, POSIDX(0, 6))))
+          (0 == (attack_mask & white_short_move_mask)))
       {
+        FORCE_TOUCH (any_color_pieces_mask);
         attack_helper.move_candidate_mask |= POSITION_TO_BITMASK_LOOKUP(0, 6);
       }
     }
@@ -709,11 +679,9 @@ static kingAttackHelper_t pinCompute (
     if (!castle_eligibility.white_long_ineligible)
     {
       if ((0 == (any_color_pieces_mask & white_long_castle_mask)) &&
-          (0 == (attack_mask & white_long_move_mask)) &&
-          (0 == squareUnderAttack(attack_bishop_or_queen, attack_rook_or_queen,
-                                    any_color_pieces_mask, 
-                                    attack_knight, POSIDX(0, 2))))
+          (0 == (attack_mask & white_long_move_mask)))
       {
+        FORCE_TOUCH (any_color_pieces_mask);
         attack_helper.move_candidate_mask |= POSITION_TO_BITMASK_LOOKUP(0, 2);
       }
     }
@@ -741,11 +709,9 @@ static kingAttackHelper_t pinCompute (
     if (!castle_eligibility.black_short_ineligible)
     {
       if ((0 == (any_color_pieces_mask & black_short_castle_mask)) &&
-          (0 == (attack_mask & black_short_move_mask)) &&
-          (0 == squareUnderAttack(attack_bishop_or_queen, attack_rook_or_queen,
-                                    any_color_pieces_mask, 
-                                    attack_knight, POSIDX(7, 6))))
+          (0 == (attack_mask & black_short_move_mask)))
       {
+        FORCE_TOUCH (any_color_pieces_mask);
         attack_helper.move_candidate_mask |= POSITION_TO_BITMASK_LOOKUP(7, 6);
       }
     }
@@ -756,11 +722,9 @@ static kingAttackHelper_t pinCompute (
     if (!castle_eligibility.black_long_ineligible)
     {
       if ((0 == (any_color_pieces_mask & black_long_castle_mask)) &&
-          (0 == (attack_mask & black_long_move_mask)) &&
-          (0 == squareUnderAttack(attack_bishop_or_queen, attack_rook_or_queen,
-                                    any_color_pieces_mask, 
-                                    attack_knight, POSIDX(7, 2))))
+          (0 == (attack_mask & black_long_move_mask)))
       {
+        FORCE_TOUCH (any_color_pieces_mask);
         attack_helper.move_candidate_mask |= POSITION_TO_BITMASK_LOOKUP(7, 2);
       }
     }
@@ -3120,7 +3084,7 @@ static unsigned long long allWhitePawnSquaresFind (
         }
 
         /* If we had a pawn promotion then generate moves for promoting
-        ** to lower ranked pieces. We don't need to do the squareUnderAttack()
+        ** to lower ranked pieces. We don't need to do the kingInCheck()
         ** check for these moves.
         */
         if (unlikely(num_masks == 2))
@@ -3391,7 +3355,7 @@ static unsigned long long allWhitePawnSquaresFind (
         } 
 
         /* If we had a pawn promotion then generate moves for promoting
-        ** to lower ranked pieces. We don't need to do the squareUnderAttack()
+        ** to lower ranked pieces. We don't need to do the kingInCheck()
         ** check for these moves.
         */
         if (unlikely(num_masks == 3))
@@ -3573,7 +3537,7 @@ static unsigned long long allWhitePawnSquaresFind (
 
 
         /* If we had a pawn promotion then generate moves for promoting
-        ** to lower ranked pieces. We don't need to do the squareUnderAttack()
+        ** to lower ranked pieces. We don't need to do the kingInCheck()
         ** check for these moves.
         */
         if (unlikely(num_masks == 3))
@@ -3922,7 +3886,7 @@ static unsigned long long allWhitePawnSquaresLastPlyFind (
         mn++;
 
         /* If we had a pawn promotion then generate moves for promoting
-        ** to lower ranked pieces. We don't need to do the squareUnderAttack()
+        ** to lower ranked pieces. We don't need to do the kingInCheck()
         ** check for these moves.
         */
         if (unlikely(pawn_promotion))
@@ -4010,7 +3974,7 @@ static unsigned long long allWhitePawnSquaresLastPlyFind (
         mn++;
 
         /* If we had a pawn promotion then generate moves for promoting
-        ** to lower ranked pieces. We don't need to do the squareUnderAttack()
+        ** to lower ranked pieces. We don't need to do the kingInCheck()
         ** check for these moves.
         */
         if (unlikely(pawn_promotion))
@@ -4184,7 +4148,7 @@ static unsigned long long allBlackPawnSquaresFind (
         }
 
         /* If we had a pawn promotion then generate moves for promoting
-        ** to lower ranked pieces. We don't need to do the squareUnderAttack()
+        ** to lower ranked pieces. We don't need to do the kingInCheck()
         ** check for these moves.
         */
         if (unlikely(num_masks == 2))
@@ -4458,7 +4422,7 @@ static unsigned long long allBlackPawnSquaresFind (
 
 
         /* If we had a pawn promotion then generate moves for promoting
-        ** to lower ranked pieces. We don't need to do the squareUnderAttack()
+        ** to lower ranked pieces. We don't need to do the kingInCheck()
         ** check for these moves.
         */
         if (unlikely(num_masks == 3))
@@ -4641,7 +4605,7 @@ static unsigned long long allBlackPawnSquaresFind (
 
 
         /* If we had a pawn promotion then generate moves for promoting
-        ** to lower ranked pieces. We don't need to do the squareUnderAttack()
+        ** to lower ranked pieces. We don't need to do the kingInCheck()
         ** check for these moves.
         */
         if (unlikely(num_masks == 3))
@@ -4989,7 +4953,7 @@ static unsigned long long allBlackPawnSquaresLastPlyFind (
         mn++;
 
         /* If we had a pawn promotion then generate moves for promoting
-        ** to lower ranked pieces. We don't need to do the squareUnderAttack()
+        ** to lower ranked pieces. We don't need to do the kingInCheck()
         ** check for these moves.
         */
         if (unlikely(pawn_promotion))
@@ -5078,7 +5042,7 @@ static unsigned long long allBlackPawnSquaresLastPlyFind (
         mn++;
 
         /* If we had a pawn promotion then generate moves for promoting
-        ** to lower ranked pieces. We don't need to do the squareUnderAttack()
+        ** to lower ranked pieces. We don't need to do the kingInCheck()
         ** check for these moves.
         */
         if (unlikely(pawn_promotion))
@@ -6045,6 +6009,42 @@ static void dangerMapCreate (void)
     dangerMap[i].diagonal_danger_mask |= diagonalAttack[i];
     dangerMap[i].udlr_danger_mask |= udlrAttack[i];
   }
+
+  /* For starting king position add castling squares into the danger map.
+  */
+  constexpr unsigned int white_king_start_idx = POSIDX(0, 4);
+  constexpr unsigned int black_king_start_idx = POSIDX(7, 4);
+
+  constexpr unsigned int white_short_castle_idx = POSIDX(0, 6);
+  constexpr unsigned int black_short_castle_idx = POSIDX(7, 6);
+
+  constexpr unsigned int white_long_castle_idx = POSIDX(0, 2);
+  constexpr unsigned int black_long_castle_idx = POSIDX(7, 2);
+
+  /* Short Castle White.
+  */
+  dangerMap[white_king_start_idx].knight_danger_mask |= knightAttack[white_short_castle_idx];
+  dangerMap[white_king_start_idx].diagonal_danger_mask |= diagonalAttack[white_short_castle_idx];
+  dangerMap[white_king_start_idx].udlr_danger_mask |= udlrAttack[white_short_castle_idx];
+
+  /* Long Castle White.
+  */
+  dangerMap[white_king_start_idx].knight_danger_mask |= knightAttack[white_long_castle_idx];
+  dangerMap[white_king_start_idx].diagonal_danger_mask |= diagonalAttack[white_long_castle_idx];
+  dangerMap[white_king_start_idx].udlr_danger_mask |= udlrAttack[white_long_castle_idx];
+
+  /* Short Castle Black.
+  */
+  dangerMap[black_king_start_idx].knight_danger_mask |= knightAttack[black_short_castle_idx];
+  dangerMap[black_king_start_idx].diagonal_danger_mask |= diagonalAttack[black_short_castle_idx];
+  dangerMap[black_king_start_idx].udlr_danger_mask |= udlrAttack[black_short_castle_idx];
+
+  /* Long Castle Black.
+  */
+  dangerMap[black_king_start_idx].knight_danger_mask |= knightAttack[black_long_castle_idx];
+  dangerMap[black_king_start_idx].diagonal_danger_mask |= diagonalAttack[black_long_castle_idx];
+  dangerMap[black_king_start_idx].udlr_danger_mask |= udlrAttack[black_long_castle_idx];
+
 }
 
 
