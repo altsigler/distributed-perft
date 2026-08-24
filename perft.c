@@ -368,23 +368,21 @@ void test_2(void)
 #endif
 
 #if 1
-  brdutilFenToBrdConvert ("r3k2r/p1pb1pp1/2p5/4q3/Q1PNpPnp/2N1P2K/PB1P2P1/R4R2 b kq f3  0 1",
-                        &brd, &info);
+  brdutilFenToBrdConvert ("8/8/1P6/8/4Q3/1K5r/6p1/6k1 w - -  0 1",
+                        &brd, &info); 
 
   brdutilFenPrint (&brd, &info);
   brdutilBoardInfoPrint (&info);
 
-  brd.rc[1][7] = brd.rc[3][6];
-  brd.rc[3][6] = 0;
-  info.next_move = MOVE_WHITE;
-
-  brd.rc[4][5] = brd.rc[3][5];
-  brd.rc[3][5] = 0;
+  brd.rc[1][0] = brd.rc[2][1];
+  brd.rc[2][1] = 0;
   info.next_move = MOVE_BLACK;
 
+  brd.rc[0][7] = brd.rc[0][6];
+  brd.rc[0][6] = 0;
+  info.next_move = MOVE_WHITE;
 
 #endif
-
 
 #if 0
   brdutilStartPositionCreate(&brd, &info);

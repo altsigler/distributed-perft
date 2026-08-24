@@ -98,6 +98,24 @@ static unsigned long long udlrVisibilityMap[BRDS*BRDS][MAX_UDLR_HASH_INDEX];
 */
 static dangerMap_t dangerMap[BRDS*BRDS];
 
+#if defined (USE_BMI2)
+/* The "occupancyDangerMap" table is organized as a double subscribted array indexed
+** by the mover king position and the occupancy hash value.
+** This table finds dangerous squares only to which the king can move. In other words
+** any squares with a piece of the same color as the king are not considered as
+** valid king move destinations.
+*/
+static dangerMap_t occupancyDangerMap[BRDS*BRDS][1<<13];
+
+/* This is a mask agains which we generate the occupancyDangerMap.
+** For most squares the kingOccupancy is the same as kingAttack. 
+** This is not the case for row 0 and row 7. Since we want to optimize the 
+** performance for starting position, we use up to 13 squares around the 
+** king.
+*/
+unsigned long long kingOccupancy [BRDS*BRDS];
+#endif
+
 
 #define POSITION_TO_BITMASK_LOOKUP(m_row,m_col)\
                     bitbrdMaskFromPositionGet((unsigned int)(m_row),(unsigned int)(m_col)) 
@@ -501,7 +519,17 @@ static kingAttackHelper_t pinCompute (
   const unsigned int king_index = bitbrdLowestIndexFromMaskGet(attack_king);
   attack_mask |= kingAttack[king_index];
 
-  const dangerMap_t danger_map = dangerMap[position_index];
+#if defined(USE_BMI2)
+    const unsigned long long occupancy_index =
+//                            _pext_u64 ((any_color_pieces_mask & ~king_attack_mask) | mover_pieces_mask, 
+                            _pext_u64 (mover_pieces_mask, 
+                                             kingOccupancy[position_index]);
+    const dangerMap_t danger_map =
+                    occupancyDangerMap[position_index][occupancy_index];
+#else
+    const dangerMap_t danger_map =
+                    dangerMap[position_index];
+#endif
                    
 
 
@@ -574,6 +602,18 @@ static kingAttackHelper_t pinCompute (
       }
     } else
     {
+#if 0 // HACK
+      static unsigned int num_pos = 0;
+      num_pos++;
+      if (num_pos > 1'000'000)
+      {
+        printf ("whose_move:%s Attack Row:%u Attack Column:%u\n", 
+                    (whose_move == MOVE_WHITE)?"White":"Black",
+                    index >> 3, index & 7);
+        bitbrdPrint (piece);
+        exit (-1);
+      }
+#endif
       attack_mask |= diagonalVisibilityMap[index]
                                         [lookupKeyCompute (any_color_pieces_mask, diagonalBlocker[index])];
     }
@@ -625,6 +665,18 @@ static kingAttackHelper_t pinCompute (
       } 
     } else
     {
+#if 0 // HACK
+      static unsigned int num_pos = 0;
+      num_pos++;
+      if (num_pos > 1'000'000)
+      {
+        printf ("whose_move:%s Attack Row:%u Attack Column:%u\n", 
+                    (whose_move == MOVE_WHITE)?"White":"Black",
+                    index >> 3, index & 7);
+        bitbrdPrint (piece);
+        exit (-1);
+      }
+#endif
       attack_mask |= udlrVisibilityMap[index]
                                     [lookupKeyCompute (any_color_pieces_mask, udlrBlocker[index])];
     }
@@ -6044,6 +6096,371 @@ static void dangerMapCreate (void)
   dangerMap[black_king_start_idx].knight_danger_mask |= knightAttack[black_long_castle_idx];
   dangerMap[black_king_start_idx].diagonal_danger_mask |= diagonalAttack[black_long_castle_idx];
   dangerMap[black_king_start_idx].udlr_danger_mask |= udlrAttack[black_long_castle_idx];
+
+
+#if defined(USE_BMI2)
+
+  for (unsigned int i = 0; i < BRDS*BRDS; i++)
+  {
+    kingOccupancy[i] = kingAttack[i];
+  }
+
+  /* Improve performance in the standard starting position, as well 
+  ** as any positions where the white king is in rank 1 and the 
+  ** black king is in rank 8.
+  **
+  ** Use all 13 bits of the kingOccupancy mask to test whether the squares
+  ** to which the king can move could be under attack.
+  */
+
+  /* White King Default Starting Position
+  */
+  kingOccupancy[POSIDX(0,4)] = 
+                        bitbrdMaskFromPositionGet(0,3) | 
+                        bitbrdMaskFromPositionGet(0,5) | 
+                        bitbrdMaskFromPositionGet(1,2) | 
+                        bitbrdMaskFromPositionGet(1,3) | 
+                        bitbrdMaskFromPositionGet(1,4) | 
+                        bitbrdMaskFromPositionGet(1,5) | 
+                        bitbrdMaskFromPositionGet(1,6) | 
+                        bitbrdMaskFromPositionGet(2,3) | 
+                        bitbrdMaskFromPositionGet(2,4) | 
+                        bitbrdMaskFromPositionGet(2,5) | 
+                        bitbrdMaskFromPositionGet(3,3) | 
+                        bitbrdMaskFromPositionGet(3,4) | 
+                        bitbrdMaskFromPositionGet(3,5); 
+
+  /* White King Position after King-Side castle.
+  */
+  kingOccupancy[POSIDX(0,6)] = 
+                        bitbrdMaskFromPositionGet(0,4) | 
+                        bitbrdMaskFromPositionGet(0,5) | 
+                        bitbrdMaskFromPositionGet(1,4) | 
+                        bitbrdMaskFromPositionGet(1,5) | 
+                        bitbrdMaskFromPositionGet(1,6) | 
+                        bitbrdMaskFromPositionGet(1,7) | 
+                        bitbrdMaskFromPositionGet(2,4) | 
+                        bitbrdMaskFromPositionGet(2,5) | 
+                        bitbrdMaskFromPositionGet(2,6) | 
+                        bitbrdMaskFromPositionGet(2,7) | 
+                        bitbrdMaskFromPositionGet(3,5) | 
+                        bitbrdMaskFromPositionGet(3,6) | 
+                        bitbrdMaskFromPositionGet(3,7); 
+
+
+  /* White King Position after Queen-Side castle.
+  */
+  kingOccupancy[POSIDX(0,2)] =
+                        bitbrdMaskFromPositionGet(0,1) |
+                        bitbrdMaskFromPositionGet(0,3) |
+                        bitbrdMaskFromPositionGet(1,1) |
+                        bitbrdMaskFromPositionGet(1,2) |
+                        bitbrdMaskFromPositionGet(1,3) |
+                        bitbrdMaskFromPositionGet(1,4) |
+                        bitbrdMaskFromPositionGet(2,1) |
+                        bitbrdMaskFromPositionGet(2,2) |
+                        bitbrdMaskFromPositionGet(2,3) |
+                        bitbrdMaskFromPositionGet(2,4) |
+                        bitbrdMaskFromPositionGet(3,1) |
+                        bitbrdMaskFromPositionGet(3,2) |
+                        bitbrdMaskFromPositionGet(3,3);
+
+  /* White King Moved 1 square left.
+  */
+  kingOccupancy[POSIDX(0,3)] = 
+                        bitbrdMaskFromPositionGet(0,2) | 
+                        bitbrdMaskFromPositionGet(0,4) | 
+                        bitbrdMaskFromPositionGet(1,1) | 
+                        bitbrdMaskFromPositionGet(1,2) | 
+                        bitbrdMaskFromPositionGet(1,3) | 
+                        bitbrdMaskFromPositionGet(1,4) | 
+                        bitbrdMaskFromPositionGet(1,5) | 
+                        bitbrdMaskFromPositionGet(2,2) | 
+                        bitbrdMaskFromPositionGet(2,3) | 
+                        bitbrdMaskFromPositionGet(2,4) | 
+                        bitbrdMaskFromPositionGet(3,2) | 
+                        bitbrdMaskFromPositionGet(3,3) | 
+                        bitbrdMaskFromPositionGet(3,4); 
+
+  /* White King Moved 1 square right.
+  */
+  kingOccupancy[POSIDX(0,5)] =
+                        bitbrdMaskFromPositionGet(0,4) |
+                        bitbrdMaskFromPositionGet(0,6) |
+                        bitbrdMaskFromPositionGet(1,3) |
+                        bitbrdMaskFromPositionGet(1,4) |
+                        bitbrdMaskFromPositionGet(1,5) |
+                        bitbrdMaskFromPositionGet(1,6) |
+                        bitbrdMaskFromPositionGet(1,7) |
+                        bitbrdMaskFromPositionGet(2,4) |
+                        bitbrdMaskFromPositionGet(2,5) |
+                        bitbrdMaskFromPositionGet(2,6) |
+                        bitbrdMaskFromPositionGet(3,4) |
+                        bitbrdMaskFromPositionGet(3,5) |
+                        bitbrdMaskFromPositionGet(3,6);
+
+  /* White King in right corner.
+  */
+  kingOccupancy[POSIDX(0,7)] =
+                        bitbrdMaskFromPositionGet(0,6) |
+                        bitbrdMaskFromPositionGet(0,5) |
+                        bitbrdMaskFromPositionGet(1,5) |
+                        bitbrdMaskFromPositionGet(1,6) |
+                        bitbrdMaskFromPositionGet(2,5) |
+                        bitbrdMaskFromPositionGet(2,6) |
+                        bitbrdMaskFromPositionGet(3,5) |
+                        bitbrdMaskFromPositionGet(3,6) |
+                        bitbrdMaskFromPositionGet(4,5) |
+                        bitbrdMaskFromPositionGet(4,6) |
+                        bitbrdMaskFromPositionGet(5,5) |
+                        bitbrdMaskFromPositionGet(5,6) |
+                        bitbrdMaskFromPositionGet(6,5);
+
+  /* White King in left corner.
+  */
+  kingOccupancy[POSIDX(0,0)] =
+                        bitbrdMaskFromPositionGet(0,1) |
+                        bitbrdMaskFromPositionGet(0,2) |
+                        bitbrdMaskFromPositionGet(1,1) |
+                        bitbrdMaskFromPositionGet(1,2) |
+                        bitbrdMaskFromPositionGet(2,1) |
+                        bitbrdMaskFromPositionGet(2,2) |
+                        bitbrdMaskFromPositionGet(3,1) |
+                        bitbrdMaskFromPositionGet(3,2) |
+                        bitbrdMaskFromPositionGet(4,1) |
+                        bitbrdMaskFromPositionGet(4,2) |
+                        bitbrdMaskFromPositionGet(5,1) |
+                        bitbrdMaskFromPositionGet(5,2) |
+                        bitbrdMaskFromPositionGet(6,1);
+
+   /* White King in column 2.
+   */
+  kingOccupancy[POSIDX(0,1)] =
+                        bitbrdMaskFromPositionGet(0,2) |
+                        bitbrdMaskFromPositionGet(0,3) |
+                        bitbrdMaskFromPositionGet(1,0) |
+                        bitbrdMaskFromPositionGet(1,1) |
+                        bitbrdMaskFromPositionGet(1,2) |
+                        bitbrdMaskFromPositionGet(1,3) |
+                        bitbrdMaskFromPositionGet(2,0) |
+                        bitbrdMaskFromPositionGet(2,1) |
+                        bitbrdMaskFromPositionGet(2,2) |
+                        bitbrdMaskFromPositionGet(2,3) |
+                        bitbrdMaskFromPositionGet(3,0) |
+                        bitbrdMaskFromPositionGet(3,1) |
+                        bitbrdMaskFromPositionGet(3,2);
+
+
+
+  /* Black King Default Starting Position
+  */
+  kingOccupancy[POSIDX(7,4)] = 
+                        bitbrdMaskFromPositionGet(7,3) | 
+                        bitbrdMaskFromPositionGet(7,5) | 
+                        bitbrdMaskFromPositionGet(6,2) | 
+                        bitbrdMaskFromPositionGet(6,3) | 
+                        bitbrdMaskFromPositionGet(6,4) | 
+                        bitbrdMaskFromPositionGet(6,5) | 
+                        bitbrdMaskFromPositionGet(6,6) | 
+                        bitbrdMaskFromPositionGet(5,3) | 
+                        bitbrdMaskFromPositionGet(5,4) | 
+                        bitbrdMaskFromPositionGet(5,5) | 
+                        bitbrdMaskFromPositionGet(4,3) | 
+                        bitbrdMaskFromPositionGet(4,4) | 
+                        bitbrdMaskFromPositionGet(4,5); 
+  
+  /* Black King Position after King-Side castle.
+  */
+  kingOccupancy[POSIDX(7,6)] = 
+                        bitbrdMaskFromPositionGet(7,4) | 
+                        bitbrdMaskFromPositionGet(7,5) | 
+                        bitbrdMaskFromPositionGet(6,4) | 
+                        bitbrdMaskFromPositionGet(6,5) | 
+                        bitbrdMaskFromPositionGet(6,6) | 
+                        bitbrdMaskFromPositionGet(6,7) | 
+                        bitbrdMaskFromPositionGet(5,4) | 
+                        bitbrdMaskFromPositionGet(5,5) | 
+                        bitbrdMaskFromPositionGet(5,6) | 
+                        bitbrdMaskFromPositionGet(5,7) | 
+                        bitbrdMaskFromPositionGet(4,5) | 
+                        bitbrdMaskFromPositionGet(4,6) | 
+                        bitbrdMaskFromPositionGet(4,7); 
+
+  /* Black King Position after Queen-Side castle.
+  */
+  kingOccupancy[POSIDX(7,2)] =
+                        bitbrdMaskFromPositionGet(7,1) |
+                        bitbrdMaskFromPositionGet(7,3) |
+                        bitbrdMaskFromPositionGet(6,1) |
+                        bitbrdMaskFromPositionGet(6,2) |
+                        bitbrdMaskFromPositionGet(6,3) |
+                        bitbrdMaskFromPositionGet(6,4) |
+                        bitbrdMaskFromPositionGet(5,1) |
+                        bitbrdMaskFromPositionGet(5,2) |
+                        bitbrdMaskFromPositionGet(5,3) |
+                        bitbrdMaskFromPositionGet(5,4) |
+                        bitbrdMaskFromPositionGet(4,1) |
+                        bitbrdMaskFromPositionGet(4,2) |
+                        bitbrdMaskFromPositionGet(4,3);
+
+  /* Black King Moved 1 square left.
+  */
+  kingOccupancy[POSIDX(7,3)] = 
+                        bitbrdMaskFromPositionGet(7,2) | 
+                        bitbrdMaskFromPositionGet(7,4) | 
+                        bitbrdMaskFromPositionGet(6,1) | 
+                        bitbrdMaskFromPositionGet(6,2) | 
+                        bitbrdMaskFromPositionGet(6,3) | 
+                        bitbrdMaskFromPositionGet(6,4) | 
+                        bitbrdMaskFromPositionGet(6,5) | 
+                        bitbrdMaskFromPositionGet(5,2) | 
+                        bitbrdMaskFromPositionGet(5,3) | 
+                        bitbrdMaskFromPositionGet(5,4) | 
+                        bitbrdMaskFromPositionGet(4,2) | 
+                        bitbrdMaskFromPositionGet(4,3) | 
+                        bitbrdMaskFromPositionGet(4,4); 
+
+  /* Black King Moved 1 square right.
+  */
+  kingOccupancy[POSIDX(7,5)] =
+                        bitbrdMaskFromPositionGet(7,4) |
+                        bitbrdMaskFromPositionGet(7,6) |
+                        bitbrdMaskFromPositionGet(6,3) |
+                        bitbrdMaskFromPositionGet(6,4) |
+                        bitbrdMaskFromPositionGet(6,5) |
+                        bitbrdMaskFromPositionGet(6,6) |
+                        bitbrdMaskFromPositionGet(6,7) |
+                        bitbrdMaskFromPositionGet(5,4) |
+                        bitbrdMaskFromPositionGet(5,5) |
+                        bitbrdMaskFromPositionGet(5,6) |
+                        bitbrdMaskFromPositionGet(4,4) |
+                        bitbrdMaskFromPositionGet(4,5) |
+                        bitbrdMaskFromPositionGet(4,6);
+
+  /* Black King in right corner.
+  */
+  kingOccupancy[POSIDX(7,7)] =
+                        bitbrdMaskFromPositionGet(7,6) |
+                        bitbrdMaskFromPositionGet(7,5) |
+                        bitbrdMaskFromPositionGet(6,5) |
+                        bitbrdMaskFromPositionGet(6,6) |
+                        bitbrdMaskFromPositionGet(5,5) |
+                        bitbrdMaskFromPositionGet(5,6) |
+                        bitbrdMaskFromPositionGet(4,5) |
+                        bitbrdMaskFromPositionGet(4,6) |
+                        bitbrdMaskFromPositionGet(3,5) |
+                        bitbrdMaskFromPositionGet(3,6) |
+                        bitbrdMaskFromPositionGet(2,5) |
+                        bitbrdMaskFromPositionGet(2,6) |
+                        bitbrdMaskFromPositionGet(1,5);
+
+  /* White King in left corner.
+  */
+  kingOccupancy[POSIDX(7,0)] =
+                        bitbrdMaskFromPositionGet(7,1) |
+                        bitbrdMaskFromPositionGet(7,2) |
+                        bitbrdMaskFromPositionGet(6,1) |
+                        bitbrdMaskFromPositionGet(6,2) |
+                        bitbrdMaskFromPositionGet(5,1) |
+                        bitbrdMaskFromPositionGet(5,2) |
+                        bitbrdMaskFromPositionGet(4,1) |
+                        bitbrdMaskFromPositionGet(4,2) |
+                        bitbrdMaskFromPositionGet(3,1) |
+                        bitbrdMaskFromPositionGet(3,2) |
+                        bitbrdMaskFromPositionGet(2,1) |
+                        bitbrdMaskFromPositionGet(2,2) |
+                        bitbrdMaskFromPositionGet(1,1);
+
+   /* White King in column 2.
+   */
+  kingOccupancy[POSIDX(7,1)] =
+                        bitbrdMaskFromPositionGet(7,2) |
+                        bitbrdMaskFromPositionGet(7,3) |
+                        bitbrdMaskFromPositionGet(6,0) |
+                        bitbrdMaskFromPositionGet(6,1) |
+                        bitbrdMaskFromPositionGet(6,2) |
+                        bitbrdMaskFromPositionGet(6,3) |
+                        bitbrdMaskFromPositionGet(5,0) |
+                        bitbrdMaskFromPositionGet(5,1) |
+                        bitbrdMaskFromPositionGet(5,2) |
+                        bitbrdMaskFromPositionGet(5,3) |
+                        bitbrdMaskFromPositionGet(4,0) |
+                        bitbrdMaskFromPositionGet(4,1) |
+                        bitbrdMaskFromPositionGet(4,2);
+
+
+  for (unsigned int i = 0; i < BRDS*BRDS; i++)
+  {
+    const unsigned long long king_occupancy_mask = kingOccupancy[i];
+    unsigned long long king_movement_mask = kingAttack[i];
+    const unsigned int king_occupancy_size =
+                            (unsigned int) __builtin_popcountll (king_occupancy_mask);
+
+    /* Add castling squares to the king movement mask.
+    */
+    if ((i == POSIDX (0,4)) || (i == POSIDX (7,4)))
+    {
+      king_movement_mask |= (1LLU << (i-2));
+      king_movement_mask |= (1LLU << (i+2));
+    }    
+
+    for (unsigned int j = 0; j < (1U << king_occupancy_size); j++)
+    {
+      const unsigned long long occupied_squares = _pdep_u64 (j, king_occupancy_mask);
+      unsigned long long open_squares = king_movement_mask & ~occupied_squares;
+
+      while (open_squares)
+      {
+        const unsigned int index = bitbrdLowestIndexFromMaskGet(open_squares);
+        open_squares ^= 1LLU << index;
+
+        occupancyDangerMap[i][j].knight_danger_mask |= knightAttack[index];
+
+        /* We need to take one more step to remove dangerous squares
+        ** that are not actually dangerous because the lane between the attacker and the
+        ** empty square is blocked by a mover's piece.
+        */
+        unsigned long long diagonal_danger_mask = diagonalAttack[index];
+        while (diagonal_danger_mask)
+        {
+          const unsigned int diagonal_index = bitbrdLowestIndexFromMaskGet(diagonal_danger_mask);
+          diagonal_danger_mask ^= 1LLU << diagonal_index;
+
+          const unsigned long long attack_lane = attackLanes[index][diagonal_index];
+          const unsigned long long detected_pieces = attack_lane & occupied_squares;
+          if (!detected_pieces)
+          {
+            occupancyDangerMap[i][j].diagonal_danger_mask |= 1LLU << diagonal_index;
+          }
+        }
+
+
+        unsigned long long udlr_danger_mask = udlrAttack[index];
+        while (udlr_danger_mask)
+        {
+          const unsigned int udlr_index = bitbrdLowestIndexFromMaskGet(udlr_danger_mask);
+          udlr_danger_mask ^= 1LLU << udlr_index;
+
+          const unsigned long long attack_lane = attackLanes[index][udlr_index];
+          const unsigned long long detected_pieces = attack_lane & occupied_squares;
+          if (!detected_pieces)
+          {
+            occupancyDangerMap[i][j].udlr_danger_mask |= 1LLU << udlr_index;
+          }
+        }
+      }
+
+      /* Add knight/bishop/rook attack squares on the king.
+      */
+      occupancyDangerMap[i][j].knight_danger_mask |= knightAttack[i];
+      occupancyDangerMap[i][j].diagonal_danger_mask |= diagonalAttack[i];
+      occupancyDangerMap[i][j].udlr_danger_mask |= udlrAttack[i];
+
+    }
+
+  }
+#endif // USE_BMI2
+
 
 }
 
