@@ -87,34 +87,25 @@ static unsigned long long udlrVisibilityMap[BRDS*BRDS][MAX_UDLR_HASH_INDEX];
 ** The "danger" table represents squares from which opponent pieces can
 ** attack one of the squares to which the king can move.
 ** There are three different "danger" vectors. One used for knights, one used for
-** bishops, one used for rooks, and one used for queens.
+** bishops and one used for rooks.
 ** The opponent pawns and king don't use the "danger" table because it is quicker to simply
 ** test for attack from those pieces.
 **
-** The "danger" table is organized as an array indexed by the mover king position.
-** Note that this table finds dangerous squares for all squares to which the king
-** is capable of moving, including squares on which another mover color piece is
-** already located.
-*/
-static dangerMap_t dangerMap[BRDS*BRDS];
-
-#if defined (USE_BMI2)
-/* The "occupancyDangerMap" table is organized as a double subscribted array indexed
+** The "occupancyDangerMap" table is organized as a double subscribted array indexed
 ** by the mover king position and the occupancy hash value.
 ** This table finds dangerous squares only to which the king can move. In other words
 ** any squares with a piece of the same color as the king are not considered as
 ** valid king move destinations.
 */
-static dangerMap_t occupancyDangerMap[BRDS*BRDS][1<<13];
+static dangerMap_t occupancyDangerMap[BRDS*BRDS][1<<12];
 
 /* This is a mask agains which we generate the occupancyDangerMap.
 ** For most squares the kingOccupancy is the same as kingAttack. 
 ** This is not the case for row 0 and row 7. Since we want to optimize the 
-** performance for starting position, we use up to 13 squares around the 
+** performance for starting position, we use up to 12 squares around the 
 ** king.
 */
 unsigned long long kingOccupancy [BRDS*BRDS];
-#endif
 
 
 #define POSITION_TO_BITMASK_LOOKUP(m_row,m_col)\
@@ -174,12 +165,7 @@ MOVE_APPLY (
 inline static unsigned long long __attribute__((always_inline))
 lookupKeyCompute (const unsigned long long val, const unsigned long long mask)
 {
-#if defined(USE_BMI2)
     return  _pext_u64 (val, mask);
-#else
-#error Missing hardware support for PEXT and CRC32.
-#endif
-
 }
 
 
@@ -519,20 +505,12 @@ static kingAttackHelper_t pinCompute (
   const unsigned int king_index = bitbrdLowestIndexFromMaskGet(attack_king);
   attack_mask |= kingAttack[king_index];
 
-#if defined(USE_BMI2)
-    const unsigned long long occupancy_index =
-//                            _pext_u64 ((any_color_pieces_mask & ~king_attack_mask) | mover_pieces_mask, 
-                            _pext_u64 (mover_pieces_mask, 
+  const unsigned long long occupancy_index =
+                            _pext_u64 (mover_pieces_mask,
                                              kingOccupancy[position_index]);
-    const dangerMap_t danger_map =
+  const dangerMap_t danger_map =
                     occupancyDangerMap[position_index][occupancy_index];
-#else
-    const dangerMap_t danger_map =
-                    dangerMap[position_index];
-#endif
                    
-
-
   // Knight Attack
   unsigned long long opponent_knight_mask = attack_knight & 
                                                 danger_map.knight_danger_mask;
@@ -602,18 +580,6 @@ static kingAttackHelper_t pinCompute (
       }
     } else
     {
-#if 0 // HACK
-      static unsigned int num_pos = 0;
-      num_pos++;
-      if (num_pos > 1'000'000)
-      {
-        printf ("whose_move:%s Attack Row:%u Attack Column:%u\n", 
-                    (whose_move == MOVE_WHITE)?"White":"Black",
-                    index >> 3, index & 7);
-        bitbrdPrint (piece);
-        exit (-1);
-      }
-#endif
       attack_mask |= diagonalVisibilityMap[index]
                                         [lookupKeyCompute (any_color_pieces_mask, diagonalBlocker[index])];
     }
@@ -665,18 +631,6 @@ static kingAttackHelper_t pinCompute (
       } 
     } else
     {
-#if 0 // HACK
-      static unsigned int num_pos = 0;
-      num_pos++;
-      if (num_pos > 1'000'000)
-      {
-        printf ("whose_move:%s Attack Row:%u Attack Column:%u\n", 
-                    (whose_move == MOVE_WHITE)?"White":"Black",
-                    index >> 3, index & 7);
-        bitbrdPrint (piece);
-        exit (-1);
-      }
-#endif
       attack_mask |= udlrVisibilityMap[index]
                                     [lookupKeyCompute (any_color_pieces_mask, udlrBlocker[index])];
     }
@@ -5663,17 +5617,6 @@ static unsigned long long allMoveCandidatesLastPlyFind (
                            const unsigned long long mover_pieces_mask,
                            const unsigned int def_piece_complement)
 {     
-#if 0 // HACK
-  if (((def_piece_complement & 1) && (0 == (1 & pieceStandardComplement(piece)))) ||
-     ((def_piece_complement & 2) && (0 == (2 & pieceStandardComplement(piece)))))
-  {
-    printf ("def_piece_complement:%u\n", def_piece_complement);
-    printf ("pieceStandardComplement(piece):%u\n", pieceStandardComplement(piece));
-    bitbrdPrint (piece);
-    exit (-1);
-  }
-#endif                        
-
   unsigned long long num_moves = 0;
   const unsigned long long king_mask = piece [S_KING | (whose_move << 3)];
   const unsigned int king_position = bitbrdLowestIndexFromMaskGet(king_mask);
@@ -6040,76 +5983,14 @@ static void dangerMapCreate (void)
 {
   for (unsigned int i = 0; i < BRDS*BRDS; i++)
   {
-    unsigned long long king_attack_mask = kingAttack[i];
-
-    /* Add attack vectors on the squares to which the king can move.
-    */
-    while (king_attack_mask)
-    {
-      const unsigned int index = bitbrdLowestIndexFromMaskGet(king_attack_mask);
-      king_attack_mask ^= 1LLU << index;
-
-      dangerMap[i].knight_danger_mask |= knightAttack[index];
-
-      dangerMap[i].diagonal_danger_mask |= diagonalAttack[index];
-      dangerMap[i].udlr_danger_mask |= udlrAttack[index];
-    }
-
-    /* Add attack vectors on the king.
-    */
-    dangerMap[i].knight_danger_mask |= knightAttack[i];
-    dangerMap[i].diagonal_danger_mask |= diagonalAttack[i];
-    dangerMap[i].udlr_danger_mask |= udlrAttack[i];
-  }
-
-  /* For starting king position add castling squares into the danger map.
-  */
-  constexpr unsigned int white_king_start_idx = POSIDX(0, 4);
-  constexpr unsigned int black_king_start_idx = POSIDX(7, 4);
-
-  constexpr unsigned int white_short_castle_idx = POSIDX(0, 6);
-  constexpr unsigned int black_short_castle_idx = POSIDX(7, 6);
-
-  constexpr unsigned int white_long_castle_idx = POSIDX(0, 2);
-  constexpr unsigned int black_long_castle_idx = POSIDX(7, 2);
-
-  /* Short Castle White.
-  */
-  dangerMap[white_king_start_idx].knight_danger_mask |= knightAttack[white_short_castle_idx];
-  dangerMap[white_king_start_idx].diagonal_danger_mask |= diagonalAttack[white_short_castle_idx];
-  dangerMap[white_king_start_idx].udlr_danger_mask |= udlrAttack[white_short_castle_idx];
-
-  /* Long Castle White.
-  */
-  dangerMap[white_king_start_idx].knight_danger_mask |= knightAttack[white_long_castle_idx];
-  dangerMap[white_king_start_idx].diagonal_danger_mask |= diagonalAttack[white_long_castle_idx];
-  dangerMap[white_king_start_idx].udlr_danger_mask |= udlrAttack[white_long_castle_idx];
-
-  /* Short Castle Black.
-  */
-  dangerMap[black_king_start_idx].knight_danger_mask |= knightAttack[black_short_castle_idx];
-  dangerMap[black_king_start_idx].diagonal_danger_mask |= diagonalAttack[black_short_castle_idx];
-  dangerMap[black_king_start_idx].udlr_danger_mask |= udlrAttack[black_short_castle_idx];
-
-  /* Long Castle Black.
-  */
-  dangerMap[black_king_start_idx].knight_danger_mask |= knightAttack[black_long_castle_idx];
-  dangerMap[black_king_start_idx].diagonal_danger_mask |= diagonalAttack[black_long_castle_idx];
-  dangerMap[black_king_start_idx].udlr_danger_mask |= udlrAttack[black_long_castle_idx];
-
-
-#if defined(USE_BMI2)
-
-  for (unsigned int i = 0; i < BRDS*BRDS; i++)
-  {
     kingOccupancy[i] = kingAttack[i];
   }
 
   /* Improve performance in the standard starting position, as well 
-  ** as any positions where the white king is in rank 1 and the 
-  ** black king is in rank 8.
+  ** as any positions where the white king starts in rank 1 and the 
+  ** black king starts in rank 8.
   **
-  ** Use all 13 bits of the kingOccupancy mask to test whether the squares
+  ** Use all 12 bits of the kingOccupancy mask to test whether the squares
   ** to which the king can move could be under attack.
   */
 
@@ -6127,7 +6008,6 @@ static void dangerMapCreate (void)
                         bitbrdMaskFromPositionGet(2,4) | 
                         bitbrdMaskFromPositionGet(2,5) | 
                         bitbrdMaskFromPositionGet(3,3) | 
-                        bitbrdMaskFromPositionGet(3,4) | 
                         bitbrdMaskFromPositionGet(3,5); 
 
   /* White King Position after King-Side castle.
@@ -6144,7 +6024,6 @@ static void dangerMapCreate (void)
                         bitbrdMaskFromPositionGet(2,6) | 
                         bitbrdMaskFromPositionGet(2,7) | 
                         bitbrdMaskFromPositionGet(3,5) | 
-                        bitbrdMaskFromPositionGet(3,6) | 
                         bitbrdMaskFromPositionGet(3,7); 
 
 
@@ -6162,7 +6041,6 @@ static void dangerMapCreate (void)
                         bitbrdMaskFromPositionGet(2,3) |
                         bitbrdMaskFromPositionGet(2,4) |
                         bitbrdMaskFromPositionGet(3,1) |
-                        bitbrdMaskFromPositionGet(3,2) |
                         bitbrdMaskFromPositionGet(3,3);
 
   /* White King Moved 1 square left.
@@ -6179,7 +6057,6 @@ static void dangerMapCreate (void)
                         bitbrdMaskFromPositionGet(2,3) | 
                         bitbrdMaskFromPositionGet(2,4) | 
                         bitbrdMaskFromPositionGet(3,2) | 
-                        bitbrdMaskFromPositionGet(3,3) | 
                         bitbrdMaskFromPositionGet(3,4); 
 
   /* White King Moved 1 square right.
@@ -6196,7 +6073,6 @@ static void dangerMapCreate (void)
                         bitbrdMaskFromPositionGet(2,5) |
                         bitbrdMaskFromPositionGet(2,6) |
                         bitbrdMaskFromPositionGet(3,4) |
-                        bitbrdMaskFromPositionGet(3,5) |
                         bitbrdMaskFromPositionGet(3,6);
 
   /* White King in right corner.
@@ -6213,7 +6089,6 @@ static void dangerMapCreate (void)
                         bitbrdMaskFromPositionGet(4,5) |
                         bitbrdMaskFromPositionGet(4,6) |
                         bitbrdMaskFromPositionGet(5,5) |
-                        bitbrdMaskFromPositionGet(5,6) |
                         bitbrdMaskFromPositionGet(6,5);
 
   /* White King in left corner.
@@ -6230,8 +6105,7 @@ static void dangerMapCreate (void)
                         bitbrdMaskFromPositionGet(4,1) |
                         bitbrdMaskFromPositionGet(4,2) |
                         bitbrdMaskFromPositionGet(5,1) |
-                        bitbrdMaskFromPositionGet(5,2) |
-                        bitbrdMaskFromPositionGet(6,1);
+                        bitbrdMaskFromPositionGet(5,2);
 
    /* White King in column 2.
    */
@@ -6247,7 +6121,6 @@ static void dangerMapCreate (void)
                         bitbrdMaskFromPositionGet(2,2) |
                         bitbrdMaskFromPositionGet(2,3) |
                         bitbrdMaskFromPositionGet(3,0) |
-                        bitbrdMaskFromPositionGet(3,1) |
                         bitbrdMaskFromPositionGet(3,2);
 
 
@@ -6266,7 +6139,6 @@ static void dangerMapCreate (void)
                         bitbrdMaskFromPositionGet(5,4) | 
                         bitbrdMaskFromPositionGet(5,5) | 
                         bitbrdMaskFromPositionGet(4,3) | 
-                        bitbrdMaskFromPositionGet(4,4) | 
                         bitbrdMaskFromPositionGet(4,5); 
   
   /* Black King Position after King-Side castle.
@@ -6283,7 +6155,6 @@ static void dangerMapCreate (void)
                         bitbrdMaskFromPositionGet(5,6) | 
                         bitbrdMaskFromPositionGet(5,7) | 
                         bitbrdMaskFromPositionGet(4,5) | 
-                        bitbrdMaskFromPositionGet(4,6) | 
                         bitbrdMaskFromPositionGet(4,7); 
 
   /* Black King Position after Queen-Side castle.
@@ -6300,7 +6171,6 @@ static void dangerMapCreate (void)
                         bitbrdMaskFromPositionGet(5,3) |
                         bitbrdMaskFromPositionGet(5,4) |
                         bitbrdMaskFromPositionGet(4,1) |
-                        bitbrdMaskFromPositionGet(4,2) |
                         bitbrdMaskFromPositionGet(4,3);
 
   /* Black King Moved 1 square left.
@@ -6317,7 +6187,6 @@ static void dangerMapCreate (void)
                         bitbrdMaskFromPositionGet(5,3) | 
                         bitbrdMaskFromPositionGet(5,4) | 
                         bitbrdMaskFromPositionGet(4,2) | 
-                        bitbrdMaskFromPositionGet(4,3) | 
                         bitbrdMaskFromPositionGet(4,4); 
 
   /* Black King Moved 1 square right.
@@ -6334,7 +6203,6 @@ static void dangerMapCreate (void)
                         bitbrdMaskFromPositionGet(5,5) |
                         bitbrdMaskFromPositionGet(5,6) |
                         bitbrdMaskFromPositionGet(4,4) |
-                        bitbrdMaskFromPositionGet(4,5) |
                         bitbrdMaskFromPositionGet(4,6);
 
   /* Black King in right corner.
@@ -6351,10 +6219,9 @@ static void dangerMapCreate (void)
                         bitbrdMaskFromPositionGet(3,5) |
                         bitbrdMaskFromPositionGet(3,6) |
                         bitbrdMaskFromPositionGet(2,5) |
-                        bitbrdMaskFromPositionGet(2,6) |
-                        bitbrdMaskFromPositionGet(1,5);
+                        bitbrdMaskFromPositionGet(2,6);
 
-  /* White King in left corner.
+  /* Black King in left corner.
   */
   kingOccupancy[POSIDX(7,0)] =
                         bitbrdMaskFromPositionGet(7,1) |
@@ -6368,10 +6235,9 @@ static void dangerMapCreate (void)
                         bitbrdMaskFromPositionGet(3,1) |
                         bitbrdMaskFromPositionGet(3,2) |
                         bitbrdMaskFromPositionGet(2,1) |
-                        bitbrdMaskFromPositionGet(2,2) |
-                        bitbrdMaskFromPositionGet(1,1);
+                        bitbrdMaskFromPositionGet(2,2);
 
-   /* White King in column 2.
+   /* Black King in column 2.
    */
   kingOccupancy[POSIDX(7,1)] =
                         bitbrdMaskFromPositionGet(7,2) |
@@ -6385,9 +6251,7 @@ static void dangerMapCreate (void)
                         bitbrdMaskFromPositionGet(5,2) |
                         bitbrdMaskFromPositionGet(5,3) |
                         bitbrdMaskFromPositionGet(4,0) |
-                        bitbrdMaskFromPositionGet(4,1) |
                         bitbrdMaskFromPositionGet(4,2);
-
 
   for (unsigned int i = 0; i < BRDS*BRDS; i++)
   {
@@ -6459,9 +6323,6 @@ static void dangerMapCreate (void)
     }
 
   }
-#endif // USE_BMI2
-
-
 }
 
 

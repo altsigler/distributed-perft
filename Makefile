@@ -8,7 +8,7 @@ DEBUG=-g
 #DEBUG=-g -Og
 #DEBUG=-g -Og -fsanitize=address -fsanitize=undefined
 #DEBUG= -fanalyzer
-#DEBUG=-g -Og --coverage
+#DEBUG=-g -O0 --coverage
 
 #
 # Enable static analysis. Must be used with gcc-10 or newer compilers.
