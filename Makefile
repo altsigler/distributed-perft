@@ -29,23 +29,43 @@ DEBUG=-g
 #DEBUG= -g -Og
 
 MARCH=
-uname_s := $(shell uname -s)
-ifeq ($(uname_s),Linux)
-#MARCH += -march=native
-MARCH += -mbmi
-MARCH += -mbmi2
-MARCH += -mavx
-MARCH += -mavx2
-MARCH += -msse4
-endif
 
 
+all: MARCH += -march=native
 all: brdutil.o movegen.o bytebrd.o onecore.o mcperft_api.o mcperft_internal.o
 	ar rcs chlib.a mcperft_api.o mcperft_internal.o movegen.o brdutil.o bytebrd.o onecore.o
 	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -o perft perft.c chlib.a
 	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -o codecov codecov.c chlib.a
 	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -o mcperft mcperft.c chlib.a 
 	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -o scperft scperft.c chlib.a
+
+gen_build: MARCH += -mbmi -mbmi2 -mavx -mavx2 -msse4
+gen_build: clean 
+	mkdir -p bin
+	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -c onecore.c
+	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -c bytebrd.c
+	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -c movegen.c
+	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -c brdutil.c
+	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -c mcperft_api.c -o mcperft_api.o 
+	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -c mcperft_internal.c -o mcperft_internal.o 
+	ar rcs chlib.a mcperft_api.o mcperft_internal.o movegen.o brdutil.o bytebrd.o onecore.o
+	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -static -o bin/perft-gen perft.c chlib.a
+	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -static -o bin/mcperft-gen mcperft.c chlib.a 
+	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -static -o bin/scperft-gen scperft.c chlib.a
+
+zen4_build: MARCH += -march=znver4
+zen4_build: clean2 
+	mkdir -p bin
+	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -c onecore.c
+	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -c bytebrd.c
+	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -c movegen.c
+	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -c brdutil.c
+	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -c mcperft_api.c -o mcperft_api.o 
+	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -c mcperft_internal.c -o mcperft_internal.o 
+	ar rcs chlib.a mcperft_api.o mcperft_internal.o movegen.o brdutil.o bytebrd.o onecore.o
+	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -static -o bin/perft-zen4 perft.c chlib.a
+	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -static -o bin/mcperft-zen4 mcperft.c chlib.a 
+	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -static -o bin/scperft-zen4 scperft.c chlib.a
 
 mcperft_internal.o : mcperft_internal.c bytebrd_api.h mcperft_defs.h mcperft.h onecore_api.h brdutil_api.h
 	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -c mcperft_internal.c -o mcperft_internal.o 
@@ -65,13 +85,15 @@ bytebrd.o: bytebrd.c movegen.h bytebrd_api.h
 onecore.o: onecore.c movegen.h onecore_api.h onecore.h bytebrd_api.h
 	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -c onecore.c
 
-install:
-	mkdir -p bin
-	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -static -o bin/perft perft.c chlib.a
-	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -static -o bin/mcperft mcperft.c chlib.a 
-	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -static -o bin/scperft scperft.c chlib.a
+install: gen_build zen4_build 
 	strip -g bin/*
 
 clean:
 	rm -f *.o *.gcno *.gcda *.gcov chlib.a codecov mcperft perft scperft gmon.out
 	rm -rf board-db
+
+clean2:
+	rm -f *.o *.gcno *.gcda *.gcov chlib.a codecov mcperft perft scperft gmon.out
+	rm -rf board-db
+
+.PHONY: clean clean2 install zen4_build gen_build

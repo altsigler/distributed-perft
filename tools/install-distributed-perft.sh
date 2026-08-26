@@ -17,9 +17,31 @@ case "$HOST" in
   *) die "distributed-perft uses BMI/BMI2/AVX2 — x86 only. Detected: $HOST" ;;
 esac
 
+# Determine if the test machine is AMD ZEN4 architecture.
+# We provide an optimized binary for the AMD ZEN4.
+#
+cpu_family=$(grep -m 1 'cpu family' /proc/cpuinfo | awk '{print $4}')
+cpu_model=$(grep -m 1 'model' /proc/cpuinfo | awk '{print $3}')
+cpu_vendor=$(grep -m 1 'vendor_id' /proc/cpuinfo | awk '{print $3}')
+
+AMD_ZEN4=0
+if [ "$cpu_vendor" = "AuthenticAMD" ] && [ "$cpu_family" -eq 25 ]; then
+    if [ "$cpu_model" -ge 96 ] && [ "$cpu_model" -le 175 ]; then
+        AMD_ZEN4=1
+    fi
+fi
+
 # --- Clone + build ---------------------------------------------------------
 clone_or_keep "$ENGINE_DIR" "$REPO"
-chmod u+x $BINARY
+
+if [ $AMD_ZEN4 -eq 1 ]; then
+  chmod u+x $BINARY-zen4
+  ln -s scperft-zen4 $BINARY 
+else
+  chmod u+x $BINARY-gen
+  ln -s scperft-gen $BINARY 
+fi
+
 
 [ -d "$SRC_DIR" ] || die "expected source dir $SRC_DIR — repo layout may have changed"
 
