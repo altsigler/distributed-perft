@@ -73,12 +73,8 @@ aggregateAttack_t aggregateAttack[BRDS*BRDS];
 /* Hash tables for looking up bit masks specifying to which squares bishop/rook
 ** can move given certain board occupancy.
 */
-#ifdef USE_BMI2
 #define MAX_UDLR_HASH_INDEX (1 << 12)
 #define MAX_DIAG_HASH_INDEX (1 << 11)
-#else
-#error Missing support for BMI2
-#endif
 static unsigned long long diagonalVisibilityMap[BRDS*BRDS][MAX_DIAG_HASH_INDEX];
 static unsigned long long udlrVisibilityMap[BRDS*BRDS][MAX_UDLR_HASH_INDEX];
 
@@ -523,18 +519,10 @@ static kingAttackHelper_t pinCompute (
 
     if (knight_attack & mover_king_mask)
     {               
-#if defined(USE_BMI)
       attack_helper.in_check |= _blsi_u64(opponent_knight_mask);
-#else
-      attack_helper.in_check |= (1LLU << index);
-#endif
     }               
 
-#if defined(USE_BMI)
     opponent_knight_mask = _blsr_u64(opponent_knight_mask);
-#else
-    opponent_knight_mask ^= 1LLU << index;
-#endif
   }
 
   // Bishop/Queen Attack
@@ -560,11 +548,7 @@ static kingAttackHelper_t pinCompute (
         {
           attack_helper.move_test_needed = 1;
         }
-#if defined(USE_BMI)
         attack_helper.in_check |= (attack_lane | _blsi_u64(opponent_bishop_mask));
-#else
-        attack_helper.in_check |= (attack_lane | (1LLU << index));
-#endif
         attack_mask |= diagonal_attack;
       } else
       {
@@ -583,11 +567,7 @@ static kingAttackHelper_t pinCompute (
       attack_mask |= diagonalVisibilityMap[index]
                                         [lookupKeyCompute (any_color_pieces_mask, diagonalBlocker[index])];
     }
-#if defined(USE_BMI)
     opponent_bishop_mask = _blsr_u64(opponent_bishop_mask);
-#else
-    opponent_bishop_mask ^= 1LLU << index;
-#endif
   }
 
   // Rook/Queen Attack
@@ -611,11 +591,7 @@ static kingAttackHelper_t pinCompute (
         {
           attack_helper.move_test_needed = 1;
         }
-#if defined(USE_BMI)
         attack_helper.in_check |= (attack_lane | _blsi_u64(opponent_rook_mask));
-#else
-        attack_helper.in_check |= (attack_lane | (1LLU << index));
-#endif
         attack_mask |= udlr_attack;
       } else
       {
@@ -634,11 +610,7 @@ static kingAttackHelper_t pinCompute (
       attack_mask |= udlrVisibilityMap[index]
                                     [lookupKeyCompute (any_color_pieces_mask, udlrBlocker[index])];
     }
-#if defined(USE_BMI)
     opponent_rook_mask = _blsr_u64(opponent_rook_mask);
-#else
-    opponent_rook_mask ^= 1LLU << index;
-#endif
   }
   
   attack_helper.move_candidate_mask &= ~attack_mask;
@@ -800,7 +772,6 @@ static unsigned long long allBRQNPSquaresLastPlyFindNoTest (
     
   if ((pin_mode < 2) && (def_piece_complement & (1U << whose_move)))
   {
-    {
   /* BISHOP - 1 */
       const unsigned int piece_index_1 = bitbrdLowestIndexFromMaskGet(bishop_piece_mask);
       bishop_piece_mask = _blsr_u64(bishop_piece_mask);
@@ -809,12 +780,12 @@ static unsigned long long allBRQNPSquaresLastPlyFindNoTest (
       const unsigned long long lookup_index_1 = 
                    lookupKeyCompute (any_color_pieces_mask, diagonalBlocker[piece_index_1]);
 
-      unsigned long long open_and_visible_mask = diagonalVisibilityMap[piece_index_1][lookup_index_1] &
+      unsigned long long open_and_visible_mask_1 = diagonalVisibilityMap[piece_index_1][lookup_index_1] &
                                                       ~mover_pieces_mask;
 
       /* Add all open and visible opponent squares to the move count.
       */
-      mn += (unsigned long long) __builtin_popcountll (open_and_visible_mask);
+      mn += (unsigned long long) __builtin_popcountll (open_and_visible_mask_1);
 
   /* BISHOP - 2 */
       const unsigned int piece_index_2 = bitbrdLowestIndexFromMaskGet(bishop_piece_mask);
@@ -894,24 +865,18 @@ static unsigned long long allBRQNPSquaresLastPlyFindNoTest (
       /* Add all open and visible opponent squares to the move count.
       */
       mn += (unsigned long long) __builtin_popcountll (open_and_visible_mask_7);
-    }
 
   } else
   {
     while (bishop_piece_mask)
     {
       const unsigned int piece_index = bitbrdLowestIndexFromMaskGet(bishop_piece_mask);
-#if defined(USE_BMI)
       unsigned long long current_piece;
       if (pin_mode > 1)
       {
         current_piece = _blsi_u64(bishop_piece_mask);
       }
       bishop_piece_mask = _blsr_u64(bishop_piece_mask);
-#else
-      const unsigned long long current_piece = 1LLU << piece_index;
-      bishop_piece_mask ^= 1LLU << piece_index;
-#endif
 
 
       const unsigned long long lookup_index = 
@@ -937,17 +902,12 @@ static unsigned long long allBRQNPSquaresLastPlyFindNoTest (
     while (rook_piece_mask)
     {
       const unsigned int piece_index = bitbrdLowestIndexFromMaskGet(rook_piece_mask);
-#if defined(USE_BMI)
       unsigned long long current_piece;
       if (pin_mode > 1)
       {
         current_piece = _blsi_u64(rook_piece_mask);
       }
       rook_piece_mask = _blsr_u64(rook_piece_mask);
-#else
-      const unsigned long long current_piece = 1LLU << piece_index;
-      rook_piece_mask ^= 1LLU << piece_index;
-#endif
 
       const unsigned long long lookup_index = 
                    lookupKeyCompute (any_color_pieces_mask, udlrBlocker[piece_index]);
@@ -977,18 +937,12 @@ static unsigned long long allBRQNPSquaresLastPlyFindNoTest (
                 knightAttack[bitbrdLowestIndexFromMaskGet(knight_piece_mask)] &
                       ~mover_pieces_mask;
 
-#if defined(USE_BMI)
       unsigned long long current_piece;
       if (pin_mode > 1)
       {
         current_piece = _blsi_u64(knight_piece_mask);
       }
       knight_piece_mask = _blsr_u64(knight_piece_mask);
-#else
-      const unsigned int piece_index = bitbrdLowestIndexFromMaskGet(knight_piece_mask);
-      const unsigned long long current_piece = 1LLU << piece_index;
-      knight_piece_mask ^= current_piece;
-#endif
 
       if (pin_mode > 1)
       {
@@ -1008,17 +962,12 @@ static unsigned long long allBRQNPSquaresLastPlyFindNoTest (
     while (queen_piece_mask)
     {
       const unsigned int piece_index = bitbrdLowestIndexFromMaskGet(queen_piece_mask);
-#if defined(USE_BMI)
       unsigned long long current_piece;
       if (pin_mode > 1)
       {
         current_piece = _blsi_u64(queen_piece_mask);
       }
       queen_piece_mask = _blsr_u64(queen_piece_mask);
-#else
-      const unsigned long long current_piece = 1LLU << piece_index;
-      queen_piece_mask ^= 1LLU << piece_index;
-#endif
 
       const aggregateAttack_t *const aggregateAttackVal = &aggregateAttack[piece_index];
       const unsigned long long lookup_index = 
@@ -1426,19 +1375,10 @@ static unsigned long long lastPlyMovesValidate (
 
     while (open_squares_mask)
     {
-#if defined(USE_BMI)
       const unsigned long long to_mask = _blsi_u64(open_squares_mask);
-#else
-      const unsigned int to_index = bitbrdLowestIndexFromMaskGet(open_squares_mask);
-      const unsigned long long to_mask = 1LLU << to_index;
-#endif
       const unsigned long long mask1 = to_mask | from_mask;
 
-#if defined(USE_BMI)
       open_squares_mask = _blsr_u64(open_squares_mask);
-#else
-      open_squares_mask ^= to_mask;
-#endif
 
       MOVE_APPLY (piece, 1,
                         p1,0,0,
@@ -1455,21 +1395,12 @@ static unsigned long long lastPlyMovesValidate (
 
     while (unlikely(visible_pieces_mask))
     {
-#if defined(USE_BMI)
       const unsigned long long to_mask = _blsi_u64(visible_pieces_mask);
-#else
-      const unsigned int to_index = bitbrdLowestIndexFromMaskGet(visible_pieces_mask);
-      const unsigned long long to_mask = 1LLU << to_index;
-#endif
       const unsigned long long mask1 = to_mask | from_mask;
       unsigned int new_piece_complement = 0;
       const unsigned char p2 = pieceTypeGet (whose_move, to_mask, piece, &new_piece_complement);
 
-#if defined(USE_BMI)
       visible_pieces_mask = _blsr_u64(visible_pieces_mask);
-#else
-      visible_pieces_mask ^= to_mask;
-#endif
 
       MOVE_APPLY (piece, 2,
                         p1,p2,0,
@@ -1502,6 +1433,7 @@ static unsigned long long lastPlyMovesValidate (
 ******************************************************************************/
 __attribute__((always_inline)) inline 
 static unsigned long long whiteKingSquaresFind (
+                            const unsigned long long from_mask,
                             const unsigned int piece_index, 
                             unsigned long long move_candidate_mask,
                             unsigned long long *restrict piece,
@@ -1520,7 +1452,6 @@ static unsigned long long whiteKingSquaresFind (
                   return 0;
 
   unsigned long long temp_move_candidate_mask = move_candidate_mask & king_attack_mask;
-  const unsigned long long from_mask = 1LLU << piece_index;
   unsigned long long mn = 0;
 
   /* Disable white castling on all future moves.
@@ -1533,16 +1464,9 @@ static unsigned long long whiteKingSquaresFind (
   {
     unsigned int num_masks;
     unsigned char p2;
-    const unsigned int index = bitbrdLowestIndexFromMaskGet(temp_move_candidate_mask);
-#if defined(USE_BMI)
     const unsigned long long mask2 = _blsi_u64(temp_move_candidate_mask);
-    temp_move_candidate_mask = _blsr_u64(temp_move_candidate_mask);
-#else
-    const unsigned long long mask2 = 1LLU << index;
-    temp_move_candidate_mask ^= mask2;
-#endif
     const unsigned long long mask1 = mask2 | from_mask; 
-    castleEligibility_t next_castle_eligibility = template_castle_eligibility;
+    castleEligibility_t next_castle_eligibility;
 
     /* Check if there is an opponent piece at the destination location. 
     ** If so, then this move is a capture. We need to provide the mask of the captured piece.
@@ -1558,9 +1482,9 @@ static unsigned long long whiteKingSquaresFind (
       if (!record_undo_info)
       {
         mn += (last_ply)?
-          allMoveCandidatesLastPlyFind(MOVE_BLACK,piece,0,next_castle_eligibility,
+          allMoveCandidatesLastPlyFind(MOVE_BLACK,piece,0,template_castle_eligibility,
                                         mover_pieces_mask ^ mask1, opponent_pieces_mask, def_piece_complement):
-          allMovePerft(MOVE_BLACK,piece,0,next_castle_eligibility,depth,ply,
+          allMovePerft(MOVE_BLACK,piece,0,template_castle_eligibility,depth,ply,
                                         mover_pieces_mask ^ mask1, opponent_pieces_mask, def_piece_complement);
       }
       MOVE_APPLY (piece, 1,
@@ -1574,6 +1498,7 @@ static unsigned long long whiteKingSquaresFind (
       }
     } else
     {
+      next_castle_eligibility = template_castle_eligibility;
       unsigned int new_piece_complement = def_piece_complement;
       p2 = pieceTypeGet (MOVE_WHITE, mask2, piece, &new_piece_complement); 
       num_masks = 2;
@@ -1583,30 +1508,29 @@ static unsigned long long whiteKingSquaresFind (
 
       /* Prepair the next castling eligibility flag and make the move.
       */
-      {
-        if (unlikely(p2 == (S_ROOK | S_BLACK)))
-        { 
-          if (!castle_eligibility.black_long_ineligible &&
-             ((index >> 3) == 7) && 
-             ((index & 7) == 0))
-          {
-            next_castle_eligibility.black_long_ineligible = 1;
-          }
-          if (!castle_eligibility.black_short_ineligible &&
-             ((index >> 3) == 7) && 
-             ((index & 7) == 7))
-          {
-            next_castle_eligibility.black_short_ineligible = 1;
-          }
-        }
-        if (!record_undo_info)
+      if (unlikely(p2 == (S_ROOK | S_BLACK)))
+      { 
+        const unsigned int index = bitbrdLowestIndexFromMaskGet(temp_move_candidate_mask);
+        if (!castle_eligibility.black_long_ineligible &&
+           ((index >> 3) == 7) && 
+           ((index & 7) == 0))
         {
-          mn += (last_ply)?
-            allMoveCandidatesLastPlyFind(MOVE_BLACK,piece,0,next_castle_eligibility,
-                                        mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2, new_piece_complement):
-            allMovePerft(MOVE_BLACK,piece,0,next_castle_eligibility,depth,ply,
-                                        mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2, new_piece_complement);
+          next_castle_eligibility.black_long_ineligible = 1;
         }
+        if (!castle_eligibility.black_short_ineligible &&
+           ((index >> 3) == 7) && 
+           ((index & 7) == 7))
+        {
+          next_castle_eligibility.black_short_ineligible = 1;
+        }
+      }
+      if (!record_undo_info)
+      {
+        mn += (last_ply)?
+          allMoveCandidatesLastPlyFind(MOVE_BLACK,piece,0,next_castle_eligibility,
+                                      mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2, new_piece_complement):
+          allMovePerft(MOVE_BLACK,piece,0,next_castle_eligibility,depth,ply,
+                                      mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2, new_piece_complement);
       }
       MOVE_APPLY (piece, 2,
                         S_KING | S_WHITE,p2,0,
@@ -1614,21 +1538,21 @@ static unsigned long long whiteKingSquaresFind (
     }
     if (record_undo_info)
     {
-      {
-        next_mv[mn].from_r = piece_index >> 3;
-        next_mv[mn].from_c = piece_index & 7;
-        next_mv[mn].to_r = index >> 3;
-        next_mv[mn].to_c = index & 7;
-        next_mv[mn].p1 = S_KING | S_WHITE;
-        next_mv[mn].p2 = p2;
-        next_mv[mn].num_masks = num_masks;
-        next_mv[mn].mask1 = mask1; 
-        next_mv[mn].mask2 = mask2;
-        next_mv[mn].castle_eligibility = next_castle_eligibility;
-        next_mv[mn].en_passant_eligible_pawn = 0;
-        mn++;
-      } 
+      const unsigned int index = bitbrdLowestIndexFromMaskGet(temp_move_candidate_mask);
+      next_mv[mn].from_r = piece_index >> 3;
+      next_mv[mn].from_c = piece_index & 7;
+      next_mv[mn].to_r = index >> 3;
+      next_mv[mn].to_c = index & 7;
+      next_mv[mn].p1 = S_KING | S_WHITE;
+      next_mv[mn].p2 = p2;
+      next_mv[mn].num_masks = num_masks;
+      next_mv[mn].mask1 = mask1; 
+      next_mv[mn].mask2 = mask2;
+      next_mv[mn].castle_eligibility = (num_masks == 1)?template_castle_eligibility:next_castle_eligibility;
+      next_mv[mn].en_passant_eligible_pawn = 0;
+      mn++;
     } 
+    temp_move_candidate_mask = _blsr_u64(temp_move_candidate_mask);
   }
 
   temp_move_candidate_mask = move_candidate_mask & ~king_attack_mask;
@@ -1642,7 +1566,6 @@ static unsigned long long whiteKingSquaresFind (
   */
   if (temp_move_candidate_mask & POSITION_TO_BITMASK_LOOKUP(0, 6))
   {
-    castleEligibility_t next_castle_eligibility = template_castle_eligibility;
     if (record_undo_info)
     {
       next_mv[mn].from_r = 0;
@@ -1655,7 +1578,7 @@ static unsigned long long whiteKingSquaresFind (
       next_mv[mn].mask1 = from_mask | bitbrdMaskFromPositionGet(0, 6); // King Mask
       next_mv[mn].mask2 = bitbrdMaskFromPositionGet(0, 7) | 
                            bitbrdMaskFromPositionGet(0, 5); // Rook Mask
-      next_mv[mn].castle_eligibility = next_castle_eligibility;
+      next_mv[mn].castle_eligibility = template_castle_eligibility;
       next_mv[mn].en_passant_eligible_pawn = 0;
       mn++;
     } else
@@ -1673,14 +1596,14 @@ static unsigned long long whiteKingSquaresFind (
                           MOVE_BLACK,
                           piece,
                           0,
-                          next_castle_eligibility,
+                          template_castle_eligibility,
                           mover_pieces_mask ^ (mask1 | mask2),
                           opponent_pieces_mask, def_piece_complement):
              allMovePerft(
                           MOVE_BLACK,
                           piece,
                           0,
-                          next_castle_eligibility,
+                          template_castle_eligibility,
                           depth,
                           ply,
                           mover_pieces_mask ^ (mask1 | mask2),
@@ -1695,7 +1618,6 @@ static unsigned long long whiteKingSquaresFind (
   */
   if (temp_move_candidate_mask & POSITION_TO_BITMASK_LOOKUP(0, 2))
   {
-    castleEligibility_t next_castle_eligibility = template_castle_eligibility;
     if (record_undo_info)
     {
       next_mv[mn].from_r = 0;
@@ -1708,7 +1630,7 @@ static unsigned long long whiteKingSquaresFind (
       next_mv[mn].mask1 = from_mask | bitbrdMaskFromPositionGet(0, 2); // King Mask
       next_mv[mn].mask2 = bitbrdMaskFromPositionGet(0, 0) | 
                            bitbrdMaskFromPositionGet(0, 3); // Rook Mask
-      next_mv[mn].castle_eligibility = next_castle_eligibility;
+      next_mv[mn].castle_eligibility = template_castle_eligibility;
       next_mv[mn].en_passant_eligible_pawn = 0;
       mn++;
     } else
@@ -1726,14 +1648,14 @@ static unsigned long long whiteKingSquaresFind (
                           MOVE_BLACK,
                           piece,
                           0,
-                          next_castle_eligibility,
+                          template_castle_eligibility,
                           mover_pieces_mask ^ (mask1 | mask2),
                           opponent_pieces_mask, def_piece_complement):
              allMovePerft(
                           MOVE_BLACK,
                           piece,
                           0,
-                          next_castle_eligibility,
+                          template_castle_eligibility,
                           depth,
                           ply,
                           mover_pieces_mask ^ (mask1 | mask2),
@@ -1758,6 +1680,7 @@ static unsigned long long whiteKingSquaresFind (
 ******************************************************************************/
 __attribute__((always_inline)) inline 
 static unsigned long long blackKingSquaresFind (
+                            const unsigned long long from_mask,
                             const unsigned int piece_index, 
                             unsigned long long move_candidate_mask,
                             unsigned long long *restrict piece,
@@ -1776,7 +1699,6 @@ static unsigned long long blackKingSquaresFind (
                   return 0;
 
   unsigned long long temp_move_candidate_mask = move_candidate_mask & king_attack_mask;
-  const unsigned long long from_mask = 1LLU << piece_index;
   unsigned long long mn = 0;
 
   /* Disable black castling on all future moves.
@@ -1789,16 +1711,9 @@ static unsigned long long blackKingSquaresFind (
   {
     unsigned int num_masks;
     unsigned char p2;
-    const unsigned int index = bitbrdLowestIndexFromMaskGet(temp_move_candidate_mask);
-#if defined(USE_BMI)
     const unsigned long long mask2 = _blsi_u64(temp_move_candidate_mask);
-    temp_move_candidate_mask = _blsr_u64(temp_move_candidate_mask);
-#else
-    const unsigned long long mask2 = 1LLU << index;
-    temp_move_candidate_mask ^= mask2;
-#endif
     const unsigned long long mask1 = mask2 | from_mask; 
-    castleEligibility_t next_castle_eligibility = template_castle_eligibility;
+    castleEligibility_t next_castle_eligibility;
 
     /* Check if there is an opponent piece at the destination location. 
     ** If so, then this move is a capture. We need to provide the mask of the captured piece.
@@ -1813,9 +1728,9 @@ static unsigned long long blackKingSquaresFind (
       if (!record_undo_info)
       {
         mn += (last_ply)?
-          allMoveCandidatesLastPlyFind(MOVE_WHITE,piece,0,next_castle_eligibility,
+          allMoveCandidatesLastPlyFind(MOVE_WHITE,piece,0,template_castle_eligibility,
                             mover_pieces_mask ^ mask1, opponent_pieces_mask, def_piece_complement):
-          allMovePerft(MOVE_WHITE,piece,0,next_castle_eligibility,depth,ply,
+          allMovePerft(MOVE_WHITE,piece,0,template_castle_eligibility,depth,ply,
                             mover_pieces_mask ^ mask1, opponent_pieces_mask, def_piece_complement);
       }
       MOVE_APPLY (piece, 1,
@@ -1829,6 +1744,7 @@ static unsigned long long blackKingSquaresFind (
       }
     } else
     {
+      next_castle_eligibility = template_castle_eligibility;
       num_masks = 2;
       unsigned int new_piece_complement = def_piece_complement;
       p2 = pieceTypeGet (MOVE_BLACK, mask2, piece, &new_piece_complement); 
@@ -1838,30 +1754,29 @@ static unsigned long long blackKingSquaresFind (
 
       /* Prepair the next castling eligibility flag and make the move.
       */
-      {
-        if (unlikely(p2 == (S_ROOK | S_WHITE)))
-        { 
-          if (!castle_eligibility.white_long_ineligible &&
-             ((index >> 3) == 0) && 
-             ((index & 7) == 0))
-          {
-            next_castle_eligibility.white_long_ineligible = 1;
-          }
-          if (!castle_eligibility.white_short_ineligible &&
-             ((index >> 3) == 0) && 
-             ((index & 7) == 7))
-          {
-            next_castle_eligibility.white_short_ineligible = 1;
-          }
-        }
-        if (!record_undo_info)
+      if (unlikely(p2 == (S_ROOK | S_WHITE)))
+      { 
+        const unsigned int index = bitbrdLowestIndexFromMaskGet(temp_move_candidate_mask);
+        if (!castle_eligibility.white_long_ineligible &&
+           ((index >> 3) == 0) && 
+           ((index & 7) == 0))
         {
-          mn += (last_ply)?
-            allMoveCandidatesLastPlyFind(MOVE_WHITE,piece,0,next_castle_eligibility,
-                            mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2, new_piece_complement):
-            allMovePerft(MOVE_WHITE,piece,0,next_castle_eligibility,depth,ply,
-                            mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2, new_piece_complement);
+          next_castle_eligibility.white_long_ineligible = 1;
         }
+        if (!castle_eligibility.white_short_ineligible &&
+           ((index >> 3) == 0) && 
+           ((index & 7) == 7))
+        {
+          next_castle_eligibility.white_short_ineligible = 1;
+        }
+      }
+      if (!record_undo_info)
+      {
+        mn += (last_ply)?
+          allMoveCandidatesLastPlyFind(MOVE_WHITE,piece,0,next_castle_eligibility,
+                          mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2, new_piece_complement):
+          allMovePerft(MOVE_WHITE,piece,0,next_castle_eligibility,depth,ply,
+                          mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2, new_piece_complement);
       }
       MOVE_APPLY (piece, 2,
                         S_KING | S_BLACK,p2,0,
@@ -1869,21 +1784,21 @@ static unsigned long long blackKingSquaresFind (
     }
     if (record_undo_info)
     {
-      {
-        next_mv[mn].from_r = piece_index >> 3;
-        next_mv[mn].from_c = piece_index & 7;
-        next_mv[mn].to_r = index >> 3;
-        next_mv[mn].to_c = index & 7;
-        next_mv[mn].p1 = S_KING | S_BLACK;
-        next_mv[mn].p2 = p2;
-        next_mv[mn].num_masks = num_masks;
-        next_mv[mn].mask1 = mask1; 
-        next_mv[mn].mask2 = mask2;
-        next_mv[mn].castle_eligibility = next_castle_eligibility;
-        next_mv[mn].en_passant_eligible_pawn = 0;
-        mn++;
-      } 
+      const unsigned int index = bitbrdLowestIndexFromMaskGet(temp_move_candidate_mask);
+      next_mv[mn].from_r = piece_index >> 3;
+      next_mv[mn].from_c = piece_index & 7;
+      next_mv[mn].to_r = index >> 3;
+      next_mv[mn].to_c = index & 7;
+      next_mv[mn].p1 = S_KING | S_BLACK;
+      next_mv[mn].p2 = p2;
+      next_mv[mn].num_masks = num_masks;
+      next_mv[mn].mask1 = mask1; 
+      next_mv[mn].mask2 = mask2;
+      next_mv[mn].castle_eligibility = (num_masks == 1)?template_castle_eligibility:next_castle_eligibility;
+      next_mv[mn].en_passant_eligible_pawn = 0;
+      mn++;
     } 
+    temp_move_candidate_mask = _blsr_u64(temp_move_candidate_mask);
   }
 
   temp_move_candidate_mask = move_candidate_mask & ~king_attack_mask;
@@ -1897,7 +1812,6 @@ static unsigned long long blackKingSquaresFind (
   */
   if (temp_move_candidate_mask & POSITION_TO_BITMASK_LOOKUP(7, 6))
   {
-    castleEligibility_t next_castle_eligibility = template_castle_eligibility;
     if (record_undo_info)
     {
       next_mv[mn].from_r = 7;
@@ -1910,7 +1824,7 @@ static unsigned long long blackKingSquaresFind (
       next_mv[mn].mask1 = from_mask | bitbrdMaskFromPositionGet(7, 6); // King Mask
       next_mv[mn].mask2 = bitbrdMaskFromPositionGet(7, 7) | 
                            bitbrdMaskFromPositionGet(7, 5); // Rook Mask
-      next_mv[mn].castle_eligibility = next_castle_eligibility;
+      next_mv[mn].castle_eligibility = template_castle_eligibility;
       next_mv[mn].en_passant_eligible_pawn = 0;
       mn++;
     } else
@@ -1928,14 +1842,14 @@ static unsigned long long blackKingSquaresFind (
                           MOVE_WHITE,
                           piece,
                           0,
-                          next_castle_eligibility,
+                          template_castle_eligibility,
                           mover_pieces_mask ^ (mask1 | mask2),
                           opponent_pieces_mask, def_piece_complement):
              allMovePerft(
                           MOVE_WHITE,
                           piece,
                           0,
-                          next_castle_eligibility,
+                          template_castle_eligibility,
                           depth,
                           ply,
                           mover_pieces_mask ^ (mask1 | mask2),
@@ -1951,7 +1865,6 @@ static unsigned long long blackKingSquaresFind (
   */
   if (temp_move_candidate_mask & POSITION_TO_BITMASK_LOOKUP(7, 2))
   {
-    castleEligibility_t next_castle_eligibility = template_castle_eligibility;
     if (record_undo_info)
     {
       next_mv[mn].from_r = 7;
@@ -1964,7 +1877,7 @@ static unsigned long long blackKingSquaresFind (
       next_mv[mn].mask1 = from_mask | bitbrdMaskFromPositionGet(7, 2); // King Mask
       next_mv[mn].mask2 = bitbrdMaskFromPositionGet(7, 0) | 
                            bitbrdMaskFromPositionGet(7, 3); // Rook Mask
-      next_mv[mn].castle_eligibility = next_castle_eligibility;
+      next_mv[mn].castle_eligibility = template_castle_eligibility;
       next_mv[mn].en_passant_eligible_pawn = 0;
       mn++;
     } else 
@@ -1982,14 +1895,14 @@ static unsigned long long blackKingSquaresFind (
                           MOVE_WHITE,
                           piece,
                           0,
-                          next_castle_eligibility,
+                          template_castle_eligibility,
                           mover_pieces_mask ^ (mask1 | mask2),
                           opponent_pieces_mask, def_piece_complement):
              allMovePerft(
                           MOVE_WHITE,
                           piece,
                           0,
-                          next_castle_eligibility,
+                          template_castle_eligibility,
                           depth,
                           ply,
                           mover_pieces_mask ^ (mask1 | mask2),
@@ -2031,471 +1944,437 @@ static unsigned long long allBishopRookQueenSquaresFind (
   unsigned long long valid_moves = (0 == in_check)?~mover_pieces_mask:
                                                     in_check & ~mover_pieces_mask;
 
+  unsigned char p1 = (unsigned char) ((S_BISHOP) | (whose_move << 3));
+  unsigned long long piece_mask = piece[p1];
+  while (piece_mask)
   {
-    const unsigned char p1 = (unsigned char) ((S_BISHOP) | (whose_move << 3));
-    unsigned long long piece_mask = piece[p1];
-    while (piece_mask)
+    const unsigned int piece_index = bitbrdLowestIndexFromMaskGet(piece_mask);
+    const unsigned long long from_mask = _blsi_u64(piece_mask);
+    piece_mask = _blsr_u64(piece_mask);
+
+    const unsigned long long lookup_index =  
+                   lookupKeyCompute (any_color_pieces_mask, diagonalBlocker[piece_index]);
+                                                                       
+
+    unsigned long long piece_move_mask = 
+                  diagonalVisibilityMap[piece_index][lookup_index] & valid_moves;
+                                                     
+    const unsigned long long visible_pieces_mask = piece_move_mask & opponent_pieces_mask;
+    if (unlikely (pin && (pin & from_mask)))
     {
-      const unsigned int piece_index = bitbrdLowestIndexFromMaskGet(piece_mask);
-#if defined(USE_BMI)
-      const unsigned long long from_mask = _blsi_u64(piece_mask);
-      piece_mask = _blsr_u64(piece_mask);
-#else
-      const unsigned long long from_mask = 1LLU << piece_index;
-      piece_mask ^= from_mask;
-#endif
-
-      const unsigned long long lookup_index =  
-                     lookupKeyCompute (any_color_pieces_mask, diagonalBlocker[piece_index]);
-                                                                         
-
-      unsigned long long piece_move_mask = 
-                    diagonalVisibilityMap[piece_index][lookup_index] & valid_moves;
-                                                       
-      const unsigned long long visible_pieces_mask = piece_move_mask & opponent_pieces_mask;
-      if (unlikely (pin && (pin & from_mask)))
-      {
-        /* We can only move to other pinned squares.
-        */
-        piece_move_mask &= pin;
-      }
-
-      while (piece_move_mask)
-      {
-#if defined(USE_BMI)
-        const unsigned long long mask2 = _blsi_u64(piece_move_mask);
-
-        piece_move_mask = _blsr_u64(piece_move_mask);
-#else
-        const unsigned int move_index = bitbrdLowestIndexFromMaskGet(piece_move_mask);
-        const unsigned long long mask2 = 1LLU << move_index;
-        piece_move_mask ^= mask2;
-#endif
-
-        int under_attack = 0;
-        unsigned char p2;
-        unsigned int num_masks;
-        castleEligibility_t next_castle_eligibility = castle_eligibility;
-
-        if (unlikely(mask2 & visible_pieces_mask))
-        {
-          unsigned int new_piece_complement = def_piece_complement;
-          p2 = pieceTypeGet (whose_move, mask2, piece, &new_piece_complement);
-          num_masks = 2;
-          if (move_test_needed && TEST_NEEDED)
-          {
-            const unsigned long long mask1 = mask2 | from_mask;
-            MOVE_APPLY (piece, 2,
-                        p1,p2,0,
-                        mask1,mask2,0);
-            under_attack = kingInCheck(whose_move,
-                       piece, king_position, 
-                       (mover_pieces_mask ^ mask1) | (opponent_pieces_mask ^ mask2));
-            MOVE_APPLY (piece, 2,
-                        p1,p2,0,
-                        mask1,mask2,0);
-          }
-          if (!under_attack)
-          {
-            if (unlikely(PIECE_GET(p2) == S_ROOK))
-            {
-              const unsigned int to_index = bitbrdLowestIndexFromMaskGet(mask2);
-
-              castleEligibilityRookCaptureCheck (whose_move,
-                                        to_index,
-                                        &next_castle_eligibility);
-
-            }
-            if (!record_undo_info)
-            {
-              const unsigned long long mask1 = mask2 | from_mask;
-              MOVE_APPLY (piece, 2,
-                        p1,p2,0,
-                        mask1,mask2,0);
-              mn += (last_ply)?
-               allMoveCandidatesLastPlyFind(whose_move ^ 1, piece, 0, next_castle_eligibility,
-                                    mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2, new_piece_complement):
-               allMovePerft(whose_move ^ 1, piece, 0, next_castle_eligibility, depth, ply,
-                                    mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2, new_piece_complement);
-              MOVE_APPLY (piece, 2,
-                        p1,p2,0,
-                        mask1,mask2,0);
-            }
-          }
-        } else
-        {
-          if (unlikely(move_test_needed && TEST_NEEDED))
-          {
-            const unsigned long long mask1 = mask2 | from_mask;
-            MOVE_APPLY (piece, 1,
-                        p1,0,0,
-                        mask1,0,0);
-            under_attack = kingInCheck(whose_move,
-                       piece, king_position,
-                       (mover_pieces_mask ^ mask1) | opponent_pieces_mask);
-            MOVE_APPLY (piece, 1,
-                        p1,0,0,
-                        mask1,0,0);
-          }
-          if (!record_undo_info)
-          {
-            if (!under_attack)
-            {
-              const unsigned long long mask1 = mask2 | from_mask;
-              MOVE_APPLY (piece, 1,
-                        p1,0,0,
-                        mask1,0,0);
-              mn += (last_ply)?
-               allMoveCandidatesLastPlyFind(whose_move ^ 1, piece, 0, next_castle_eligibility,
-                                    mover_pieces_mask ^ mask1, opponent_pieces_mask, def_piece_complement): 
-               allMovePerft(whose_move ^ 1, piece, 0, next_castle_eligibility, depth, ply,
-                                    mover_pieces_mask ^ mask1, opponent_pieces_mask, def_piece_complement); 
-              MOVE_APPLY (piece, 1,
-                        p1,0,0,
-                        mask1,0,0);
-            }
-          } else
-          {
-            p2 = 0;
-            num_masks = 1;
-          }
-        }
-        if (record_undo_info)
-        {
-          if (likely(!under_attack))
-          {
-            const unsigned int to_index = bitbrdLowestIndexFromMaskGet(mask2);
-
-            next_mv[mn].from_r = piece_index >> 3;
-            next_mv[mn].from_c = piece_index & 7;
-            next_mv[mn].to_r = to_index >> 3;
-            next_mv[mn].to_c = to_index & 7;
-            next_mv[mn].p1 = p1;
-            next_mv[mn].num_masks = num_masks;
-            next_mv[mn].mask2 = mask2;
-            next_mv[mn].mask1 = mask2 | from_mask;
-            next_mv[mn].p2 = p2;
-            next_mv[mn].castle_eligibility = next_castle_eligibility;
-            next_mv[mn].en_passant_eligible_pawn = 0;
-            mn++;
-          }
-        }
-      }
-    }
-  }
-  {
-    const unsigned char p1 = (unsigned char) ((S_ROOK) | (whose_move << 3));
-    unsigned long long piece_mask = piece[p1];
-    while (piece_mask)
-    {
-      const unsigned int piece_index = bitbrdLowestIndexFromMaskGet(piece_mask);
-#if defined(USE_BMI)
-      const unsigned long long from_mask = _blsi_u64(piece_mask);
-      piece_mask = _blsr_u64(piece_mask);
-#else
-      const unsigned long long from_mask = 1LLU << piece_index;
-      piece_mask ^= from_mask;
-#endif
-
-      const unsigned long long lookup_index =  
-                     lookupKeyCompute (any_color_pieces_mask, udlrBlocker[piece_index]);
-                                                                         
-      unsigned long long piece_move_mask = 
-                    udlrVisibilityMap[piece_index][lookup_index] & valid_moves;
-
-      const unsigned long long visible_pieces_mask = piece_move_mask & opponent_pieces_mask;
-
-      /* Set up the castle eligibility template for this rook.
-      ** The template will need to be modified for every destination square.
+      /* We can only move to other pinned squares.
       */
-      castleEligibility_t castle_eligibility_template = castle_eligibility;
-      castleEligibilityRookTemplateSet (whose_move,
-                                      piece_index,
-                                      &castle_eligibility_template);
+      piece_move_mask &= pin;
+    }
 
-      if (unlikely (pin && (pin & from_mask)))
+    while (piece_move_mask)
+    {
+      const unsigned long long mask2 = _blsi_u64(piece_move_mask);
+
+      piece_move_mask = _blsr_u64(piece_move_mask);
+
+      int under_attack = 0;
+      unsigned char p2;
+      unsigned int num_masks;
+      castleEligibility_t next_castle_eligibility;
+
+      if (unlikely(mask2 & visible_pieces_mask))
       {
-        /* We can only move to other pinned squares.
-        */
-        piece_move_mask &= pin;
-      }
-
-      while (piece_move_mask)
-      {
-#if defined(USE_BMI)
-        const unsigned long long mask2 = _blsi_u64(piece_move_mask);
-
-        piece_move_mask = _blsr_u64(piece_move_mask);
-#else
-        const unsigned int move_index = bitbrdLowestIndexFromMaskGet(piece_move_mask);
-        const unsigned long long mask2 = 1LLU << move_index;
-        piece_move_mask ^= mask2;
-#endif
-
-        int under_attack = 0;
-        unsigned char p2;
-        unsigned int num_masks;
-        castleEligibility_t next_castle_eligibility = castle_eligibility_template;
-
-        if (unlikely(mask2 & visible_pieces_mask))
+        next_castle_eligibility = castle_eligibility;
+        unsigned int new_piece_complement = def_piece_complement;
+        p2 = pieceTypeGet (whose_move, mask2, piece, &new_piece_complement);
+        num_masks = 2;
+        if (move_test_needed && TEST_NEEDED)
         {
-          unsigned int new_piece_complement = def_piece_complement;
-          p2 = pieceTypeGet (whose_move, mask2, piece, &new_piece_complement);
-          num_masks = 2;
-          if (move_test_needed && TEST_NEEDED)
-          {
-            const unsigned long long mask1 = mask2 | from_mask;
-            MOVE_APPLY (piece, 2,
-                        p1,p2,0,
-                        mask1,mask2,0);
-            under_attack = kingInCheck(whose_move,
-                       piece, king_position,
-                       (mover_pieces_mask ^ mask1) | (opponent_pieces_mask ^ mask2));
-            MOVE_APPLY (piece, 2,
-                        p1,p2,0,
-                        mask1,mask2,0);
-          }
-          if (!under_attack)
-          {
-            if (unlikely(PIECE_GET(p2) == S_ROOK))
-            {
-              const unsigned int to_index = bitbrdLowestIndexFromMaskGet(mask2);
-
-              castleEligibilityRookCaptureCheck (whose_move,
-                                        to_index,
-                                        &next_castle_eligibility);
-
-            }
-            if (!record_undo_info)
-            {
-              const unsigned long long mask1 = mask2 | from_mask;
-              MOVE_APPLY (piece, 2,
-                        p1,p2,0,
-                        mask1,mask2,0);
-              mn += (last_ply)?
-               allMoveCandidatesLastPlyFind(whose_move ^ 1, piece, 0, next_castle_eligibility,
-                                               mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2,
-                                               new_piece_complement):
-               allMovePerft(whose_move ^ 1, piece, 0, next_castle_eligibility, depth, ply,
-                                               mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2, 
-                                               new_piece_complement);
-              MOVE_APPLY (piece, 2,
-                        p1,p2,0,
-                        mask1,mask2,0);
-            }
-          }
-        } else
-        {
-          if (unlikely(move_test_needed && TEST_NEEDED))
-          {
-            const unsigned long long mask1 = mask2 | from_mask;
-            MOVE_APPLY (piece, 1,
-                        p1,0,0,
-                        mask1,0,0);
-            under_attack = kingInCheck(whose_move,
-                       piece, king_position,
-                       (mover_pieces_mask ^ mask1) | opponent_pieces_mask);
-            MOVE_APPLY (piece, 1,
-                        p1,0,0,
-                        mask1,0,0);
-          }
-          if (!record_undo_info)
-          {
-            if (!under_attack)
-            {
-              const unsigned long long mask1 = mask2 | from_mask;
-              MOVE_APPLY (piece, 1,
-                        p1,0,0,
-                        mask1,0,0);
-              mn += (last_ply)?
-               allMoveCandidatesLastPlyFind(whose_move ^ 1, piece, 0, next_castle_eligibility,
-                                mover_pieces_mask ^ mask1, opponent_pieces_mask, def_piece_complement): 
-               allMovePerft(whose_move ^ 1, piece, 0, next_castle_eligibility, depth, ply,
-                                mover_pieces_mask ^ mask1, opponent_pieces_mask, def_piece_complement); 
-              MOVE_APPLY (piece, 1,
-                        p1,0,0,
-                        mask1,0,0);
-            }
-          } else
-          {
-            p2 = 0;
-            num_masks = 1;
-          }
+          const unsigned long long mask1 = mask2 | from_mask;
+          MOVE_APPLY (piece, 2,
+                      p1,p2,0,
+                      mask1,mask2,0);
+          under_attack = kingInCheck(whose_move,
+                     piece, king_position, 
+                     (mover_pieces_mask ^ mask1) | (opponent_pieces_mask ^ mask2));
+          MOVE_APPLY (piece, 2,
+                      p1,p2,0,
+                      mask1,mask2,0);
         }
-        if (record_undo_info)
+        if (!under_attack)
         {
-          if (!under_attack)
+          if (unlikely(PIECE_GET(p2) == S_ROOK))
           {
             const unsigned int to_index = bitbrdLowestIndexFromMaskGet(mask2);
 
-            next_mv[mn].from_r = piece_index >> 3;
-            next_mv[mn].from_c = piece_index & 7;
-            next_mv[mn].to_r = to_index >> 3;
-            next_mv[mn].to_c = to_index & 7;
-            next_mv[mn].p1 = p1;
-            next_mv[mn].num_masks = num_masks;
-            next_mv[mn].mask2 = mask2;
-            next_mv[mn].mask1 = mask2 | from_mask;
-            next_mv[mn].p2 = p2;
-            next_mv[mn].castle_eligibility = next_castle_eligibility;
-            next_mv[mn].en_passant_eligible_pawn = 0;
-            mn++;
+            castleEligibilityRookCaptureCheck (whose_move,
+                                      to_index,
+                                      &next_castle_eligibility);
+
           }
+          if (!record_undo_info)
+          {
+            const unsigned long long mask1 = mask2 | from_mask;
+            MOVE_APPLY (piece, 2,
+                      p1,p2,0,
+                      mask1,mask2,0);
+            mn += (last_ply)?
+             allMoveCandidatesLastPlyFind(whose_move ^ 1, piece, 0, next_castle_eligibility,
+                                  mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2, new_piece_complement):
+             allMovePerft(whose_move ^ 1, piece, 0, next_castle_eligibility, depth, ply,
+                                  mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2, new_piece_complement);
+            MOVE_APPLY (piece, 2,
+                      p1,p2,0,
+                      mask1,mask2,0);
+          }
+        }
+      } else
+      {
+        if (unlikely(move_test_needed && TEST_NEEDED))
+        {
+          const unsigned long long mask1 = mask2 | from_mask;
+          MOVE_APPLY (piece, 1,
+                      p1,0,0,
+                      mask1,0,0);
+          under_attack = kingInCheck(whose_move,
+               piece, king_position,
+                     (mover_pieces_mask ^ mask1) | opponent_pieces_mask);
+          MOVE_APPLY (piece, 1,
+                      p1,0,0,
+                      mask1,0,0);
+        }
+        if (!record_undo_info)
+        {
+          if (!under_attack)
+          {
+            const unsigned long long mask1 = mask2 | from_mask;
+            MOVE_APPLY (piece, 1,
+                      p1,0,0,
+                      mask1,0,0);
+            mn += (last_ply)?
+             allMoveCandidatesLastPlyFind(whose_move ^ 1, piece, 0, castle_eligibility,
+                                  mover_pieces_mask ^ mask1, opponent_pieces_mask, def_piece_complement): 
+             allMovePerft(whose_move ^ 1, piece, 0, castle_eligibility, depth, ply,
+                                  mover_pieces_mask ^ mask1, opponent_pieces_mask, def_piece_complement); 
+            MOVE_APPLY (piece, 1,
+                      p1,0,0,
+                      mask1,0,0);
+          }
+        } else
+        {
+          p2 = 0;
+          num_masks = 1;
+        }
+      }
+      if (record_undo_info)
+      {
+        if (likely(!under_attack))
+        {
+          const unsigned int to_index = bitbrdLowestIndexFromMaskGet(mask2);
+
+          next_mv[mn].from_r = piece_index >> 3;
+          next_mv[mn].from_c = piece_index & 7;
+          next_mv[mn].to_r = to_index >> 3;
+          next_mv[mn].to_c = to_index & 7;
+          next_mv[mn].p1 = p1;
+          next_mv[mn].num_masks = num_masks;
+          next_mv[mn].mask2 = mask2;
+          next_mv[mn].mask1 = mask2 | from_mask;
+          next_mv[mn].p2 = p2;
+          next_mv[mn].castle_eligibility = (num_masks == 1)?castle_eligibility:next_castle_eligibility;
+          next_mv[mn].en_passant_eligible_pawn = 0;
+          mn++;
         }
       }
     }
   }
+
+  p1 = (unsigned char) ((S_ROOK) | (whose_move << 3));
+  piece_mask = piece[p1];
+  while (piece_mask)
   {
-    const unsigned char p1 = (unsigned char) ((S_QUEEN) | (whose_move << 3));
-    unsigned long long piece_mask = piece[p1];
-    while (piece_mask)
+    const unsigned int piece_index = bitbrdLowestIndexFromMaskGet(piece_mask);
+    const unsigned long long from_mask = _blsi_u64(piece_mask);
+    piece_mask = _blsr_u64(piece_mask);
+
+    const unsigned long long lookup_index =  
+                   lookupKeyCompute (any_color_pieces_mask, udlrBlocker[piece_index]);
+                                                                       
+    unsigned long long piece_move_mask = 
+                  udlrVisibilityMap[piece_index][lookup_index] & valid_moves;
+
+    const unsigned long long visible_pieces_mask = piece_move_mask & opponent_pieces_mask;
+
+    /* Set up the castle eligibility template for this rook.
+    ** The template will need to be modified for every destination square.
+    */
+    castleEligibility_t castle_eligibility_template = castle_eligibility;
+    castleEligibilityRookTemplateSet (whose_move,
+                                    piece_index,
+                                    &castle_eligibility_template);
+
+    if (unlikely (pin && (pin & from_mask)))
     {
-      const unsigned int piece_index = bitbrdLowestIndexFromMaskGet(piece_mask);
-#if defined(USE_BMI)
-      const unsigned long long from_mask = _blsi_u64(piece_mask);
-      piece_mask = _blsr_u64(piece_mask);
-#else
-      const unsigned long long from_mask = 1LLU << piece_index;
-      piece_mask ^= from_mask;
-#endif
+      /* We can only move to other pinned squares.
+      */
+      piece_move_mask &= pin;
+    }
 
-      const aggregateAttack_t *const aggregateAttackVal = &aggregateAttack[piece_index];
-      const unsigned long long lookup_index =  
-                     lookupKeyCompute (any_color_pieces_mask, aggregateAttackVal->diagonalBlocker);
-      const unsigned long long udlr_lookup_index =  
-                     lookupKeyCompute (any_color_pieces_mask, aggregateAttackVal->udlrBlocker);
+    while (piece_move_mask)
+    {
+      const unsigned long long mask2 = _blsi_u64(piece_move_mask);
 
-      unsigned long long piece_move_mask = 
-                    (diagonalVisibilityMap[piece_index][lookup_index] |
-                    udlrVisibilityMap[piece_index][udlr_lookup_index]) & valid_moves;
+      piece_move_mask = _blsr_u64(piece_move_mask);
 
-      const unsigned long long visible_pieces_mask = piece_move_mask & opponent_pieces_mask;
+      int under_attack = 0;
+      unsigned char p2;
+      unsigned int num_masks;
+      castleEligibility_t next_castle_eligibility;
 
-
-      if (unlikely(pin && (pin & from_mask)))
+      if (unlikely(mask2 & visible_pieces_mask))
       {
-        /* We can only move to other pinned squares.
-        */
-        piece_move_mask &= pin;
+        next_castle_eligibility = castle_eligibility_template;
+        unsigned int new_piece_complement = def_piece_complement;
+        p2 = pieceTypeGet (whose_move, mask2, piece, &new_piece_complement);
+        num_masks = 2;
+        if (move_test_needed && TEST_NEEDED)
+        {
+          const unsigned long long mask1 = mask2 | from_mask;
+          MOVE_APPLY (piece, 2,
+                      p1,p2,0,
+                      mask1,mask2,0);
+          under_attack = kingInCheck(whose_move,
+                     piece, king_position,
+                     (mover_pieces_mask ^ mask1) | (opponent_pieces_mask ^ mask2));
+          MOVE_APPLY (piece, 2,
+                      p1,p2,0,
+                    mask1,mask2,0);
       }
-
-      while (piece_move_mask)
-      {
-#if defined(USE_BMI)
-        const unsigned long long mask2 = _blsi_u64(piece_move_mask);
-        piece_move_mask = _blsr_u64(piece_move_mask);
-#else
-        const unsigned int move_index = bitbrdLowestIndexFromMaskGet(piece_move_mask);
-        const unsigned long long mask2 = 1LLU << move_index;
-        piece_move_mask ^= mask2;
-#endif
-
-        int under_attack = 0;
-        unsigned char p2;
-        unsigned int num_masks;
-        castleEligibility_t next_castle_eligibility = castle_eligibility;
-
-        if (unlikely(mask2 & visible_pieces_mask))
+        if (!under_attack)
         {
-          unsigned int new_piece_complement = def_piece_complement;
-          p2 = pieceTypeGet (whose_move, mask2, piece, &new_piece_complement);
-          num_masks = 2;
-          if (move_test_needed && TEST_NEEDED )
-          {
-            const unsigned long long mask1 = mask2 | from_mask;
-            MOVE_APPLY (piece, 2,
-                        p1,p2,0,
-                        mask1,mask2,0);
-            under_attack = kingInCheck(whose_move,
-                       piece, king_position,
-                       (mover_pieces_mask ^ mask1) | (opponent_pieces_mask ^ mask2));
-            MOVE_APPLY (piece, 2,
-                        p1,p2,0,
-                        mask1,mask2,0);
-          }
-          if (!under_attack)
-          {
-            if (unlikely(PIECE_GET(p2) == S_ROOK))
-            {
-              const unsigned int to_index = bitbrdLowestIndexFromMaskGet(mask2);
-              castleEligibilityRookCaptureCheck (whose_move,
-                                        to_index,
-                                        &next_castle_eligibility);
-            }
-            if (!record_undo_info)
-            {
-              const unsigned long long mask1 = mask2 | from_mask;
-              MOVE_APPLY (piece, 2,
-                        p1,p2,0,
-                        mask1,mask2,0);
-              mn += (last_ply)?
-               allMoveCandidatesLastPlyFind(whose_move ^ 1, piece, 0, next_castle_eligibility,
-                                    mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2, new_piece_complement):
-               allMovePerft(whose_move ^ 1, piece, 0, next_castle_eligibility, depth, ply,
-                                    mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2, new_piece_complement);
-              MOVE_APPLY (piece, 2,
-                        p1,p2,0,
-                        mask1,mask2,0);
-            }
-          }
-        } else
-        {
-          if (unlikely(move_test_needed && TEST_NEEDED))
-          {
-            const unsigned long long mask1 = mask2 | from_mask;
-            MOVE_APPLY (piece, 1,
-                        p1,0,0,
-                        mask1,0,0);
-            under_attack = kingInCheck(whose_move,
-                       piece, king_position,
-                       (mover_pieces_mask ^ mask1) | opponent_pieces_mask);
-            MOVE_APPLY (piece, 1,
-                        p1,0,0,
-                        mask1,0,0);
-          }
-          if (!record_undo_info)
-          {
-            if (!under_attack)
-            {
-              const unsigned long long mask1 = mask2 | from_mask;
-              MOVE_APPLY (piece, 1,
-                        p1,0,0,
-                        mask1,0,0);
-              mn += (last_ply)?
-               allMoveCandidatesLastPlyFind(whose_move ^ 1, piece, 0, next_castle_eligibility,
-                            mover_pieces_mask ^ mask1, opponent_pieces_mask, def_piece_complement):
-               allMovePerft(whose_move ^ 1, piece, 0, next_castle_eligibility, depth, ply,
-                            mover_pieces_mask ^ mask1, opponent_pieces_mask, def_piece_complement);
-              MOVE_APPLY (piece, 1,
-                        p1,0,0,
-                        mask1,0,0);
-            }
-          } else
-          {
-            p2 = 0;
-            num_masks = 1;
-          }
-        }
-        if (record_undo_info)
-        {
-          if (!under_attack)
+          if (unlikely(PIECE_GET(p2) == S_ROOK))
           {
             const unsigned int to_index = bitbrdLowestIndexFromMaskGet(mask2);
 
-            next_mv[mn].from_r = piece_index >> 3;
-            next_mv[mn].from_c = piece_index & 7;
-            next_mv[mn].to_r = to_index >> 3;
-            next_mv[mn].to_c = to_index & 7;
-            next_mv[mn].p1 = p1;
-            next_mv[mn].num_masks = num_masks;
-            next_mv[mn].mask2 = mask2;
-            next_mv[mn].mask1 = mask2 | from_mask;
-            next_mv[mn].p2 = p2;
-            next_mv[mn].castle_eligibility = next_castle_eligibility;
-            next_mv[mn].en_passant_eligible_pawn = 0;
-            mn++;
-          } 
+            castleEligibilityRookCaptureCheck (whose_move,
+                                    to_index,
+                                      &next_castle_eligibility);
+
+          }
+          if (!record_undo_info)
+          {
+            const unsigned long long mask1 = mask2 | from_mask;
+            MOVE_APPLY (piece, 2,
+                      p1,p2,0,
+                      mask1,mask2,0);
+            mn += (last_ply)?
+             allMoveCandidatesLastPlyFind(whose_move ^ 1, piece, 0, next_castle_eligibility,
+                                             mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2,
+                                             new_piece_complement):
+             allMovePerft(whose_move ^ 1, piece, 0, next_castle_eligibility, depth, ply,
+                                             mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2, 
+                                             new_piece_complement);
+            MOVE_APPLY (piece, 2,
+                      p1,p2,0,
+                      mask1,mask2,0);
+          }
         }
+      } else
+      {
+        if (unlikely(move_test_needed && TEST_NEEDED))
+        {
+          const unsigned long long mask1 = mask2 | from_mask;
+          MOVE_APPLY (piece, 1,
+                      p1,0,0,
+                      mask1,0,0);
+          under_attack = kingInCheck(whose_move,
+                     piece, king_position,
+                     (mover_pieces_mask ^ mask1) | opponent_pieces_mask);
+          MOVE_APPLY (piece, 1,
+                      p1,0,0,
+                      mask1,0,0);
+        }
+        if (!record_undo_info)
+        {
+          if (!under_attack)
+          {
+            const unsigned long long mask1 = mask2 | from_mask;
+            MOVE_APPLY (piece, 1,
+                      p1,0,0,
+                      mask1,0,0);
+            mn += (last_ply)?
+             allMoveCandidatesLastPlyFind(whose_move ^ 1, piece, 0, castle_eligibility_template,
+                              mover_pieces_mask ^ mask1, opponent_pieces_mask, def_piece_complement): 
+             allMovePerft(whose_move ^ 1, piece, 0, castle_eligibility_template, depth, ply,
+                              mover_pieces_mask ^ mask1, opponent_pieces_mask, def_piece_complement); 
+            MOVE_APPLY (piece, 1,
+                      p1,0,0,
+                      mask1,0,0);
+          }
+        } else
+        {
+          p2 = 0;
+          num_masks = 1;
+        }
+      }
+      if (record_undo_info)
+      {
+        if (!under_attack)
+        {
+          const unsigned int to_index = bitbrdLowestIndexFromMaskGet(mask2);
+
+          next_mv[mn].from_r = piece_index >> 3;
+          next_mv[mn].from_c = piece_index & 7;
+          next_mv[mn].to_r = to_index >> 3;
+          next_mv[mn].to_c = to_index & 7;
+          next_mv[mn].p1 = p1;
+          next_mv[mn].num_masks = num_masks;
+          next_mv[mn].mask2 = mask2;
+          next_mv[mn].mask1 = mask2 | from_mask;
+          next_mv[mn].p2 = p2;
+          next_mv[mn].castle_eligibility = (num_masks == 1)?castle_eligibility_template:next_castle_eligibility;
+          next_mv[mn].en_passant_eligible_pawn = 0;
+          mn++;
+      }
+      }
+    }
+  }
+
+  p1 = (unsigned char) ((S_QUEEN) | (whose_move << 3));
+  piece_mask = piece[p1];
+  while (piece_mask)
+  {
+    const unsigned int piece_index = bitbrdLowestIndexFromMaskGet(piece_mask);
+    const unsigned long long from_mask = _blsi_u64(piece_mask);
+    piece_mask = _blsr_u64(piece_mask);
+
+    const aggregateAttack_t *const aggregateAttackVal = &aggregateAttack[piece_index];
+    const unsigned long long lookup_index =  
+                   lookupKeyCompute (any_color_pieces_mask, aggregateAttackVal->diagonalBlocker);
+    const unsigned long long udlr_lookup_index =  
+                   lookupKeyCompute (any_color_pieces_mask, aggregateAttackVal->udlrBlocker);
+
+    unsigned long long piece_move_mask = 
+                  (diagonalVisibilityMap[piece_index][lookup_index] |
+                  udlrVisibilityMap[piece_index][udlr_lookup_index]) & valid_moves;
+
+    const unsigned long long visible_pieces_mask = piece_move_mask & opponent_pieces_mask;
+
+
+    if (unlikely(pin && (pin & from_mask)))
+    {
+      /* We can only move to other pinned squares.
+      */
+      piece_move_mask &= pin;
+    }
+
+    while (piece_move_mask)
+    {
+      const unsigned long long mask2 = _blsi_u64(piece_move_mask);
+      piece_move_mask = _blsr_u64(piece_move_mask);
+
+      int under_attack = 0;
+      unsigned char p2;
+      unsigned int num_masks;
+      castleEligibility_t next_castle_eligibility;
+
+      if (unlikely(mask2 & visible_pieces_mask))
+      {
+        next_castle_eligibility = castle_eligibility;
+        unsigned int new_piece_complement = def_piece_complement;
+        p2 = pieceTypeGet (whose_move, mask2, piece, &new_piece_complement);
+        num_masks = 2;
+        if (move_test_needed && TEST_NEEDED )
+        {
+          const unsigned long long mask1 = mask2 | from_mask;
+          MOVE_APPLY (piece, 2,
+                      p1,p2,0,
+                      mask1,mask2,0);
+          under_attack = kingInCheck(whose_move,
+                     piece, king_position,
+                     (mover_pieces_mask ^ mask1) | (opponent_pieces_mask ^ mask2));
+          MOVE_APPLY (piece, 2,
+                      p1,p2,0,
+                      mask1,mask2,0);
+        }
+        if (!under_attack)
+        {
+          if (unlikely(PIECE_GET(p2) == S_ROOK))
+          {
+            const unsigned int to_index = bitbrdLowestIndexFromMaskGet(mask2);
+            castleEligibilityRookCaptureCheck (whose_move,
+                                      to_index,
+                                      &next_castle_eligibility);
+          }
+          if (!record_undo_info)
+          {
+            const unsigned long long mask1 = mask2 | from_mask;
+            MOVE_APPLY (piece, 2,
+                      p1,p2,0,
+                      mask1,mask2,0);
+            mn += (last_ply)?
+             allMoveCandidatesLastPlyFind(whose_move ^ 1, piece, 0, next_castle_eligibility,
+                                  mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2, new_piece_complement):
+             allMovePerft(whose_move ^ 1, piece, 0, next_castle_eligibility, depth, ply,
+                                  mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2, new_piece_complement);
+            MOVE_APPLY (piece, 2,
+                      p1,p2,0,
+                      mask1,mask2,0);
+          }
+        }
+      } else
+      {
+        if (unlikely(move_test_needed && TEST_NEEDED))
+        {
+          const unsigned long long mask1 = mask2 | from_mask;
+          MOVE_APPLY (piece, 1,
+                      p1,0,0,
+                      mask1,0,0);
+          under_attack = kingInCheck(whose_move,
+                     piece, king_position,
+                     (mover_pieces_mask ^ mask1) | opponent_pieces_mask);
+          MOVE_APPLY (piece, 1,
+                      p1,0,0,
+                      mask1,0,0);
+        }
+        if (!record_undo_info)
+        {
+          if (!under_attack)
+          {
+            const unsigned long long mask1 = mask2 | from_mask;
+            MOVE_APPLY (piece, 1,
+                      p1,0,0,
+                      mask1,0,0);
+            mn += (last_ply)?
+             allMoveCandidatesLastPlyFind(whose_move ^ 1, piece, 0, castle_eligibility,
+                          mover_pieces_mask ^ mask1, opponent_pieces_mask, def_piece_complement):
+             allMovePerft(whose_move ^ 1, piece, 0, castle_eligibility, depth, ply,
+                          mover_pieces_mask ^ mask1, opponent_pieces_mask, def_piece_complement);
+            MOVE_APPLY (piece, 1,
+                      p1,0,0,
+                      mask1,0,0);
+          }
+        } else
+        {
+          p2 = 0;
+          num_masks = 1;
+        }
+      }
+      if (record_undo_info)
+      {
+        if (!under_attack)
+        {
+          const unsigned int to_index = bitbrdLowestIndexFromMaskGet(mask2);
+
+          next_mv[mn].from_r = piece_index >> 3;
+          next_mv[mn].from_c = piece_index & 7;
+          next_mv[mn].to_r = to_index >> 3;
+          next_mv[mn].to_c = to_index & 7;
+          next_mv[mn].p1 = p1;
+          next_mv[mn].num_masks = num_masks;
+          next_mv[mn].mask2 = mask2;
+          next_mv[mn].mask1 = mask2 | from_mask;
+          next_mv[mn].p2 = p2;
+          next_mv[mn].castle_eligibility = (num_masks == 1)?castle_eligibility:next_castle_eligibility;
+          next_mv[mn].en_passant_eligible_pawn = 0;
+          mn++;
+        } 
       }
     }
   }
@@ -2531,13 +2410,8 @@ static unsigned long long allBishopRookQueenSquaresLastPlyFind (
     while (piece_mask)
     {
       const unsigned int piece_index = bitbrdLowestIndexFromMaskGet(piece_mask);
-#if defined(USE_BMI)
       const unsigned long long from_mask = _blsi_u64(piece_mask);
       piece_mask = _blsr_u64(piece_mask);
-#else
-      const unsigned long long from_mask = 1LLU << piece_index;
-      piece_mask ^= from_mask;
-#endif
 
 
       const unsigned long long lookup_index =  
@@ -2579,13 +2453,8 @@ static unsigned long long allBishopRookQueenSquaresLastPlyFind (
     while (piece_mask)
     {
       const unsigned int piece_index = bitbrdLowestIndexFromMaskGet(piece_mask);
-#if defined(USE_BMI)
       const unsigned long long from_mask = _blsi_u64(piece_mask);
       piece_mask = _blsr_u64(piece_mask);
-#else
-      const unsigned long long from_mask = 1LLU << piece_index;
-      piece_mask ^= from_mask;
-#endif
 
       const unsigned long long lookup_index = 
                      lookupKeyCompute (any_color_pieces_mask, udlrBlocker[piece_index]);
@@ -2625,13 +2494,8 @@ static unsigned long long allBishopRookQueenSquaresLastPlyFind (
     while (piece_mask)
     {
       const unsigned int piece_index = bitbrdLowestIndexFromMaskGet(piece_mask);
-#if defined(USE_BMI)
       const unsigned long long from_mask = _blsi_u64(piece_mask);
       piece_mask = _blsr_u64(piece_mask);
-#else
-      const unsigned long long from_mask = 1LLU << piece_index;
-      piece_mask ^= from_mask;
-#endif
 
       const aggregateAttack_t *const aggregateAttackVal = &aggregateAttack[piece_index];
       const unsigned long long lookup_index =  
@@ -2706,13 +2570,8 @@ static unsigned long long allKnightSquaresFind (
   {
     const unsigned int piece_index = bitbrdLowestIndexFromMaskGet(piece_mask);
     unsigned long long move_candidate_mask =  knightAttack[piece_index];
-#if defined(USE_BMI)
     const unsigned long long from_mask = _blsi_u64(piece_mask);
     piece_mask = _blsr_u64(piece_mask);
-#else
-    const unsigned long long from_mask = 1LLU << piece_index;
-    piece_mask ^= from_mask;
-#endif
 
     /* Any squares that already have same color pieces must be excluded from the
     ** move candidates.
@@ -2733,21 +2592,17 @@ static unsigned long long allKnightSquaresFind (
       unsigned int num_masks;
       unsigned char p2;
       const unsigned int index = bitbrdLowestIndexFromMaskGet(move_candidate_mask);
- #if defined(USE_BMI)
       const unsigned long long p1_move_mask = _blsi_u64(move_candidate_mask);
       move_candidate_mask = _blsr_u64(move_candidate_mask);
- #else
-      const unsigned long long p1_move_mask = 1LLU << index;
-      move_candidate_mask ^= p1_move_mask;
- #endif
       int under_attack = 0;
-      castleEligibility_t next_castle_eligibility = castle_eligibility;
+      castleEligibility_t next_castle_eligibility;
 
       /* Check if there is an opponent piece at the destination location. 
       ** If so, then this move is a capture. We need to provide the mask of the captured piece.
       */
       if (p1_move_mask & opponent_pieces_mask)
       {
+        next_castle_eligibility = castle_eligibility;
         mask2 = p1_move_mask;
         unsigned int new_piece_complement = def_piece_complement;
         p2 = pieceTypeGet (whose_move, p1_move_mask, piece, &new_piece_complement);
@@ -2812,9 +2667,9 @@ static unsigned long long allKnightSquaresFind (
                         p1,0,0,
                         mask1,0,0);
           mn += (last_ply)?
-             allMoveCandidatesLastPlyFind(whose_move ^ 1, piece, 0, next_castle_eligibility,
+             allMoveCandidatesLastPlyFind(whose_move ^ 1, piece, 0, castle_eligibility,
                                 mover_pieces_mask ^ mask1, opponent_pieces_mask, def_piece_complement):
-             allMovePerft(whose_move ^ 1, piece, 0, next_castle_eligibility, depth, ply,
+             allMovePerft(whose_move ^ 1, piece, 0, castle_eligibility, depth, ply,
                                 mover_pieces_mask ^ mask1, opponent_pieces_mask, def_piece_complement);
           MOVE_APPLY (piece, 1,
                         p1,0,0,
@@ -2842,7 +2697,7 @@ static unsigned long long allKnightSquaresFind (
           next_mv[mn].num_masks = num_masks;
           next_mv[mn].mask1 = p1_move_mask | from_mask;
           next_mv[mn].mask2 = mask2;
-          next_mv[mn].castle_eligibility = next_castle_eligibility;
+          next_mv[mn].castle_eligibility = (num_masks == 1)?castle_eligibility:next_castle_eligibility;
           next_mv[mn].en_passant_eligible_pawn = 0;
           mn++;
         } 
@@ -2882,12 +2737,7 @@ static unsigned long long allKnightSquaresLastPlyFind (
 
   while (piece_mask)
   {
-#if defined(USE_BMI)
     const unsigned long long from_mask = _blsi_u64(piece_mask);
-#else
-    const unsigned int piece_index = bitbrdLowestIndexFromMaskGet(piece_mask);
-    const unsigned long long from_mask = 1LLU << piece_index;
-#endif
 
     /* Any squares that already have same color pieces must be excluded from the
     ** move candidates.
@@ -2896,11 +2746,7 @@ static unsigned long long allKnightSquaresLastPlyFind (
                 knightAttack[bitbrdLowestIndexFromMaskGet(piece_mask)] &
                     valid_moves;
 
-#if defined(USE_BMI)
     piece_mask = _blsr_u64(piece_mask);
-#else
-    piece_mask ^= from_mask;
-#endif
 
     if (unlikely(pin && (pin & from_mask)))
     {
@@ -2963,23 +2809,16 @@ static unsigned long long allWhitePawnSquaresFind (
   while (piece_mask)
   {
     const unsigned int piece_index = bitbrdLowestIndexFromMaskGet(piece_mask);
-    unsigned int to_index;
     unsigned long long p1_move_mask;
-#if defined(USE_BMI)
     const unsigned long long from_mask = _blsi_u64(piece_mask);
     piece_mask = _blsr_u64(piece_mask);
-#else
-    const unsigned long long from_mask = 1LLU << piece_index;
-    piece_mask ^= from_mask; /* Clear the bit associated with this piece */
-#endif
 
     constexpr unsigned long long row1_mask = 0x000000000000ff00;
 
     /* Check upper file, one square advance. The destination square
     ** must be empty.
     */
-    to_index = piece_index + 8;
-    p1_move_mask = 1LLU << to_index;
+    p1_move_mask = from_mask << 8;
     if (0 == (p1_move_mask & any_color_pieces_mask))
     {
       unsigned int new_piece_complement = def_piece_complement;
@@ -3077,7 +2916,7 @@ static unsigned long long allWhitePawnSquaresFind (
         {
           next_mv[mn].from_r = piece_index >> 3;
           next_mv[mn].from_c = piece_index & 7;
-          next_mv[mn].to_r = to_index >> 3;
+          next_mv[mn].to_r = (piece_index + 8) >> 3;
           next_mv[mn].to_c = piece_index & 7;
           next_mv[mn].p1 = S_PAWN | S_WHITE;
           next_mv[mn].num_masks = num_masks;
@@ -3134,9 +2973,8 @@ static unsigned long long allWhitePawnSquaresFind (
       /* Check upper file, two square advance. The pawn must be at starting rank,
       ** and the two lower squares must be empty.
       */
-      to_index = piece_index + 16;
       if ((from_mask & row1_mask) &&
-        (0 == (((p1_move_mask = 1LLU << to_index)) & any_color_pieces_mask)))
+        (0 == (((p1_move_mask = from_mask << 16)) & any_color_pieces_mask)))
       {
 
         under_attack = 0;
@@ -3168,7 +3006,7 @@ static unsigned long long allWhitePawnSquaresFind (
           ** opponent pawn in the same row.
           */
           const unsigned int next_en_passant_eligible_pawn =
-          (blackPawnEnPassantAttack[to_index] & piece[S_PAWN | S_BLACK])?to_index:0;
+          (blackPawnEnPassantAttack[piece_index + 16] & piece[S_PAWN | S_BLACK])?piece_index + 16:0;
 
           if (!record_undo_info)
           {
@@ -3202,7 +3040,7 @@ static unsigned long long allWhitePawnSquaresFind (
           {
             next_mv[mn].from_r = piece_index >> 3;
             next_mv[mn].from_c = piece_index & 7;
-            next_mv[mn].to_r = to_index >> 3;
+            next_mv[mn].to_r = (piece_index + 16) >> 3;
             next_mv[mn].to_c = piece_index & 7;
             next_mv[mn].p1 = S_PAWN | S_WHITE;
             next_mv[mn].num_masks = 1;
@@ -3224,8 +3062,7 @@ static unsigned long long allWhitePawnSquaresFind (
     /* Check Left Upper.
     ** This must be a capture or en-passant capture.
     */
-    to_index = (piece_index + 8) - 1;
-    p1_move_mask = 1LLU << to_index;
+    p1_move_mask = from_mask << 7;
     if (((piece_index & 7) > 0) &&
         ((p1_move_mask & opponent_pieces_mask) ||
           (en_passant_eligible_pawn == (piece_index - 1))))
@@ -3277,7 +3114,7 @@ static unsigned long long allWhitePawnSquaresFind (
           if (unlikely(PIECE_GET(p2) == S_ROOK))
           {
             castleEligibilityRookCaptureCheck (MOVE_WHITE, 
-                                  to_index,
+                                  piece_index + 7,
                                   &next_castle_eligibility);
           }
           num_masks = 3;
@@ -3321,8 +3158,8 @@ static unsigned long long allWhitePawnSquaresFind (
         {
           next_mv[mn].from_r = piece_index >> 3;
           next_mv[mn].from_c = piece_index & 7;
-          next_mv[mn].to_r = to_index >> 3;
-          next_mv[mn].to_c = to_index & 7;
+          next_mv[mn].to_r = (piece_index + 7) >> 3;
+          next_mv[mn].to_c = (piece_index + 7) & 7;
           next_mv[mn].num_masks = num_masks;
           next_mv[mn].p1 = S_PAWN | S_WHITE;
           next_mv[mn].p2 = p2;
@@ -3407,9 +3244,8 @@ static unsigned long long allWhitePawnSquaresFind (
     /* Check Right Upper.
     ** This must be a capture or en-passant capture.
     */
-    to_index = (piece_index + 8) + 1;
     if (((piece_index & 7) < (BRDS-1)) &&
-        (((p1_move_mask = (1LLU << to_index)) & opponent_pieces_mask) ||
+        (((p1_move_mask = (from_mask << 9)) & opponent_pieces_mask) ||
           (en_passant_eligible_pawn == (piece_index + 1))))
     {
       unsigned int new_piece_complement = def_piece_complement;
@@ -3458,7 +3294,7 @@ static unsigned long long allWhitePawnSquaresFind (
           if (unlikely(PIECE_GET(p2) == S_ROOK))
           {
             castleEligibilityRookCaptureCheck (MOVE_WHITE, 
-                                    to_index,
+                                    piece_index + 9,
                                     &next_castle_eligibility);
           }
           num_masks = 3;
@@ -3502,8 +3338,8 @@ static unsigned long long allWhitePawnSquaresFind (
         {
           next_mv[mn].from_r = piece_index >> 3;
           next_mv[mn].from_c = piece_index & 7;
-          next_mv[mn].to_r = to_index >> 3;
-          next_mv[mn].to_c = to_index & 7;
+          next_mv[mn].to_r = (piece_index + 9) >> 3;
+          next_mv[mn].to_c = (piece_index + 9) & 7;
           next_mv[mn].p1 = S_PAWN | S_WHITE;
           next_mv[mn].num_masks = num_masks;
           next_mv[mn].p2 = p2;
@@ -3709,20 +3545,13 @@ static unsigned long long allWhitePawnSquaresLastPlyFind (
   {
     const unsigned int piece_index = bitbrdLowestIndexFromMaskGet(piece_mask);
     unsigned long long p1_move_mask;
-#if defined(USE_BMI)
     const unsigned long long from_mask = _blsi_u64(piece_mask);
     piece_mask = _blsr_u64(piece_mask);
-#else
-    const unsigned long long from_mask = 1LLU << piece_index;
-    piece_mask ^= from_mask; /* Clear the bit associated with this piece */
-#endif
-
-
 
     /* Check upper file, one square advance. The destination square
     ** must be empty.
     */
-    p1_move_mask = 1LLU << (piece_index + 8); 
+    p1_move_mask = from_mask << 8; 
     if (0 == (p1_move_mask & any_color_pieces_mask))
     {
       mn++;
@@ -3779,7 +3608,7 @@ static unsigned long long allWhitePawnSquaresLastPlyFind (
       ** and the two lower squares must be empty.
       */
       if ((from_mask & row1_mask) &&
-           (0 == (any_color_pieces_mask & (p1_move_mask = (1LLU << (piece_index + 16))))))
+           (0 == (any_color_pieces_mask & (p1_move_mask = (from_mask << 16)))))
       {
         mn++;
         if (!en_passant_eligible_pawn &&
@@ -3818,7 +3647,7 @@ static unsigned long long allWhitePawnSquaresLastPlyFind (
     ** This must be a capture or en-passant capture.
     */
     if (((piece_index & 7) > 0) &&
-        (((p1_move_mask = 1LLU << ((piece_index + 8) - 1)) & opponent_pieces_mask) ||
+        (((p1_move_mask = from_mask << 7) & opponent_pieces_mask) ||
           (en_passant_eligible_pawn == ep_index)))
     {
       unsigned int pawn_promotion = 0;
@@ -3908,7 +3737,7 @@ static unsigned long long allWhitePawnSquaresLastPlyFind (
     ** This must be a capture or en-passant capture.
     */
     if (((piece_index & 7) < (BRDS-1)) &&
-        (((p1_move_mask = 1LLU << ((piece_index + 8) + 1)) & opponent_pieces_mask) ||
+        (((p1_move_mask = from_mask << 9) & opponent_pieces_mask) ||
           (en_passant_eligible_pawn == ep_index)))
     {
       unsigned int pawn_promotion = 0;
@@ -4027,16 +3856,9 @@ static unsigned long long allBlackPawnSquaresFind (
   while (piece_mask)
   {
     const unsigned int piece_index = bitbrdLowestIndexFromMaskGet(piece_mask);
-    unsigned int to_index;
     unsigned long long p1_move_mask;
-#if defined(USE_BMI)
     const unsigned long long from_mask = _blsi_u64(piece_mask);
     piece_mask = _blsr_u64(piece_mask);
-#else                                   
-    const unsigned long long from_mask = 1LLU << piece_index;
-    piece_mask ^= from_mask; /* Clear the bit associated with this piece */
-#endif        
-
 
     constexpr unsigned long long row6_mask = 0x00ff000000000000;
 
@@ -4044,8 +3866,7 @@ static unsigned long long allBlackPawnSquaresFind (
     /* Check lower file, one square advance. The destination square
     ** must be empty.
     */
-    to_index = piece_index - 8;
-    p1_move_mask = 1LLU << to_index;
+    p1_move_mask = from_mask >> 8;
     if (0 == (p1_move_mask & any_color_pieces_mask))
     {
       unsigned int new_piece_complement = def_piece_complement;
@@ -4141,7 +3962,7 @@ static unsigned long long allBlackPawnSquaresFind (
         {
           next_mv[mn].from_r = piece_index >> 3;
           next_mv[mn].from_c = piece_index & 7;
-          next_mv[mn].to_r = to_index >> 3;
+          next_mv[mn].to_r = (piece_index - 8) >> 3;
           next_mv[mn].to_c = piece_index & 7;
           next_mv[mn].p1 = S_PAWN | S_BLACK;
           next_mv[mn].num_masks = num_masks;
@@ -4199,9 +4020,8 @@ static unsigned long long allBlackPawnSquaresFind (
       /* Check lower file, two square advance. The pawn must be at starting rank,
       ** and the two lower squares must be empty.
       */
-      to_index = piece_index - 16;
       if ((from_mask & row6_mask) &&
-          (0 == ((p1_move_mask = 1LLU << to_index) & any_color_pieces_mask)))
+          (0 == ((p1_move_mask = from_mask >> 16) & any_color_pieces_mask)))
 
       {
         under_attack = 0;
@@ -4234,7 +4054,7 @@ static unsigned long long allBlackPawnSquaresFind (
           ** opponent pawn in the same row.
           */
           const unsigned int next_en_passant_eligible_pawn =
-          (whitePawnEnPassantAttack[to_index] & piece[S_PAWN | S_WHITE])?to_index:0;
+          (whitePawnEnPassantAttack[piece_index - 16] & piece[S_PAWN | S_WHITE])?piece_index - 16:0;
 
           if (!record_undo_info)
           {
@@ -4267,7 +4087,7 @@ static unsigned long long allBlackPawnSquaresFind (
           {
             next_mv[mn].from_r = piece_index >> 3;
             next_mv[mn].from_c = piece_index & 7;
-            next_mv[mn].to_r = to_index >> 3;
+            next_mv[mn].to_r = (piece_index - 16) >> 3;
             next_mv[mn].to_c = piece_index & 7;
             next_mv[mn].p1 = S_PAWN | S_BLACK;
             next_mv[mn].num_masks = 1;
@@ -4291,9 +4111,8 @@ static unsigned long long allBlackPawnSquaresFind (
     /* Check left Lower.
     ** This must be a capture or en-passant capture.
     */
-    to_index = (piece_index - 8) - 1;
     if (((piece_index & 7) > 0) &&
-        (((p1_move_mask = (1LLU << to_index)) & opponent_pieces_mask) ||
+        (((p1_move_mask = (from_mask >> 9)) & opponent_pieces_mask) ||
           (en_passant_eligible_pawn == (piece_index - 1))))
     {
       unsigned int new_piece_complement = def_piece_complement;
@@ -4343,7 +4162,7 @@ static unsigned long long allBlackPawnSquaresFind (
           if (unlikely(PIECE_GET(p2) == S_ROOK))
           {
             castleEligibilityRookCaptureCheck (MOVE_BLACK,
-                                        to_index, 
+                                        piece_index - 9, 
                                         &next_castle_eligibility);
           }
           num_masks = 3;
@@ -4387,8 +4206,8 @@ static unsigned long long allBlackPawnSquaresFind (
         {
           next_mv[mn].from_r = piece_index >> 3;
           next_mv[mn].from_c = piece_index & 7;
-          next_mv[mn].to_r = to_index >> 3;
-          next_mv[mn].to_c = to_index & 7;
+          next_mv[mn].to_r = (piece_index - 9) >> 3;
+          next_mv[mn].to_c = (piece_index - 9) & 7;
           next_mv[mn].p1 = S_PAWN | S_BLACK;
           next_mv[mn].num_masks = num_masks;
           next_mv[mn].p2 = p2;
@@ -4474,8 +4293,7 @@ static unsigned long long allBlackPawnSquaresFind (
     ** This must be a capture or en-passant capture.
     */
 
-    to_index = (piece_index - 8) + 1;
-    p1_move_mask = 1LLU << to_index;
+    p1_move_mask = from_mask >> 7;
     if (((piece_index & 7) < (BRDS-1)) &&
         ((p1_move_mask & opponent_pieces_mask) ||
           (en_passant_eligible_pawn == (piece_index + 1))))
@@ -4526,7 +4344,7 @@ static unsigned long long allBlackPawnSquaresFind (
           if (unlikely(PIECE_GET(p2) == S_ROOK))
           {
             castleEligibilityRookCaptureCheck (MOVE_BLACK,
-                                        to_index, 
+                                        piece_index - 7, 
                                         &next_castle_eligibility);
           }
           num_masks = 3;
@@ -4570,8 +4388,8 @@ static unsigned long long allBlackPawnSquaresFind (
         {
           next_mv[mn].from_r = piece_index >> 3;
           next_mv[mn].from_c = piece_index & 7;
-          next_mv[mn].to_r = to_index >> 3;
-          next_mv[mn].to_c = to_index & 7;
+          next_mv[mn].to_r = (piece_index - 7) >> 3;
+          next_mv[mn].to_c = (piece_index - 7) & 7;
           next_mv[mn].p1 = S_PAWN | S_BLACK;
           next_mv[mn].num_masks = num_masks;
           next_mv[mn].p2 = p2;
@@ -4778,21 +4596,13 @@ static unsigned long long allBlackPawnSquaresLastPlyFind (
   {
     const unsigned int piece_index = bitbrdLowestIndexFromMaskGet(piece_mask);
     unsigned long long p1_move_mask;
-#if defined(USE_BMI)
     const unsigned long long from_mask = _blsi_u64(piece_mask);
     piece_mask = _blsr_u64(piece_mask);
-#else
-    const unsigned long long from_mask = 1LLU << piece_index;
-    piece_mask ^= from_mask; /* Clear the bit associated with this piece */
-#endif
-
-
-
 
     /* Check lower file, one square advance. The destination square
     ** must be empty.
     */
-    p1_move_mask = 1LLU << (piece_index - 8);
+    p1_move_mask = from_mask >> 8;
     if (0 == (p1_move_mask & any_color_pieces_mask))
     {
       mn++;
@@ -4846,7 +4656,7 @@ static unsigned long long allBlackPawnSquaresLastPlyFind (
       ** and the two lower squares must be empty.
       */
       if ((from_mask & row6_mask) &&
-          (0 == ((p1_move_mask = 1LLU << (piece_index - 16)) & any_color_pieces_mask)))
+          (0 == ((p1_move_mask = from_mask >> 16) & any_color_pieces_mask)))
       {
         mn++;
         if (!en_passant_eligible_pawn &&
@@ -4885,7 +4695,7 @@ static unsigned long long allBlackPawnSquaresLastPlyFind (
     ** This must be a capture or en-passant capture.
     */
     if (((piece_index & 7) > 0) &&
-        (((p1_move_mask = 1LLU << ((piece_index - 8) - 1)) & opponent_pieces_mask) ||
+        (((p1_move_mask = from_mask >> 9) & opponent_pieces_mask) ||
           (en_passant_eligible_pawn == ep_index)))
     {
       unsigned int pawn_promotion = 0;
@@ -4974,7 +4784,7 @@ static unsigned long long allBlackPawnSquaresLastPlyFind (
     ep_index = piece_index + 1;
 
     if (((piece_index & 7) < (BRDS-1)) &&
-        (((p1_move_mask = 1LLU << ((piece_index - 8) + 1)) & opponent_pieces_mask) ||
+        (((p1_move_mask = from_mask >> 7) & opponent_pieces_mask) ||
           (en_passant_eligible_pawn == ep_index)))
     {
       unsigned int pawn_promotion = 0;
@@ -5114,7 +4924,7 @@ unsigned long long allMoveCandidatesFind (
 
     if (!attack_helper.in_check && !attack_helper.pin)
     {
-      num_moves += whiteKingSquaresFind(king_position, attack_helper.move_candidate_mask,
+      num_moves += whiteKingSquaresFind(king_mask, king_position, attack_helper.move_candidate_mask,
                        bit_brd->piece, &dest[num_moves],
                        castle_eligibility, 1, 0, 0,
                        mover_pieces_mask, opponent_pieces_mask, 0,
@@ -5138,7 +4948,7 @@ unsigned long long allMoveCandidatesFind (
                                         def_piece_complement);
     } else
     {
-      num_moves += whiteKingSquaresFind(king_position, attack_helper.move_candidate_mask,
+      num_moves += whiteKingSquaresFind(king_mask, king_position, attack_helper.move_candidate_mask,
                        bit_brd->piece, &dest[num_moves],
                        castle_eligibility, 1, 0, 0,
                        mover_pieces_mask, opponent_pieces_mask, 0,
@@ -5184,7 +4994,7 @@ unsigned long long allMoveCandidatesFind (
 
     if (!attack_helper.in_check && !attack_helper.pin)
     {
-      num_moves += blackKingSquaresFind(king_position, attack_helper.move_candidate_mask,
+      num_moves += blackKingSquaresFind(king_mask, king_position, attack_helper.move_candidate_mask,
                        bit_brd->piece, &dest[num_moves],
                        castle_eligibility, 1, 0, 0,
                        mover_pieces_mask, opponent_pieces_mask, 0,
@@ -5209,7 +5019,7 @@ unsigned long long allMoveCandidatesFind (
                                         def_piece_complement);
     } else
     {
-      num_moves += blackKingSquaresFind(king_position, attack_helper.move_candidate_mask,
+      num_moves += blackKingSquaresFind(king_mask, king_position, attack_helper.move_candidate_mask,
                        bit_brd->piece, &dest[num_moves],
                        castle_eligibility, 1, 0, 0,
                        mover_pieces_mask, opponent_pieces_mask, 0,
@@ -5284,7 +5094,7 @@ unsigned long long allWhiteMovePerft (
     {
       if (next_ply_is_last)
       {
-        num_moves += whiteKingSquaresFind(king_position, attack_helper.move_candidate_mask,
+        num_moves += whiteKingSquaresFind(king_mask, king_position, attack_helper.move_candidate_mask,
                        piece, 0,
                        castle_eligibility, 0, depth, ply,
                        mover_pieces_mask, opponent_pieces_mask, 1,
@@ -5309,7 +5119,7 @@ unsigned long long allWhiteMovePerft (
                                         def_piece_complement);
       } else
       {
-        num_moves += whiteKingSquaresFind(king_position, attack_helper.move_candidate_mask,
+        num_moves += whiteKingSquaresFind(king_mask, king_position, attack_helper.move_candidate_mask,
                        piece, 0,
                        castle_eligibility, 0, depth, ply,
                        mover_pieces_mask, opponent_pieces_mask, 0,
@@ -5335,7 +5145,7 @@ unsigned long long allWhiteMovePerft (
       }
     } else
     {
-      num_moves += whiteKingSquaresFind(king_position, attack_helper.move_candidate_mask,
+      num_moves += whiteKingSquaresFind(king_mask, king_position, attack_helper.move_candidate_mask,
                        piece, 0,
                        castle_eligibility, 0, depth, ply,
                        mover_pieces_mask, opponent_pieces_mask, next_ply_is_last,
@@ -5408,7 +5218,7 @@ unsigned long long allBlackMovePerft (
     {
       if (next_ply_is_last)
       {
-        num_moves += blackKingSquaresFind(king_position, attack_helper.move_candidate_mask,
+        num_moves += blackKingSquaresFind(king_mask, king_position, attack_helper.move_candidate_mask,
                        piece, 0,
                        castle_eligibility, 0, depth, ply,
                        mover_pieces_mask, opponent_pieces_mask, 1,
@@ -5433,7 +5243,7 @@ unsigned long long allBlackMovePerft (
                                         def_piece_complement);
       } else
       {
-        num_moves += blackKingSquaresFind(king_position, attack_helper.move_candidate_mask,
+        num_moves += blackKingSquaresFind(king_mask, king_position, attack_helper.move_candidate_mask,
                        piece, 0,
                        castle_eligibility, 0, depth, ply,
                        mover_pieces_mask, opponent_pieces_mask, 0,
@@ -5459,7 +5269,7 @@ unsigned long long allBlackMovePerft (
       }
     } else
     {
-      num_moves += blackKingSquaresFind(king_position, attack_helper.move_candidate_mask,
+      num_moves += blackKingSquaresFind(king_mask, king_position, attack_helper.move_candidate_mask,
                        piece, 0,
                        castle_eligibility, 0, depth, ply,
                        mover_pieces_mask, opponent_pieces_mask, next_ply_is_last,

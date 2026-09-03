@@ -27,12 +27,12 @@
 #define unlikely(x) !!(x)
 #endif
 
-#if defined(__BMI__)
-#define USE_BMI
+#if !defined(__BMI__)
+#error Must have BMI support.
 #endif
 
-#if defined(__BMI2__)
-#define USE_BMI2
+#if !defined(__BMI2__)
+#error Must have BMI2 support.
 #endif
 
 
@@ -51,13 +51,8 @@
 ** The returned value ranges from 0 to 63 when at least one bit in the mask is set.
 ** If no bits are set in the mask then the function returns 0xFFFFFFFF.
 */
-#ifdef USE_BMI
 #define bitbrdLowestIndexFromMaskGet(m_mask)\
         ((unsigned int) (_tzcnt_u64 ((unsigned long long) (m_mask))))
-#else
-#define bitbrdLowestIndexFromMaskGet(m_mask)\
-        ((unsigned int) ((__builtin_ffsll ((long long) (m_mask))) - 1))
-#endif
 
 /* This function takes a piece with color flag and determines the color index.
 ** For example if the input is (S_PAWN | S_WHITE) then the output is MOVE_WHITE.
