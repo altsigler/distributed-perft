@@ -18,6 +18,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <dirent.h>
+#include <sys/sysinfo.h>
 
 #include "bytebrd_api.h"
 #include "onecore_api.h"
@@ -1365,8 +1366,21 @@ void brdDbGenerate(
   board_db.ply_table[0].num_boards_in_ply = 1;
   board_db.ply_table[0].stats.unique_positions_added = 1;
 
-  board_db.max_sortblock_positions = SORT_BLOCK_SIZE / sizeof(sortBlockEntry_t);
-  board_db.sort_block = malloc (SORT_BLOCK_SIZE);
+  struct sysinfo mem_info;
+  if (0 != sysinfo(&mem_info))
+  {
+    perror ("sysinfo");
+    exit (-1);
+  }
+
+  const unsigned long long total_ram = (unsigned long long) mem_info.totalram * mem_info.mem_unit;
+  const unsigned long long sort_block_size = ((total_ram / 2) < MAX_SORT_BLOCK_SIZE)?
+                                total_ram / 2:
+                                MAX_SORT_BLOCK_SIZE;
+
+  board_db.max_sortblock_positions = sort_block_size / sizeof(sortBlockEntry_t);
+
+  board_db.sort_block = malloc (sort_block_size);
   board_db.sort_block_position = board_db.sort_block;
   assert (board_db.sort_block);
 

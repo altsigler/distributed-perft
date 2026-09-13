@@ -13,6 +13,10 @@
 
 /* 
 ** Sort block size in bytes. 
+** On platforms with smaller DRAM size, the code allocates only half of
+** the total DRAM for the sort blocks, so the actual sort block size may be 
+** smaller than the value specified below.
+**
 ** The sort block is used for different data types.
 **
 ** As positions are generated for the new ply, they are added to this block.
@@ -25,6 +29,6 @@
 ** The sort block files are temporary, and are deleted after the ply position
 ** file is generated.
 */
-#define SORT_BLOCK_SIZE (20LLU*1024LLU*1024LLU*1024LLU)
+#define MAX_SORT_BLOCK_SIZE (20LLU*1024LLU*1024LLU*1024LLU)
 
 #endif /* MCPERFT_H_INCLUDED */
