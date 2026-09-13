@@ -7,28 +7,15 @@
 #ifndef MCPERFT_DEFS_H_INCLUDED
 #define MCPERFT_DEFS_H_INCLUDED
 
-#include <pthread.h>
-#include <semaphore.h>
 #include "mcperft.h"
 #include "mcperft_api.h"
 
-/* Help the optimizer create better code.
-*/
-#if 1
-#define likely(x) __builtin_expect(!!(x), 1)
-#define unlikely(x) __builtin_expect(!!(x), 0)
-#else
-#define likely
-#define unlikely
-#endif
-
-
-#define ONE_GB ((size_t)0x40000000LLU)
-
 /* Maximum number of plies in the board database.
 ** This just needs to be some large value that we will never reach. 
+** This is used for storing per-ply statistics, which is a small
+** structure.
 */
-#define MAX_BRD_PLIES 12
+#define MAX_BRD_PLIES 100
 
 /* Maximum number of workload files for deep search.
 */
@@ -39,7 +26,40 @@
 */
 #define DIR_NAME "board-db"
 #define WORK_DIRECTORY_NAME "./" DIR_NAME "/"
-#define POSITION_DB_FILE WORK_DIRECTORY_NAME "position_db"
+#define POSITION_DB_DIRECTORY WORK_DIRECTORY_NAME "position_db/"
+
+/* The position database is comprised of two files for each ply except the deepest ply.
+** These files are a list of positions for the ply and the list of moves leading 
+** to the next ply. At the deepest ply only the list of positions file is present.
+**
+** The plies are counted starting with index 0, which the the initial position. 
+** The file ply_0_positions contains exactly one position, which is the standard
+** starting position.
+** The file ply_0_moves contains 20 moves, which is the number of legal moves from 
+** the standard starting position. 
+** The ply_1_positions contains 20 positions, and so on.
+** Only unique positions are recorded in the ply position file. Each position entry 
+** contains the position and the index of the first move entry from this position.
+** The index is relative to the start of the ply move file, so the first index is always 0.
+**
+** The ply move file contains an index of the position in the next ply position file. 
+** These indexes are relative to the start of the file, so the first position is always 0.
+**
+*/
+#define PLY_FILE_PREFIX POSITION_DB_DIRECTORY "ply_"
+
+/* While generating positions for a ply, the code generates temporary files 
+** of positions. The positions contained in each files are sorted, but can have 
+** duplicates. These files are called sort blocks. The files are deleted after the 
+** ply position file is generated. 
+** The file names start with "position_block_1". The first file is always created,
+** even when there is only one position in the ply. The subsequent files are called 
+** position_block_2, position_block_3, and so on until all ply positions are generated.
+**
+** The sort block size is defined by SORT_BLOCK_SIZE.
+*/
+#define SORT_BLOCK_PREFIX WORK_DIRECTORY_NAME "position_block_"
+
 
 /* The FEN database file prefix. 
 ** Note that the FEN database is only for debugging. The FEN database is 
@@ -79,13 +99,15 @@
 ** data is written to a file, which improves performance.
 **
 ** The actual allocated memory for each chunk is determined
-** by the numer of cores and the search depth. Larger number of cores
+** by the number of cores and the search depth. Larger number of cores
 ** increases the memory requirements. 
 ** Deeper search reduces the memory requirements, since each workload 
 ** takes more time, we use smaller chunks in order to target results
 ** file update about every 10 minutes.
 */
 #define MAX_DEEP_SEARCH_PER_CORE_CHUNK_SIZE 1'000'000LLU
+
+
 
 typedef union
 {
@@ -121,91 +143,6 @@ typedef struct
 } workloadRecord_t;
 
  
-/* Ply and Database Statistics.
-** All counters in this structure must be defined as "unsigned long long".
-*/
-typedef struct 
-{
-  unsigned long long unique_positions_added; /* Unique Positions in the Database */
-  unsigned long long duplicate_positions_detected; /* Tried to add to DB, but found a duplicate */
-  unsigned long long total_moves_added; /* Total moves added to the move database */ 
-
-  /* Number of hash collisions. This means that multiple positions hashed into the 
-  ** same hash index.
-  */
-  unsigned long long num_hash_collisions;
-
-  /* These counters record how many positions were not added to the 
-  ** database.
-  */
-  unsigned long long position_database_full;
-  unsigned long long move_database_full;
-
-  /* Performance Measurement Parameters.
-  */
-  unsigned long long board_db_insert_time_msec;
-
-  /* Place Holders in case we want to add more statistics without 
-  ** changing the database format.
-  */
-  unsigned long long place_holder[16];
-
-} chessStat_t;
-
-/* Ply information structure. 
-*/
-typedef struct
-{
-  /* All boards for the same ply have consecutive indexes, so we only need to know
-  ** the starting index and the number of boards in the ply.
-  */
-  unsigned long long first_board_in_ply_index;
-  unsigned long long num_boards_in_ply;
-  color_e whose_move;
-
-  /* The number of boards that have been successfully processed in this ply.
-  ** This value is 0 for the highest_ply_with_positions ply.
-  ** This value is equal to num_boards_in_ply for plies 0 to highest_ply_with_positions - 2.
-  ** For the (highest_ply_with_positions - 1) this value is the number of positions that 
-  ** have been handled before the database ran out of memory. If the database didn't run out
-  ** of memory then the value is equal to num_boards_in_ply.
-  */
-  unsigned long long num_boards_processed;
-
-  /* This counter indicates the next board to be deep searched in this ply.
-  ** The counter is incremented atomically by deep search threads.
-  */
-  unsigned long long next_deep_search_board;
-
-  chessStat_t stats; /* Ply Statistics */
-
-  /* Place holder in case we want to add additional ply information witout
-  ** changing the datbase format.
-  */
-  unsigned long long place_holder [16];
-
-} plyInfo_t;
-
-
-typedef struct __attribute__((packed))
-{
-  unsigned char high;
-  unsigned int low;
-} hashEntry_t;
-
-__attribute__((always_inline))
-inline hashEntry_t hashIndexToEntry (const unsigned long long index)
-{
-  const hashEntry_t hash_entry = {(unsigned char) (index >> 32), (unsigned int) index};
-  return hash_entry;
-} 
-
-__attribute__((always_inline))
-inline unsigned long long hashEntryToIndex (const hashEntry_t hash_entry)
-{
-  return ((unsigned long long) hash_entry.high << 32) | (unsigned long long) hash_entry.low;
-}
-
 typedef struct __attribute__((packed))
 { 
   unsigned char high;
@@ -226,124 +163,85 @@ inline unsigned long long moveEntryToIndex (const moveEntry_t move_entry)
 } 
   
 
-typedef struct
-{
-  /* This flag indicates that the position_at_depth counter has been 
-  ** computed for this entry.
-  */
-  unsigned short positions_at_depth_computed:1;
-
-  /* Number of legal moves from this position.
-  ** If this value is 0 then there are either no legal moves,
-  ** or we ran out of memory for storing moves for next board
-  ** positions, or the game is over due to lack of material for a win on 
-  ** both sides.
-  */
-  unsigned short num_legal_moves:9;
-
-  /* Reserved for future use.
-  */
-  unsigned short place_holder:6;
-} brdStatusInfo_t;
-
-//typedef struct __attribute__((packed))
-typedef struct
-{
-  /* Start of hash key.
-  */
-  unsigned long long position[4]; /* 32-byte Board Position */
-  unsigned short ply_number;
-  brdCtrl_u brd_info;  /* 2-byte board control information */
-  /* End of hash key.
-  */
-
-  /* The status of this entry.
-  */
-  brdStatusInfo_t status; /* 2-byte structure */
-
-  /* When multiple boards hash into the same index, the next_brd_in_cache
-  ** indictes the next board entry with the same hash index.
-  ** If this value is set to 0 then there is no next board with the 
-  ** same hash index.
-  */
-  hashEntry_t next_brd_in_cache;
-
-
-  /* The location in the global move table where moves
-  ** for this position are recorded. 
-  ** Note that 0 is a valid move location.
-  */
-  moveEntry_t legal_move_entry;
-
-} brdDbEntry_t __attribute__ ((aligned (8)));
-
-/* Board Database Control Structure.
+/* This structure is used for the temporary sort block position files.
 */
 typedef struct 
 {
+  unsigned long long position[4]; /* 32-byte Board Position */
+  brdCtrl_u brd_info;  /* 2-byte board control information */
+  moveEntry_t move_entry; /* 5-byte move entry which points to this position */
+  unsigned char pad; /* Pad to align to 8-byte boundary */
+} sortBlockEntry_t __attribute__ ((aligned (8)));
+
+/* Structure for holding information about sorted blocks while
+** merging these blocks into the ply position file.
+*/
+typedef struct
+{
+    sortBlockEntry_t *buffer;
+    unsigned long long buffer_index;
+    int fd;
+    unsigned int file_is_open;
+    unsigned int file_is_empty; /* No More Positions in this file */
+
+    /* Number of positions in the current block. 
+    */
+    unsigned long long num_elements_in_block; 
+
+    char file_name[1024];
+} mergeBlock_t;
+
+/* This structure is used for ply position files.
+*/
+typedef struct
+{
+  unsigned long long position[4]; /* 32-byte Board Position */
+  brdCtrl_u brd_info;  /* 2-byte board control information */
+  unsigned char num_moves; /* Number of moves from this position (1 byte) */
+  moveEntry_t first_move_index; /* First move for this position in ply moves file (5 bytes) */  
+} plyPositionEntry_t __attribute__ ((aligned (8)));
+
+/* Ply and Database Statistics.
+** All counters in this structure must be defined as "unsigned long long".
+*/
+typedef struct 
+{
+  unsigned long long unique_positions_added; /* Unique Positions in the Database */
+  unsigned long long duplicate_positions_detected; /* Tried to add to DB, but found a duplicate */
+  unsigned long long total_moves_added; /* Total moves added to the move database */ 
+
+  /* Performance Measurement Parameters.
+  */
+  unsigned long long board_db_insert_time_msec;
+
+} chessStat_t;
+
+/* Ply information structure. 
+*/
+typedef struct
+{
+  unsigned long long num_boards_in_ply;
+  color_e whose_move;
+
+  chessStat_t stats; /* Ply Statistics */
+} plyInfo_t;
+
+
+/* Board Database Control Structure.
+** This structure is used during board database creation to keep track 
+** of creation statistics. 
+*/
+typedef struct 
+{
+  void *sort_block;
+  sortBlockEntry_t *sort_block_position;
+  unsigned long long max_sortblock_positions;
+
   /* Number of plies with positions.
   */
   unsigned int ply_depth;
 
-  /* Total number of bytes allocated for the position database.
-  ** This doesn't include the hash table.
-  */
-  unsigned long long position_database_size;
-
-  /* Offsets of board_db and movce_db databases from the start of the 
-  ** position database file.
-  */
-  unsigned long long start_of_db_entry;
-  unsigned long long start_of_move_entry;
-
-  /* Flag indicating the state of the database.
-  **
-  ** INCOMPLETE means that the position creation was not done. This may happen 
-  ** if the program is terminated before the position tree is fully created. 
-  **
-  ** POSITIONS_CREATED means that the database is ready for action.
-  */
-#define BRD_DB_INCOMPLETE 1   
-#define BRD_DB_POSITIONS_CREATED 2
-  unsigned int db_state;
-
-  /* Mutual exclusion lock for the board database.
-  ** The mutex is only used for controlling access to the ply statistics structure.
-  ** The board positions, moves, and hash table entries are updated using atomic
-  ** instructions, so the mutex is not needed for that.
-  */
-  pthread_mutex_t brd_mutex;
-
-  unsigned long long max_db_entries;
-  size_t       db_size_in_bytes;
-  brdDbEntry_t *db_entry;
-
-  size_t       max_hash_entries;
-  size_t       hash_size_in_bytes;
-  hashEntry_t *db_hash;
-
-  size_t max_move_entries;
-  size_t move_size_in_bytes;
-  moveEntry_t *db_move;
-
-  /* Maximum number of plies in the board database.
-  */
-  unsigned int max_db_plies;
-
   plyInfo_t ply_table[MAX_BRD_PLIES];
-
-  /* The highest ply number that contains positions. 
-  */
-  unsigned int highest_ply_with_positions;
-
-  /* Next Available Board Entry Index (db_entry database).
-  ** We skip the index 0, and start adding boards at index 1.
-  */
-  unsigned long long next_free_index;
-
-  /* Next Available Entry in the Move Database.
-  */
-  size_t next_free_move_index;
 
   /* Aggregate Statistics for All Plies.
   */
@@ -353,21 +251,46 @@ typedef struct
   */
   unsigned long long position_db_run_time;
 
-  /* Place holder in case we want to add additional board information witout
-  ** changing the datbase format.
-  */
-  unsigned long long place_holder [16];
-
 } brdDb_t;
 
-/* Structure for storing piece position.
+/* Board Database Generation Thread Status.
 */
 typedef struct
 {
-  unsigned int column; /* a-h */
-  unsigned int row;    /* 1-8 */
-} piece_location_t;
+  /* Number of positions in the current ply for which next positions have been 
+  ** generated.
+  */
+  unsigned long long positions_processed;
 
+  /* Number of blocks that have been sorted and stored in a file.
+  ** This counter is the number of temporary files that have been created.
+  */
+  unsigned int sort_blocks_created;
+
+  /* There are three phases while creating positions for the ply.
+  ** 1 - Generating next positions.
+  ** 2 - Sorting positions.
+  ** 3 - Detecting Duplicate Positions.
+  **
+  ** The phases 1 and 2 may repeat several times depending on how many sort blocks 
+  ** are needed to process all ply positions.
+  **
+  ** Phase 3 is when all sort blocks are merged together into one ply_n_positions
+  ** file and ply_n_moves file is updated to remove references to duplicate positions.
+  */
+  unsigned int ply_processing_phase;
+
+
+  /* These counters refer to the number of positions processed in phase 3.
+  */
+  /* How many total positions are in the new ply.
+  */
+  unsigned long long total_new_ply_positions;
+
+  /* How many positions from total_new_ply_positions have been processed.
+  */
+  unsigned long long processed_new_ply_positions;
+} brdGenThreadStatus_t;
 
 /******************************************************************************
 ** Generate the board database from the given position.
@@ -382,8 +305,6 @@ typedef struct
 ******************************************************************************/
 void brdDbGenerate(
                    const unsigned int ply_depth,
-                   const unsigned long long max_positions,
-                   const unsigned long long max_moves,
                    const brd_t *const brd,
                    const brdCtrlInfo_t *const info);
 

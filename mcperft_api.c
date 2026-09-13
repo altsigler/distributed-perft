@@ -42,31 +42,11 @@ unsigned int mcperftBoardDbGenerate (unsigned int ply_depth)
 {
   brd_t brd;
   brdCtrlInfo_t info;
-  unsigned long long max_positions;
-  unsigned long long max_moves;
 
   brdutilStartPositionCreate(&brd, &info);
   brdutilBoardPrint (&brd);
 
-  if (ply_depth == 7)
-  {
-    max_positions = CHESS_MAX_POSITIONS_7;
-    max_moves = CHESS_MAX_MOVES_7;
-  } else if (ply_depth == 8)
-  {
-    max_positions = CHESS_MAX_POSITIONS_8;
-    max_moves = CHESS_MAX_MOVES_8;
-  } else if (ply_depth == 9)
-  {
-    max_positions = CHESS_MAX_POSITIONS_9;
-    max_moves = CHESS_MAX_MOVES_9;
-  } else
-  {
-    printf ("ERROR: Unexpected ply depth %u.\n", ply_depth);
-    exit (-1);
-  }
-
-  brdDbGenerate (ply_depth, max_positions, max_moves, &brd, &info);
+  brdDbGenerate (ply_depth, &brd, &info);
 
   return 0;
 }

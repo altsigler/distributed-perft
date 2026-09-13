@@ -53,11 +53,6 @@ static void statsPrint(const chessStat_t *const stats)
   printf ("Duplicate Positions Detected:%'llu\n", stats->duplicate_positions_detected);
   printf ("Total Moves Added:%'llu\n", stats->total_moves_added);
   printf ("\n");
-  printf ("Number of Hash Collisions:%'llu\n", stats->num_hash_collisions);
-  printf ("\n");
-  printf ("Position Database Full:%s\n", (stats->position_database_full)?"Yes":"No");
-  printf ("Move Database Full:%s\n", (stats->move_database_full)?"Yes":"No");
-  printf ("\n");
 
 }
 
@@ -67,7 +62,7 @@ static void mcperftPlyInfoPrint(const brdDb_t *const board_db,
   const chessStat_t *const stats = &board_db->ply_table[ply_number].stats;
 
   printf ("****************************************************\n");
-  printf ("Depth:%u\n", ply_number + 1);
+  printf ("Depth:%u\n", ply_number);
   statsPrint(stats);
 }
 
@@ -78,62 +73,19 @@ static void mcperftBoardInfoPrint(const brdDb_t *const board_db)
 {
   const chessStat_t *const stats = &board_db->stats;
 
-  if (0 == board_db->highest_ply_with_positions)
-  {
-    printf ("Board Database is Empty\n");
-    return;
-  }
-
   printf ("****************************************************\n");
   printf ("Aggregate Statistics.\n");
   printf ("Position Database Creation Time:%'llumsec (%'llusec)\n\n",
           board_db->position_db_run_time,
           board_db->position_db_run_time / 1000);
-  printf ("Highest Ply With Positions:%u\n", board_db->highest_ply_with_positions);
+  printf ("Highest Ply With Positions:%u\n", board_db->ply_depth);
   printf ("Number of positions in ply %u is:%'llu\n",
-                    board_db->highest_ply_with_positions,
-                    board_db->ply_table[board_db->highest_ply_with_positions].num_boards_in_ply);
-  {
-    const unsigned long long num_brds = board_db->ply_table[board_db->highest_ply_with_positions - 1].num_boards_in_ply;
-    const unsigned long long proc_brds = board_db->ply_table[board_db->highest_ply_with_positions - 1].num_boards_processed;
-    const unsigned int percent_brds = (unsigned int) ((num_brds == proc_brds)?100:
-                            (num_brds < 1000)?(proc_brds * 100)/num_brds:
-                            (proc_brds / (num_brds/100)));
-    printf ("Number of positions processed in ply %u is:%'llu of %'llu (%u%%)\n",
-                    board_db->highest_ply_with_positions - 1,
-                    proc_brds, num_brds, percent_brds);
-
-  }
+                    board_db->ply_depth,
+                    board_db->ply_table[board_db->ply_depth].num_boards_in_ply);
 
   printf ("\n");
   statsPrint(stats);
 }
-
-/*********************************************************************
-** Display information about the board database.
-**
-*********************************************************************/
-static void mcperftBoardDbInfoPrint(const brdDb_t *const board_db)
-{               
-  printf ("\n\nBoard Database Information\n");
-  
-  printf ("Total Table Size in Bytes:%'zu (%'zuGB)\n",
-          board_db->db_size_in_bytes + board_db->move_size_in_bytes + board_db->hash_size_in_bytes,
-      (board_db->db_size_in_bytes + board_db->move_size_in_bytes + board_db->hash_size_in_bytes)
-        / ONE_GB);
-  printf ("  Maximum Positions:%'llu", board_db->max_db_entries);
-  printf (" - Size in Bytes:%'zu - Entry Size:%zu\n",
-            board_db->db_size_in_bytes, sizeof (brdDbEntry_t));
-  printf ("  Max Moves:%'zu - Move DB Size:%'zu\n",
-          board_db->max_move_entries,
-          board_db->move_size_in_bytes);
-  printf ("  Position Hash Entries:%'zu - Hash Table Size in Bytes:%'zu",
-          board_db->max_hash_entries,
-          board_db->hash_size_in_bytes);
-      
-  printf ("\n\n"); 
-}                                   
-        
 
 
 /********************************************************************
@@ -172,21 +124,462 @@ unsigned long long sysUpTimeMillisecondsGet(void)
 }
 
 /******************************************************************************
-** Create the new position database. 
-** If the work directory containing the position database already exists then
-** this function terminates the program with an error message. 
+** Ply Position and Ply Move File Functions
 **
-** max_positions - Maximum number of positions to analyze.
-** chess_max_moves - Maximum number of move database entries.
+** These functions are NOT thread safe.
+** Only one thread can create ply positions and ply moves files.
+**
+** The reason this code doesn't support multi-threading is because the 
+** position database creation is bound by DRAM capacity and disk access times. 
+** There is no point in starting multiple threads that create the database, 
+** since CPU capacity is not a major factor in the database creation time.
+**
+******************************************************************************/
+
+/* To reduce file I/O we buffer positions in memory.
+** When the buffer fills up, the postions are written to the file.
+*/
+constexpr unsigned int positionBufferMaxEntries = 1'000'000;
+static plyPositionEntry_t positionBuffer[positionBufferMaxEntries];
+
+static unsigned long long numEntriesInPositionFileBuffer;
+static off_t positionFileBlockStart;
+static ssize_t positionFileBlockSize;
+
+static unsigned long long currentPositionReadIndex;
+static unsigned long long lastPositionReadIndex;
+
+
+/* File descriptors for position and move files. 
+** The value of -1 means that the files are closed.
+*/
+static int positionFd = -1;
+static int moveFd = -1;
+
+/******************************************************************************
+** Start new position file for the specified ply.
+** The ply numbers start with 0 and go up.
+**
+** The function opens the ply position file. If file already exists then 
+** it is deleted. The file is opened in write-only mode.
+** The function also sets up the position file context parameters.
+** These parameters are in global variables, so only one ply 
+** position file can be opened at any one time.
+******************************************************************************/
+static void plyPositionFileWriteStart (const unsigned int ply)
+{
+  char pos_file_name[1024];
+
+  if (positionFd != -1)
+  {
+    printf ("ERROR: Ply Position File is already open.\n");
+    exit (-1);
+  }
+  sprintf (pos_file_name, "%s%u_positions", PLY_FILE_PREFIX, ply); 
+  positionFd = open (pos_file_name, O_WRONLY | O_APPEND | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+  if (positionFd < 0)
+  {
+    perror ("create ply positions file");
+    exit (-1);
+  }
+
+  numEntriesInPositionFileBuffer = 0;
+}
+
+/******************************************************************************
+** Start new position file for the specified ply.
+** The ply numbers start with 0 and go up.
+**
+** The function opens the ply position file in read/only mode. 
+******************************************************************************/
+static void plyPositionFileReadOnlyStart (const unsigned int ply)
+{
+  char pos_file_name[1024];
+
+  if (positionFd != -1)
+  {
+    printf ("ERROR: Ply Position File is already open.\n");
+    exit (-1);
+  }
+  sprintf (pos_file_name, "%s%u_positions", PLY_FILE_PREFIX, ply);
+  positionFd = open (pos_file_name, O_RDONLY);
+  if (positionFd < 0)
+  {
+    perror ("open RDONLY ply positions file");
+    exit (-1);
+  }
+
+  numEntriesInPositionFileBuffer = 0;
+  currentPositionReadIndex = 0;
+  lastPositionReadIndex = 0;
+  positionFileBlockStart = 0;
+  positionFileBlockSize = 0;
+}
+
+
+/******************************************************************************
+** Open existing position file for the specified ply in preparation for 
+** reading and updating position entries.
+** The ply numbers start with 0 and go up.
+**
+** If the ply file doesn't exist then this is an error and the code exits.
+** The file is opened in read-write mode.
+** The function also sets up the position file context parameters.
+** These parameters are in global variables, so only one ply 
+** position file can be opened at any one time for reading/updating or writing.
+******************************************************************************/
+static void plyPositionFileReadUpdateStart (const unsigned int ply)
+{
+  char pos_file_name[1024];
+
+  if (positionFd != -1)
+  {
+    printf ("ERROR: Ply Position File is already open.\n");
+    exit (-1);
+  }
+  sprintf (pos_file_name, "%s%u_positions", PLY_FILE_PREFIX, ply); 
+  positionFd = open (pos_file_name, O_RDWR);
+  if (positionFd < 0)
+  {
+    perror ("open ply positions file");
+    exit (-1);
+  }
+
+  numEntriesInPositionFileBuffer = 0;
+  currentPositionReadIndex = 0;
+  lastPositionReadIndex = 0;
+  positionFileBlockStart = 0;
+  positionFileBlockSize = 0;
+}
+
+/******************************************************************************
+** Get next position from the open ply position file.
+** The function returns a pointer of type plyPositionEntry_t.
+** The pointer becomes invalid when the next call to plyPositionFileRead() 
+** is made.
+**
+** If the ply file is not open then this is an error and the code exits.
+** If the end of file is reached then the function returns 0 and the 
+** ply position file is closed. 
+**
+** In order to reduce disk I/O, the positions are read in blocks. When the 
+** end of block is reached then next block is read.
+**
+******************************************************************************/
+static plyPositionEntry_t * plyPositionFileRead (void)
+{
+  if (currentPositionReadIndex != lastPositionReadIndex)
+  {
+    return &positionBuffer[currentPositionReadIndex++];
+  }
+  
+  unsigned char *const buffer = (unsigned char *) positionBuffer;
+
+  /* Read the next block from file.
+  */
+  positionFileBlockStart += positionFileBlockSize;
+  size_t total_bytes_read = 0;
+  size_t read_request_size = sizeof(positionBuffer);
+  do 
+  {
+    const ssize_t bytes_read = read (positionFd, &buffer[total_bytes_read], 
+                                            read_request_size - total_bytes_read);
+    if (bytes_read < 0)
+    {
+      perror ("read from ply position file");
+      exit (-1);
+    }
+
+    if (bytes_read == 0)
+    {
+      /* We reached the end of file. If we failed to read anything from the 
+      ** file then close the file and return 0.
+      */
+      if (0 == total_bytes_read)
+      {
+        close (positionFd);
+        positionFd = -1;
+        return 0;
+      }
+
+      /* We assume that remaining entries in the file don't fill up the buffer.
+      */
+      break;
+    }
+    total_bytes_read += (size_t) bytes_read;
+  } while (total_bytes_read < read_request_size);
+
+  /* Make sure that we read a multiple of record size.
+  */
+  if (0 != (total_bytes_read % sizeof(plyPositionEntry_t)))
+  {
+    printf ("ERROR: The ply position file seems to be corrupted.\n");
+    exit (-1);
+  }
+
+  positionFileBlockSize = (ssize_t) total_bytes_read;
+  currentPositionReadIndex = 0;
+  lastPositionReadIndex = total_bytes_read / sizeof(plyPositionEntry_t);
+
+
+  return &positionBuffer[currentPositionReadIndex++];
+}
+
+
+/******************************************************************************
+** Get next position from the open ply position file.
+** The function returns a pointer of type plyPositionEntry_t.
+** The caller may modify the value of the position table record by writing 
+** directly into the data pointed to by the pointer. 
+** The pointer becomes invalid when the next call to plyPositionFileNextGet() 
+** is made.
+**
+** If the ply file is not open then this is an error and the code exits.
+** If the end of file is reached then the function returns 0 and the 
+** ply position file is closed. 
+**
+** In order to reduce disk I/O, the positions are read in blocks. When the 
+** end of block is reached then the block is written back to the disk and the
+** next block is read.
+**
+** This function is NOT intended to be used for simply reading the position
+** file, but is intended for reading and updating the position file. 
+******************************************************************************/
+static plyPositionEntry_t * plyPositionFileNextGet (void)
+{
+  if (currentPositionReadIndex != lastPositionReadIndex)
+  {
+    return &positionBuffer[currentPositionReadIndex++];
+  }
+  
+  unsigned char *const buffer = (unsigned char *) positionBuffer;
+
+  /* If we already read a block from the file then we need
+  ** to write this block back into the file.
+  */
+  if (0 != positionFileBlockSize)
+  {
+    if (positionFileBlockStart != lseek ( positionFd, positionFileBlockStart, SEEK_SET))
+    {
+      perror ("lseek on position file");
+      exit (-1);
+    }
+    ssize_t total_bytes_written = 0;
+
+    while (total_bytes_written < positionFileBlockSize)
+    {
+      ssize_t bytes_written = write (positionFd, &buffer[total_bytes_written],
+                                        (size_t) (positionFileBlockSize - total_bytes_written));
+      if (bytes_written < 0)
+      {
+        perror ("write to ply position file");
+        exit (-1);
+      }
+      total_bytes_written += bytes_written;
+    }
+  }
+
+  /* Read the next block from file.
+  */
+  positionFileBlockStart += positionFileBlockSize;
+  size_t total_bytes_read = 0;
+  size_t read_request_size = sizeof(positionBuffer);
+  do 
+  {
+    const ssize_t bytes_read = read (positionFd, &buffer[total_bytes_read], 
+                                            read_request_size - total_bytes_read);
+    if (bytes_read < 0)
+    {
+      perror ("read from ply position file");
+      exit (-1);
+    }
+
+    if (bytes_read == 0)
+    {
+      /* We reached the end of file. If we failed to read anything from the 
+      ** file then close the file and return 0.
+      */
+      if (0 == total_bytes_read)
+      {
+        close (positionFd);
+        positionFd = -1;
+        return 0;
+      }
+
+      /* We assume that remaining entries in the file don't fill up the buffer.
+      */
+      break;
+    }
+    total_bytes_read += (size_t) bytes_read;
+  } while (total_bytes_read < read_request_size);
+
+  /* Make sure that we read a multiple of record size.
+  */
+  if (0 != (total_bytes_read % sizeof(plyPositionEntry_t)))
+  {
+    printf ("ERROR: The ply position file seems to be corrupted.\n");
+    exit (-1);
+  }
+
+  positionFileBlockSize = (ssize_t) total_bytes_read;
+  currentPositionReadIndex = 0;
+  lastPositionReadIndex = total_bytes_read / sizeof(plyPositionEntry_t);
+
+
+  return &positionBuffer[currentPositionReadIndex++];
+}
+
+/******************************************************************************
+** Add new entry to the ply positions file. 
+** The new entries are buffered until the buffer is full. Once the buffer
+** is full the entries are written to file. 
+**
+******************************************************************************/
+static void plyPositionFileWrite (plyPositionEntry_t *position)
+{
+  memcpy (&positionBuffer[numEntriesInPositionFileBuffer++],
+            position, sizeof(plyPositionEntry_t));
+  if (positionBufferMaxEntries == numEntriesInPositionFileBuffer)
+  {
+    ssize_t bytes_written;
+    ssize_t total_bytes_written = 0;
+    size_t write_request_size = sizeof(positionBuffer);
+    const unsigned char *write_buffer = (unsigned char *) positionBuffer;
+
+    do 
+    {
+      bytes_written = write (positionFd, &write_buffer[total_bytes_written], write_request_size);
+      if (bytes_written < 0)
+      {
+        perror ("Write to ply position file");
+        exit (-1);
+      }
+      total_bytes_written += bytes_written;
+      write_request_size -= (size_t) bytes_written;
+    } while (write_request_size);
+    
+    numEntriesInPositionFileBuffer = 0;
+  }
+
+}
+
+/******************************************************************************
+** Write any buffered position to the ply positions file, and close the file.
+**
+******************************************************************************/
+static void plyPositionFileFinish (void)
+{
+  if (positionFd < 0)
+  {
+    printf ("ERROR: Attempting to close position file when it is already closed.\n");
+    exit (-1);
+  }
+
+  if (0 != numEntriesInPositionFileBuffer)
+  {
+    ssize_t bytes_written;
+    ssize_t total_bytes_written = 0;
+    size_t write_request_size = sizeof(plyPositionEntry_t) * numEntriesInPositionFileBuffer;
+    const unsigned char *write_buffer = (unsigned char *) positionBuffer;
+
+    do
+    {
+      bytes_written = write (positionFd, &write_buffer[total_bytes_written], write_request_size);
+      if (bytes_written < 0)
+      {
+        perror ("Write to ply position file");
+        exit (-1);
+      }
+      total_bytes_written += bytes_written;
+      write_request_size -= (size_t) bytes_written;
+    } while (write_request_size);
+
+  }
+
+  numEntriesInPositionFileBuffer = 0;
+
+  close (positionFd);
+  positionFd = -1;
+}
+
+/******************************************************************************
+** Start new move file for the specified ply.
+** The ply numbers start with 0 and go up.
+**
+** The function opens the ply move file. If file already exists then 
+** it is deleted. The file is opened in write-only mode.
+**
+** This move file is written in random locations, so must be placed
+** on a solid state drive as opposed to HDD. 
+******************************************************************************/
+static void plyMoveFileStart (const unsigned int ply,
+                              const unsigned long long num_entries)
+{
+  char move_file_name[1024];
+
+  if (moveFd != -1)
+  {
+    printf ("ERROR: Ply Move File is already open.\n");
+    exit (-1);
+  }
+  sprintf (move_file_name, "%s%u_moves", PLY_FILE_PREFIX, ply);
+  moveFd = open (move_file_name, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+  if (moveFd < 0)
+  {
+    perror ("create ply moves file");
+    exit (-1);
+  }
+
+  if (0 != ftruncate (moveFd, (__off_t) (num_entries * sizeof(moveEntry_t))))
+  {
+    perror ("truncate - move file");
+    exit (-1);
+  }
+}
+
+/******************************************************************************
+** Add new entry to the ply moves file.
+** The new entries are buffered until the buffer is full. Once the buffer
+** is full the entries are written to file.
+**
+******************************************************************************/
+static void plyMoveFileWrite (const moveEntry_t *const move,
+                              const unsigned long long entry_index)
+{
+  if (sizeof(moveEntry_t) != pwrite (moveFd, move, 
+         sizeof(moveEntry_t), (__off_t) (entry_index * sizeof(moveEntry_t))))
+  {
+    perror ("Write to ply moves file");
+    exit (-1);
+  }
+}
+
+/******************************************************************************
+** Close the move file.
+**
+******************************************************************************/
+static void plyMoveFileFinish (void)
+{
+  if (moveFd < 0)
+  {
+    printf ("ERROR: Attempting to close move file when it is already closed.\n");
+    exit (-1);
+  }
+
+  close (moveFd);
+  moveFd = -1;
+}
+
+
+
+/******************************************************************************
+** Create the new position database directory. 
 **
 ** Return Values:
 ******************************************************************************/
-static brdDb_t * brdDbCreate(const unsigned int ply_depth,
-                            const unsigned long long max_positions, 
-                            const unsigned long long chess_max_moves)
+static void brdDbCreate(void)
 {
   int rc;
-  int position_db_fd;
 
   rc = mkdir (WORK_DIRECTORY_NAME, 0777);
   if (0 != rc)
@@ -202,143 +595,67 @@ static brdDb_t * brdDbCreate(const unsigned int ply_depth,
     exit (0);
   } 
 
-
-  /* We must create an empty file whose size exactly matches the board database.
-  */
-  position_db_fd = open (POSITION_DB_FILE, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
-  if (position_db_fd < 0)
+  rc = mkdir (POSITION_DB_DIRECTORY, 0777);
+  if (0 != rc)
   {
-    perror ("open - position database");
+    if (errno != EEXIST)
+    {
+      perror ("mkdir position database directory");
+      exit (-1);
+    }
+
     exit (-1);
-  }
-
-  unsigned long long position_db_size = sizeof(brdDb_t);
-
-  /* Make sure that the db_entry database starts on a 64-byte boundary.
-  */
-  if (position_db_size % 64)
-  {
-    position_db_size += position_db_size % 64;
   } 
-  const unsigned long long start_of_db_entry = position_db_size;
-
-  position_db_size += max_positions * sizeof(brdDbEntry_t);
-
-  /* Make sure that the move_entry database starts on 64 byte boundary.
-  */
-  if (position_db_size % 64)
-  {
-    position_db_size += position_db_size % 64;
-  } 
-  const unsigned long long start_of_move_entry = position_db_size;
-
-  position_db_size += chess_max_moves * sizeof (unsigned long long);
-
-  rc = ftruncate (position_db_fd, (__off_t) position_db_size);
-  if (rc != 0)
-  {
-    perror ("truncate - position database");
-    exit (-1);
-  }
-
-  unsigned char *const addr = mmap(0, position_db_size, 
-          PROT_READ | PROT_WRITE,
-                  MAP_SHARED,
-                  position_db_fd,0);
-  close (position_db_fd); // Note that the mapping is still valid after the fd is closed.
-
-  if (addr == MAP_FAILED)
-  {
-    perror ("mmap - position database");
-    exit (-1);
-  }
-
-  madvise (addr, position_db_size, MADV_HUGEPAGE);
-
-  brdDb_t *board_db = (brdDb_t *) addr;
-
-  board_db->position_database_size = position_db_size;
-  board_db->start_of_db_entry = start_of_db_entry;
-  board_db->start_of_move_entry = start_of_move_entry;
-
-  board_db->ply_depth = ply_depth;
-  board_db->db_state = BRD_DB_INCOMPLETE;
-  board_db->max_db_plies = ply_depth + 1;
-  board_db->max_db_entries = max_positions;
-  board_db->max_hash_entries = max_positions; // Hash table could be increased to reduce collisions
-  board_db->max_move_entries = chess_max_moves;
-  board_db->hash_size_in_bytes = (board_db->max_hash_entries) * sizeof(hashEntry_t);
-  board_db->db_size_in_bytes = ((size_t) board_db->max_db_entries) * sizeof(brdDbEntry_t);
-  board_db->move_size_in_bytes = ((size_t) board_db->max_move_entries) * sizeof(moveEntry_t);
-
-  assert (board_db->max_hash_entries < 0xFF'FFFF'FFFFLLU);
-  assert (board_db->max_move_entries < 0xFF'FFFF'FFFFLLU);
-
-  (void) pthread_mutex_init (&board_db->brd_mutex, 0);
-
-  void *const hash_addr = mmap(0, board_db->hash_size_in_bytes, 
-          PROT_READ | PROT_WRITE,
-                  MAP_PRIVATE | MAP_ANONYMOUS,
-                  -1,0);
-  madvise (hash_addr, board_db->hash_size_in_bytes, MADV_HUGEPAGE);
-  board_db->db_hash = (hashEntry_t *) hash_addr;
-
-  board_db->db_entry = (brdDbEntry_t *) (addr + start_of_db_entry);
-  board_db->db_move = (moveEntry_t *) (addr + start_of_move_entry);
-
-  mcperftBoardDbInfoPrint(board_db);
-
-#if 0 // HACK
-  printf ("sizeof(brdDb_t):%lu\n", sizeof(brdDb_t));
-  printf ("board_db:          %p\n", board_db);
-  printf ("board_db->db_hash: %p\n", board_db->db_hash);
-  printf ("board_db->db_entry:%p\n", board_db->db_entry);
-  printf ("board_db->db_move: %p\n", board_db->db_move);
-  exit (0);
-#endif
-
-  return board_db;
 }
 
 /******************************************************************************
-** Compute the hash index for the board entry.
-**
-** db_entry - Entry in the board database.
+** Read existing board database and figure out the maximum database 
+** ply depth.
+** If the database doesn't exist then the code exits.
 **
 ** Return Values:
-** 32-bit hash incdex.
+** ply_depth - The highest ply for which there are positions in this database.
 ******************************************************************************/
-static unsigned long long hashCompute (const unsigned long long max_hash_entries,
-                                        const brdDbEntry_t* const db_entry) 
+static unsigned int brdDbPlyDepthGet(void)
 {
-  if (max_hash_entries > 0xFFFF'FFFFLLU)
+  DIR *dir;
+  struct dirent *entry;
+
+  dir = opendir (POSITION_DB_DIRECTORY);
+  if (0 == dir)
   {
-#define FNV_64_PRIME 0x100000001B3ULL
-#define FNV_64_OFFSET_BASIS 0xcbf29ce484222325LLU
-
-    unsigned char *start = (unsigned char *) db_entry;
-    unsigned long long hash_index = FNV_64_OFFSET_BASIS;
-
-    for (int i = 0; i < 36; i++)
-    {
-      hash_index ^= (unsigned int)start[i];
-      hash_index *= FNV_64_PRIME;
-    }
-
-    return  hash_index % max_hash_entries;
-  } else
-  {
-    unsigned int hash_index = 0x811c9dc5;
-
-    hash_index = (unsigned int) __builtin_ia32_crc32di(hash_index, db_entry->position[0]);
-    hash_index = (unsigned int) __builtin_ia32_crc32di(hash_index, db_entry->position[1]);
-    hash_index = (unsigned int) __builtin_ia32_crc32di(hash_index, db_entry->position[2]);
-    hash_index = (unsigned int) __builtin_ia32_crc32di(hash_index, db_entry->position[3]);
-    hash_index = __builtin_ia32_crc32hi(hash_index, db_entry->brd_info.brd_info_mem);
-    hash_index = __builtin_ia32_crc32hi(hash_index, db_entry->ply_number);
-
-    return ((unsigned long long) hash_index) % max_hash_entries;
+    perror ("Can't open position database directory.");
+    printf ("Makes sure that this directory exists:%s\n", POSITION_DB_DIRECTORY);
+    exit (-1);
   }
+
+  unsigned int highest_ply = 0;
+  while (0 != (entry = readdir(dir)))
+  {
+    if (0 == strncmp (entry->d_name, "ply_", 4))
+    {
+      unsigned int detected_ply = (unsigned int) (entry->d_name[4] - '0');
+      if (entry->d_name[5] != '_')
+      {
+        detected_ply *= 10;
+        detected_ply += (unsigned int) (entry->d_name[5] - '0');
+      }
+
+      if (detected_ply > highest_ply)
+      {
+        highest_ply = detected_ply;
+      }
+    }
+  }
+  closedir (dir);
+
+  if ((highest_ply < 7) || (highest_ply > 10))
+  {
+    printf ("ERROR: Detected ply:%u. Expected ply values are between 7 and 10.\n", highest_ply);
+    exit (-1);
+  }
+
+  return highest_ply;
 }
 
 /******************************************************************************
@@ -388,93 +705,240 @@ void brdUnpackBoard (brd_t* const brd, const unsigned long long * const position
 }
 
 /******************************************************************************
-** Add discovered positions to the board database.
-**
-**
-** Return Values:
-** 0 - Positions added.
-** -1 - Out of memory.
+** Compare two positions.
+** We use a simple byte compare for the two positions. 
 ******************************************************************************/
-static int positionsAdd (brdDb_t *const board_db,
-                         const unsigned int num_moves,
-                         const brdDbEntry_t *const next_db_entry,
-                         const unsigned int ply_number,
-                         const unsigned long long *const hash_index_list,
-                         chessStat_t *const local_ply_stats,
-                         moveEntry_t *const legal_move_index)
+static int positionCompare (const void *const p1, 
+                            const void *const p2)
 {
-  /* Out of room in the move database.
-  */
-  if ((board_db->next_free_move_index + num_moves) > board_db->max_move_entries)
+  const sortBlockEntry_t *const pos1 = p1;
+  const sortBlockEntry_t *const pos2 = p2;
+
+  const int comp = memcmp (pos1->position, pos2->position, sizeof(pos1->position));
+  if (comp)
   {
-    local_ply_stats->move_database_full = 1;
+    return comp;
+  }
+       
+  if (pos1->brd_info.brd_info_mem < pos2->brd_info.brd_info_mem)
+  {
     return -1;
   }
-
-  *legal_move_index = moveIndexToEntry(board_db->next_free_move_index);
-
-  for (unsigned int i = 0; i < num_moves; i++)
+  if (pos1->brd_info.brd_info_mem > pos2->brd_info.brd_info_mem)
   {
-    const unsigned long long hash_index = hash_index_list[i];
-    unsigned long long ex_entry_index = hashEntryToIndex(board_db->db_hash[hash_index]);
-    unsigned int dup_detected = (ex_entry_index)?1:0;
+    return 1;
+  }
 
-    while (ex_entry_index &&
-        ((0 != memcmp(board_db->db_entry[ex_entry_index].position, 
-         next_db_entry[i].position, 32)) ||
-         (next_db_entry[i].brd_info.brd_info_mem != 
-          board_db->db_entry[ex_entry_index].brd_info.brd_info_mem) ||
-         (next_db_entry[i].ply_number != board_db->db_entry[ex_entry_index].ply_number)))
-    {
-        local_ply_stats->num_hash_collisions++;
-        ex_entry_index = hashEntryToIndex(board_db->db_entry[ex_entry_index].next_brd_in_cache);
-    }
-    if (0 == ex_entry_index)
-    {
-      dup_detected = 0;
-    }
+  return 0;
 
-    if (dup_detected)
+}
+
+/******************************************************************************
+** Parallel sort.
+** This function can be used to sort different data types.
+** The sorted block is written to the specified file.
+**
+** The Parallel Sort splits the block into multiple parts and starts a 
+** thread to sort each part using the GNU qsort() function.
+** After all parts are sorted, they are merged together and written
+** into the specified file.
+**
+** If the number of entries is relatively small then the Parallel Sort 
+** skips starting the threads and simply uses qsort() in the caller thread to 
+** sort the data.
+**
+******************************************************************************/
+typedef struct
+{
+  unsigned char *block;
+  unsigned long long start_index;
+  unsigned long long num_entries;
+  size_t element_size;
+  int (*compar)(const void *, const void *);
+} sortParms_t;
+
+static void * parallelSortThread (void *arg)
+{
+ sortParms_t *sort_parms = arg;
+
+ qsort (sort_parms->block, sort_parms->num_entries, 
+        sort_parms->element_size, sort_parms->compar);
+
+ return 0;
+}
+
+static void parallelSort (const char *const file_name,
+                          void *const block, 
+                          const unsigned long long num_elements,
+                          const size_t element_size,
+                          int (*compar)(const void *, const void *))
+{
+  const int fd = open (file_name, O_WRONLY | O_APPEND | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+  if (fd < 0)
+  {
+    perror ("create sort block file");
+    exit (-1);
+  }
+
+  /* When the number of elements is relatively small, it is not worth the effort 
+  ** to create threads. Simply call the qsort() and write results to file.
+  */
+  if (num_elements < 100'000)
+  {
+    qsort (block, num_elements, element_size, compar);
+
+    const size_t write_size = num_elements * element_size;
+    size_t total_bytes_written = 0;
+    unsigned char *sort_block_buffer =  block;
+
+    do 
     {
-      board_db->db_move[board_db->next_free_move_index++] = moveIndexToEntry(ex_entry_index);
-      local_ply_stats->duplicate_positions_detected++;
-      local_ply_stats->total_moves_added++;
-    } else
-    {
-      /* If the position database doesn't have any more room then return an error.
-      */
-      if (board_db->next_free_index >= board_db->max_db_entries)
+      const ssize_t bytes_written = write (fd, &sort_block_buffer[total_bytes_written], 
+                                            write_size - total_bytes_written);
+      if (bytes_written < 0)
       {
-        local_ply_stats->position_database_full = 1;
-        return -1;
+        perror ("Writing sort block file");
+        exit (-1);
       }
+      total_bytes_written += (size_t) bytes_written;
+    } while (total_bytes_written < write_size);
+    close (fd);
 
-      /* Add the new entry to the hash.
-      */
-      unsigned long long next_brd_in_cache = hashEntryToIndex(board_db->db_hash[hash_index]);
-      board_db->db_hash[hash_index] = hashIndexToEntry(board_db->next_free_index);
+    return;
+  }
 
-      /* Point the move database to the new board entry.
-      */
-      board_db->db_move[board_db->next_free_move_index++] = moveIndexToEntry(board_db->next_free_index);
+  /* The sort algorithm uses DRAM extensively, so ultimately the performance is
+  ** limited by the DRAM access speed as opposed to CPU speed. Therefore there is 
+  ** no point in starting the sort thread on every available core.
+  ** The below number of threads is optimized for "Intel(R) Core(TM) Ultra 7 265K"
+  */
+  constexpr unsigned int num_sort_threads = 10;
+  sortParms_t sort_parms[num_sort_threads];
+  unsigned long long start_index = 0;
+  pthread_t sort_thread[num_sort_threads];
 
-      /* Store the position in the database.
-      */
-      memcpy (&board_db->db_entry[board_db->next_free_index],
-                &next_db_entry[i], sizeof(brdDbEntry_t));
+  for (unsigned int i = 0; i < num_sort_threads; i++)
+  {
+    sort_parms[i].start_index = start_index;
+    sort_parms[i].num_entries = num_elements / num_sort_threads;
+    if (i < (num_elements % num_sort_threads))
+    {
+      sort_parms[i].num_entries += 1;
+    }
+    sort_parms[i].element_size = element_size;
+    sort_parms[i].compar = compar;
+    sort_parms[i].block = ((unsigned char *) block) + (start_index * element_size);
 
-      board_db->db_entry[board_db->next_free_index].next_brd_in_cache = hashIndexToEntry(next_brd_in_cache);
+    start_index += sort_parms[i].num_entries;
 
-      board_db->next_free_index++,
-      board_db->ply_table[ply_number+1].num_boards_in_ply++;
-
-      local_ply_stats->total_moves_added++;
-      local_ply_stats->unique_positions_added++;
+    if (0 != pthread_create (&sort_thread[i], 0, parallelSortThread, &sort_parms[i]))
+    {
+      perror ("pthread_create: - Sort Thread ");
+      exit (-1);
     }
   }
 
+  /* Wait for all sort threads to exit.
+  */
+  for (unsigned int i = 0; i < num_sort_threads; i++)
+  {
+    if (0 != pthread_join (sort_thread[i], 0))
+    {
+      perror ("pthread_join - Sort Thread");
+      exit (-1);
+    }
+  }
 
-  return 0;
+  /* Merge sll sort blocks into the output file.
+  */
+  unsigned long long sort_block_index[num_sort_threads] = {};
+
+  /* To reduce the number of I/O operations we store data in a buffer.
+  ** When the buffer fills up then we write it to disk.
+  */
+  constexpr unsigned int max_elements_in_buffer = 100000;
+  unsigned char output_buffer [max_elements_in_buffer * element_size];
+  unsigned int num_elements_in_buffer = 0;
+
+  for (unsigned long long i = 0; i < num_elements; i++)
+  {
+    /* Find smallest element in sll sort buffers.
+    */
+    unsigned char smallest_element[element_size];
+    memset (smallest_element, 0xff, element_size);
+    unsigned int min_position_stream;
+
+    for (unsigned int j = 0; j < num_sort_threads; j++)
+    {
+      if (sort_block_index[j] == sort_parms[j].num_entries)
+      {
+        /* This sort block is already empty, so skip it.
+        */
+        continue;
+      }
+      unsigned char *next_block = sort_parms[j].block + 
+                      (sort_block_index[j] * element_size);
+
+      if (0 < compar(smallest_element, next_block))
+      {
+        memcpy (smallest_element, next_block,element_size);
+        min_position_stream = j;
+      }
+    }
+
+    /* Extract the smallest element from the sort buffer and put it into
+    ** the output buffer.
+    */
+    memcpy (&output_buffer[num_elements_in_buffer * element_size],
+             sort_parms[min_position_stream].block + (sort_block_index[min_position_stream] * element_size),
+             element_size);
+    num_elements_in_buffer++;
+    sort_block_index[min_position_stream]++;
+
+    /* If the output buffer is full or we are processing the last element then 
+    ** write the output buffer to file.
+    */
+    if ((num_elements_in_buffer == max_elements_in_buffer) ||
+        (i == (num_elements - 1)))
+    {
+      const unsigned int output_buffer_size = (unsigned int) (num_elements_in_buffer * element_size);
+      unsigned int total_bytes_written = 0;
+      do 
+      {
+        const ssize_t bytes_written = write (fd, &output_buffer[total_bytes_written], 
+                            (output_buffer_size - total_bytes_written));
+        if (bytes_written < 0)
+        {
+          perror ("writing sort block");
+          exit (-1);
+        }
+        total_bytes_written += bytes_written;
+      } while (total_bytes_written < output_buffer_size);
+
+      num_elements_in_buffer = 0;
+    }
+  }
+
+  close (fd);
+
+}
+
+/******************************************************************************
+** Sort the position entries and create a temporary file.
+**
+**
+******************************************************************************/
+static void positionsTempFileCreate (void *const sort_block,
+                                     const unsigned int sort_block_number,
+                                     const unsigned long long sort_block_entries)
+{
+  char file_name[1024];
+
+  sprintf (file_name, "%s%u", SORT_BLOCK_PREFIX, sort_block_number);
+                
+  parallelSort (file_name, sort_block, sort_block_entries, 
+                        sizeof (sortBlockEntry_t), positionCompare);
+
 }
 
 /******************************************************************************
@@ -483,43 +947,129 @@ static int positionsAdd (brdDb_t *const board_db,
 **
 ** Return Values:
 ******************************************************************************/
-static void nextPositionsCreate (const brdDb_t *const board_db,
-                                 const brd_t *const brd,
+static void nextPositionsCreate (const brd_t *const brd,
                                  const bytebrdMove_t *const dest,
                                  const unsigned int num_moves,
-                                 const brdDbEntry_t *const db_entry,
-                                 brdDbEntry_t *const next_db_entry,
-                                 unsigned long long *const hash_index_list,
-                                 const unsigned int ply_number)
+                                 const plyPositionEntry_t *const position_entry,
+                                 sortBlockEntry_t *const next_position)
 {
   /* Create next database entry for every move.
   */
   for (unsigned int i = 0; i < num_moves; i++)
   {
     brd_t next_brd = *brd;
-    brdDbEntry_t *const ndb_entry = &next_db_entry[i];
+    sortBlockEntry_t *const ndb_entry = &next_position[i];
 
-    ndb_entry->brd_info.brd_info = db_entry->brd_info.brd_info;
+    ndb_entry->brd_info.brd_info = position_entry->brd_info.brd_info;
 
-    memset (&ndb_entry->next_brd_in_cache, 0, sizeof (hashEntry_t));
-    memset (&ndb_entry->legal_move_entry, 0, sizeof(moveEntry_t));
-    memset (&ndb_entry->status, 0, sizeof(brdStatusInfo_t));
-    ndb_entry->ply_number = (unsigned short) ply_number;
+    memset (&ndb_entry->move_entry, 0, sizeof(moveEntry_t));
 
     bytebrdUtilMoveMake (&next_brd, &dest[i], 
-                            &db_entry->brd_info.brd_info, &ndb_entry->brd_info.brd_info);
+                            &position_entry->brd_info.brd_info, &ndb_entry->brd_info.brd_info);
 
     brdPack (&next_brd, ndb_entry->position);
-    hash_index_list[i] = hashCompute (board_db->max_hash_entries, ndb_entry);
+
+    ndb_entry->pad = 0;
   }
 }
 
 /******************************************************************************
-** Generate the board database from the given position.
+** Find the next entry in the specified sorted positions file.
+** If the third parameter is 0 then the entry remains in the file. 
+** If the third parameter is not zero then the entry is removed.
+** 
+** To improve performance the entries are read in groups from the file
+** into memory, so most calls to this function don't access the file.
 **
-** board_db - Board Database.
-** brd - Initial Position
-** info - Initial Position Info.
+** Return Values:
+** 0 - No entries in the specified sort block.
+**   - Pointer to the next entry. The pointer is valid until next call to 
+**     this function for the specified block.
+******************************************************************************/
+static sortBlockEntry_t *mergeBlockNextGet (mergeBlock_t *const merge_block,
+                                            const unsigned int block_number,
+                                            const unsigned int remove_entry)
+{
+  constexpr unsigned int buffered_elements = 100'000;
+
+  mergeBlock_t *const merge_entry = &merge_block[block_number];
+
+  if (0 != merge_entry->file_is_empty)
+  {
+    return 0;
+  }
+
+  /* If the file hasn't been open yet then open it now.
+  */
+  if (0 == merge_entry->file_is_open)
+  {
+    merge_entry->file_is_open = 1;
+    merge_entry->buffer = malloc (buffered_elements * sizeof(sortBlockEntry_t));
+    assert (merge_entry->buffer);
+
+    merge_entry->buffer_index = 0;
+
+    sprintf (merge_entry->file_name, "%s%u", SORT_BLOCK_PREFIX, block_number);
+
+    merge_entry->fd = open (merge_entry->file_name, O_RDONLY);
+    if (merge_entry->fd < 0)
+    {
+      perror ("open temporary position file");
+      exit (-1);
+    }
+  }
+
+  /* If we have read all elements in the current block then get the next block.
+  ** Note that when the file has just been opened and nothing has been read then 
+  ** buffer_index and num_elements_in_block are both 0, which triggers the 
+  ** next read from file.
+  */
+  if (merge_entry->buffer_index == merge_entry->num_elements_in_block)
+  {
+    merge_entry->buffer_index = 0;
+
+    unsigned long long total_bytes_read = 0;
+    const unsigned long long read_request_size = buffered_elements * sizeof(sortBlockEntry_t);
+    unsigned char *buffer = (unsigned char *) merge_entry->buffer;
+
+    do
+    {
+      const ssize_t bytes_read = read (merge_entry->fd, &buffer[total_bytes_read], read_request_size);
+      if (bytes_read < 0)
+      {
+        perror ("Read merge buffer");
+        exit (-1);
+      }
+      if (bytes_read == 0)
+      { 
+        break;
+      }
+      total_bytes_read += (unsigned long long) bytes_read;
+
+    } while (total_bytes_read < read_request_size);
+    if (0 == total_bytes_read)
+    {
+      merge_entry->file_is_empty = 1;
+      free (merge_entry->buffer);
+      close (merge_entry->fd);
+      unlink (merge_entry->file_name);
+      return 0;
+    }
+    merge_entry->num_elements_in_block = total_bytes_read / sizeof(sortBlockEntry_t);
+  }
+
+  sortBlockEntry_t *entry = &merge_entry->buffer[merge_entry->buffer_index];
+
+  if (remove_entry)
+  {
+    merge_entry->buffer_index++;
+  }
+
+  return entry;
+}
+
+/******************************************************************************
+** Generate the board database from the given position.
 **
 ** Return Values:
 ******************************************************************************/
@@ -528,85 +1078,245 @@ static void * brd_db_generate (void *arg)
   void **ch_arg = (void **) arg;
   brdDb_t *const board_db = ch_arg[0];
   const unsigned int ply_number = *(unsigned int *) ch_arg[1]; 
-  unsigned long long *positions_created = (unsigned long long *) ch_arg[2];
-  const unsigned long long entry_count = board_db->ply_table[ply_number].num_boards_in_ply;
+  brdGenThreadStatus_t *gen_status = (brdGenThreadStatus_t *) ch_arg[2];
   brd_t brd; 
 
   bytebrdMove_t dest[MAX_BRD_MOVES];
 
-  unsigned long long i;
-  brdDbEntry_t *db_entry;
-  brdDbEntry_t next_db_entry[MAX_BRD_MOVES];
-  unsigned long long hash_index_list[MAX_BRD_MOVES];
+  plyPositionEntry_t *position_entry;
+  sortBlockEntry_t next_position[MAX_BRD_MOVES];
   unsigned int num_moves;
   unsigned int mover_lost;
-
-  chessStat_t local_ply_stats;
 
   const unsigned long long start_of_task_msec = sysUpTimeMillisecondsGet();
   unsigned long long end_of_task_msec;
 
+  unsigned long long sort_block_index = 0;
+  plyInfo_t *const ply = &board_db->ply_table[ply_number + 1];
 
 
-  memset (&local_ply_stats, 0, sizeof(local_ply_stats));
+  plyPositionFileReadUpdateStart (ply_number);
 
-  for (i = 0; i < entry_count; i++)
+  while (0 != (position_entry = plyPositionFileNextGet ()))
   {
-    /* Note that we don't need to lock the board database mutex while 
-    ** accesing the data pointed to by the *db_entry because that data 
-    ** is not accessed by other threads while this thread is running.
-    */
-    db_entry = &board_db->db_entry[board_db->ply_table[ply_number].first_board_in_ply_index + i];
+    gen_status->ply_processing_phase = 1;  
+    position_entry->first_move_index = moveIndexToEntry(ply->num_boards_in_ply);
 
-    brdUnpack (&brd, db_entry->position);
+    brdUnpack (&brd, position_entry->position);
 
     /* Find all legal moves for this position.
     */
-    num_moves = bytebrdNextMoveGet (&brd, &db_entry->brd_info.brd_info, dest, &mover_lost);
+    num_moves = bytebrdNextMoveGet (&brd, &position_entry->brd_info.brd_info, dest, &mover_lost);
 
     /* If there are no moves available for this position then the mover is 
     ** either in a checkmate or stalemate. 
     */
     if (0 == num_moves)
     {
-      board_db->ply_table[ply_number].num_boards_processed++;
-      *positions_created += 1;
+      gen_status->positions_processed += 1;
       continue;
     }
 
-    nextPositionsCreate (board_db, &brd, dest, num_moves, db_entry,
-                            next_db_entry, hash_index_list, ply_number);
 
-    if (0 !=  positionsAdd (board_db, num_moves, next_db_entry, ply_number,
-                           hash_index_list, &local_ply_stats, &db_entry->legal_move_entry))
+    nextPositionsCreate (&brd, dest, num_moves, position_entry,
+                            next_position);
+
+    /* Copy discovered moves into the sort block.
+    */
+    for (unsigned int i = 0; i < num_moves; i++)
     {
-      /* We ran out of memory in the board database, so exit the 
-      ** position insertion thread.
+     next_position[i].move_entry = moveIndexToEntry (ply->num_boards_in_ply);
+     memcpy (&board_db->sort_block_position[sort_block_index], &next_position[i], sizeof(sortBlockEntry_t)); 
+     ply->num_boards_in_ply++;
+     sort_block_index++;
+    }
+
+    /* If the sort block is almost full then sort it and write it to a temporaty file.
+    */
+    if ((sort_block_index + MAX_BRD_MOVES) >= board_db->max_sortblock_positions)
+    {
+      gen_status->ply_processing_phase = 2;  
+      positionsTempFileCreate (board_db->sort_block, 
+                                    gen_status->sort_blocks_created, sort_block_index);
+      sort_block_index = 0;
+      gen_status->sort_blocks_created++;
+    }
+
+    position_entry->num_moves = (unsigned char) num_moves;
+
+    gen_status->positions_processed += 1;
+  }
+
+  /* If there are any positions in the sort block then write these 
+  ** positions to a temporary file.
+  */
+  if (0 != sort_block_index)
+  {
+    gen_status->ply_processing_phase = 2;  
+    positionsTempFileCreate (board_db->sort_block, 
+                                    gen_status->sort_blocks_created, sort_block_index);
+    gen_status->sort_blocks_created++;
+  }
+
+  gen_status->total_new_ply_positions = ply->num_boards_in_ply;
+  gen_status->processed_new_ply_positions = 0;
+  gen_status->ply_processing_phase = 3;  
+
+  /* Create the file for storing moves for this ply.
+  */
+  plyMoveFileStart (ply_number, ply->num_boards_in_ply);
+
+  /* Open position file for the next ply.
+  */
+  plyPositionFileWriteStart (ply_number + 1);
+
+  /* Merge all sorted blocks into a single position database.
+  ** The move database is generated as part of this merge. 
+  **
+  ** The code opens all block files at the same time. 
+  ** For each block file allocate a buffer so that we don't 
+  ** need to do a read() call for each entry. 
+  */
+  mergeBlock_t sort_table[gen_status->sort_blocks_created] = {};
+
+  /* Read until all positions from all blocks are read.
+  */
+  unsigned int more_positions;
+
+  /* Number of ply positions written for this ply.
+  */
+  unsigned long long ply_position_index = 0;
+
+  do 
+  {
+    sortBlockEntry_t min_position;
+    memset (&min_position, 0xff, sizeof (sortBlockEntry_t));
+    unsigned int min_position_stream;
+
+    more_positions = 0;
+
+    for (unsigned int i = 0; i < gen_status->sort_blocks_created; i++)
+    {
+      /* Get pointer to next position from specified block without removing
+      ** the position from the block.
+      ** Note that some of the blocks may become empty before other blocks,
+      ** so we need to handle that.
+      */
+      const sortBlockEntry_t *const next_block = mergeBlockNextGet (sort_table, i, 0);
+
+      if (0 != next_block)
+      {
+        if (0 < positionCompare(&min_position, next_block))
+        {
+          memcpy (&min_position, next_block,
+                                    sizeof (sortBlockEntry_t));
+          min_position_stream = i;
+        }
+        more_positions = 1;
+      }
+    }
+
+    if (0 == more_positions)
+    {
+      /* No more positions available. We are done.
       */
       break;
     }
 
-    *positions_created += 1;
+    /* Remove the smallest entry from the sorted block where it was found.
+    */
+    if (0 == mergeBlockNextGet (sort_table, min_position_stream, 1))
+    {
+      printf ("ERROR: Unexpected end of temp file data stream.\n");
+      exit (-1);
+    }
+    gen_status->processed_new_ply_positions++;
 
-    db_entry->status.num_legal_moves =  num_moves & 0x1ff;
-    board_db->ply_table[ply_number].num_boards_processed++;
-  }
+    /* Create the ply position entry for the smallest position.
+    */
+    plyPositionEntry_t ply_position;
+    memcpy (ply_position.position, min_position.position, sizeof (ply_position.position));
+    ply_position.brd_info = min_position.brd_info;
+    ply_position.num_moves = 0;
+    ply_position.first_move_index = moveIndexToEntry(0);
+
+    plyPositionFileWrite (&ply_position);
+    ply->stats.unique_positions_added++;
+
+    /* Update the move file for the current ply to point to the 
+    ** newly added position.
+    */
+    const moveEntry_t next_move = moveIndexToEntry (ply_position_index++);
+
+    plyMoveFileWrite (&next_move, moveEntryToIndex(min_position.move_entry));
+    board_db->ply_table[ply_number].stats.total_moves_added++;
+
+    /* We need to read all duplicate positions and set the moves for those 
+    ** positions to point to the first unique position we found.
+    */
+
+    for (unsigned int i = 0; i < gen_status->sort_blocks_created; i++)
+    {
+      /* Get pointer to next position from specified block without removing
+      ** the position from the block.
+      ** Note that some of the blocks may become empty before other blocks,
+      ** so we need to handle that.
+      */
+      sortBlockEntry_t *next_block;
+
+      while ((0 != (next_block = mergeBlockNextGet(sort_table, i, 0))) &&
+             (0 == positionCompare(&min_position, next_block)))
+      {
+        /* Create move entry for this position.
+        */
+        plyMoveFileWrite (&next_move, moveEntryToIndex(next_block->move_entry));
+        board_db->ply_table[ply_number].stats.total_moves_added++;
+        ply->stats.duplicate_positions_detected++;
+
+        /* Remove this position. 
+        */
+        (void) mergeBlockNextGet (sort_table, i, 1);
+        gen_status->processed_new_ply_positions++;
+      }
+    }
+
+  } while (1);
+
+
+  /* Close the ply move file.
+  */
+  plyMoveFileFinish ();
+
+  /* Close the ply position file.
+  */
+  plyPositionFileFinish ();
+
 
   chessStat_t *const ply_stats = &board_db->ply_table[ply_number].stats;
 
   end_of_task_msec = sysUpTimeMillisecondsGet();
 
-  local_ply_stats.board_db_insert_time_msec = end_of_task_msec - 
+  ply->stats.board_db_insert_time_msec = end_of_task_msec - 
                 start_of_task_msec;
 
-  /* Update Ply Statistics.
+  /* Update Global Statistics.
   */
-  for (int k = 0; k < (int) (sizeof(chessStat_t) / sizeof(unsigned long long)); k++)
+  board_db->stats.unique_positions_added += ply_stats->unique_positions_added;
+  board_db->stats.duplicate_positions_detected += ply_stats->duplicate_positions_detected;
+  board_db->stats.total_moves_added += ply_stats->total_moves_added;
+  board_db->stats.board_db_insert_time_msec += ply_stats->board_db_insert_time_msec;
+
+  /* If we are processing the last ply then add the last ply statistics 
+  ** to the global statistics.
+  */
+  if ((ply_number + 1) == board_db->ply_depth)
   {
-    ((unsigned long long *) ply_stats)[k] += 
-        ((unsigned long long *) &local_ply_stats)[k];
-    ((unsigned long long *) &board_db->stats)[k] += 
-        ((unsigned long long *) &local_ply_stats)[k];
+    chessStat_t *const last_ply_stats = &board_db->ply_table[ply_number + 1].stats;
+
+    board_db->stats.unique_positions_added += last_ply_stats->unique_positions_added;
+    board_db->stats.duplicate_positions_detected += last_ply_stats->duplicate_positions_detected;
+    board_db->stats.total_moves_added += last_ply_stats->total_moves_added;
+    board_db->stats.board_db_insert_time_msec += last_ply_stats->board_db_insert_time_msec;
   }
 
   return 0;
@@ -628,85 +1338,69 @@ static void * brd_db_generate (void *arg)
 ******************************************************************************/
 void brdDbGenerate(
                    const unsigned int ply_depth,
-                   const unsigned long long max_positions,
-                   const unsigned long long max_moves,
                    const brd_t *const brd, 
                    const brdCtrlInfo_t *const info)
 {
-  brdDb_t *board_db;
-  brdDbEntry_t db_entry;
-  unsigned long long entry_index;
+  brdDb_t board_db = {};
   const unsigned long long start_of_test = sysUpTimeMillisecondsGet();
-  unsigned long long hash_index;
   const color_e whose_move = (info->next_move)?MOVE_WHITE:MOVE_BLACK;
 
 
-  board_db = brdDbCreate(ply_depth, max_positions, max_moves);
-
-  /* If the position database is already created then we have nothing to do.
+  /* Create board_db directory.
   */
-  if (board_db->db_state != BRD_DB_INCOMPLETE)
-  {
-    (void) munmap (board_db->db_hash, board_db->hash_size_in_bytes);
-    (void) munmap (board_db, board_db->position_database_size);
-    return;
-  }
+  brdDbCreate();
 
-  /* Create the board database entry from the initial position.
+  /* Add the initial position to the ply 0 positions database.
   */
-  memset (&db_entry, 0, sizeof(db_entry));
-  memcpy (&db_entry.brd_info.brd_info, info, sizeof(brdCtrlInfo_t));
-  brdPack (brd, db_entry.position);
-  db_entry.ply_number = 0;
-  hash_index = hashCompute (board_db->max_hash_entries, &db_entry);
+  plyPositionEntry_t position_entry = {};
+  memcpy (&position_entry.brd_info.brd_info, info, sizeof(brdCtrlInfo_t));
+  brdPack (brd, position_entry.position);
 
-  /* Add the board entry to the board database.
-  */
-  entry_index = board_db->next_free_index++;
-  memcpy (&board_db->db_entry[entry_index], 
-          &db_entry, sizeof(brdDbEntry_t));
-  board_db->db_hash[hash_index] = hashIndexToEntry(entry_index);
+  plyPositionFileWriteStart (0);
+  plyPositionFileWrite (&position_entry);
+  plyPositionFileFinish ();
 
-  memset (&board_db->ply_table[0], 0, sizeof (plyInfo_t));
-  board_db->ply_table[0].first_board_in_ply_index = entry_index;
-  board_db->ply_table[0].num_boards_in_ply = 1;
-  board_db->ply_table[0].whose_move = whose_move;
+  board_db.ply_depth = ply_depth;
+  board_db.ply_table[0].whose_move = whose_move;
+  board_db.ply_table[0].num_boards_in_ply = 1;
+  board_db.ply_table[0].stats.unique_positions_added = 1;
+
+  board_db.max_sortblock_positions = SORT_BLOCK_SIZE / sizeof(sortBlockEntry_t);
+  board_db.sort_block = malloc (SORT_BLOCK_SIZE);
+  board_db.sort_block_position = board_db.sort_block;
+  assert (board_db.sort_block);
 
   /* Start the board generator thread for each ply.
-  ** The code exits when we run out of memory or when there are no more moves to be 
+  ** The code exits when there are no more moves to be 
   ** generated.
   */
-  for (unsigned int i = 0; i < (board_db->max_db_plies - 1); i++)
+  for (unsigned int i = 0; i < board_db.ply_depth; i++)
   {
     pthread_t ch_thread;
     void *ch_arg[3];
-    unsigned long long positions_created = 0;
+    brdGenThreadStatus_t gen_status = {};
     unsigned int ply_number;
     int rc;
 
     /* If there are no boards created in this ply then exit the loop.
     */
-    if (0 == board_db->ply_table[i].num_boards_in_ply)
+    if (0 == board_db.ply_table[i].num_boards_in_ply)
                             break;
 
 
     /* When procesing the specified ply number, the code will generate new positions
     ** in the current ply+1. We need to set up the next ply table before starting the tasks.
-    ** Keep in mind that the ply table has max_db_plies+1 entries.
+    ** Keep in mind that the ply table has ply_depth+1 entries.
     */
-    if (i < board_db->max_db_plies)
-    {
-      board_db->ply_table[i+1].first_board_in_ply_index = board_db->next_free_index;
-      board_db->ply_table[i+1].num_boards_in_ply = 0;
-      board_db->ply_table[i+1].whose_move = 
-          (board_db->ply_table[i].whose_move == MOVE_WHITE)?MOVE_BLACK:MOVE_WHITE;
-    }
+    board_db.ply_table[i+1].num_boards_in_ply = 0;
+    board_db.ply_table[i+1].whose_move = 
+          (board_db.ply_table[i].whose_move == MOVE_WHITE)?MOVE_BLACK:MOVE_WHITE;
 
     ply_number = i;
 
-    ch_arg[0] = board_db;
+    ch_arg[0] = &board_db;
     ch_arg[1] = &ply_number;
-    ch_arg[2] = &positions_created;
+    ch_arg[2] = &gen_status;
     rc = pthread_create (&ch_thread, 0, brd_db_generate, ch_arg);
     if (rc)
     {
@@ -717,6 +1411,7 @@ void brdDbGenerate(
     /* Wait until the ply position generation thread is done.
     */
     unsigned long long prev_brd_processed = 0;
+    unsigned long long prev_ply_positions = 0;
     unsigned int wait_time_sec = 0;
     unsigned int wait_message_interval_sec = 60;
 
@@ -741,74 +1436,49 @@ void brdDbGenerate(
       }
       if (rc == ETIMEDOUT)
       {
-        printf ("Inserting... %'u seconds - Ply:%u Entry:%'llu/%'llu  (%'llu Entries/s)\n",
+        if (gen_status.ply_processing_phase == 1)
+        {
+          printf ("Inserting... %'u seconds - Ply:%u Entry:%'llu/%'llu  (%'llu Entries/s) - Block:%u\n",
                     wait_time_sec, 
                     i,
-                    positions_created, 
-                    board_db->ply_table[i].num_boards_in_ply,
-                     (((positions_created - prev_brd_processed) / 
-                                                        wait_message_interval_sec))
+                    gen_status.positions_processed, 
+                    board_db.ply_table[i].num_boards_in_ply,
+                     ((gen_status.positions_processed - prev_brd_processed) / 
+                                                        wait_message_interval_sec),
+                    gen_status.sort_blocks_created);
+                    
+        } else if (gen_status.ply_processing_phase == 2)
+        {
+          printf ("Sorting... %'u seconds - Ply:%u - Block:%u\n",
+                    wait_time_sec, 
+                    i, gen_status.sort_blocks_created);
+        } else if (gen_status.ply_processing_phase == 3)
+        {
+          printf ("Eliminating Duplicates... %'u seconds - Ply:%u - Processed:%'llu/%'llu (%'llu Pos/Sec - %u%%)\n",
+                    wait_time_sec, 
+                    i, gen_status.processed_new_ply_positions,
+                    gen_status.total_new_ply_positions,
+                    ((gen_status.processed_new_ply_positions - prev_ply_positions) / 
+                                                        wait_message_interval_sec),
+                    (unsigned int) (gen_status.processed_new_ply_positions / (gen_status.total_new_ply_positions / 100))
                     );
-        prev_brd_processed = positions_created;
+        }
+        prev_brd_processed = gen_status.positions_processed;
+        prev_ply_positions = gen_status.processed_new_ply_positions;
       }
     } while (rc == ETIMEDOUT);
 
-#if 1 // HACK
-    mcperftPlyInfoPrint(board_db, ply_number); 
-#endif
+    mcperftPlyInfoPrint(&board_db, ply_number); 
 
-    if (0 != board_db->ply_table[i+1].num_boards_in_ply)
-                board_db->highest_ply_with_positions = i + 1;
   }
-  board_db->position_db_run_time = sysUpTimeMillisecondsGet() - start_of_test;
+  mcperftPlyInfoPrint(&board_db, board_db.ply_depth); 
 
-  /* Mark the database as created. 
-  */
-  board_db->db_state = BRD_DB_POSITIONS_CREATED;
+  board_db.position_db_run_time = sysUpTimeMillisecondsGet() - start_of_test;
 
-  /* We no longer need the hash table. 
-  ** Free the memory.
-  */
-  (void) munmap (board_db->db_hash, board_db->hash_size_in_bytes);
-  board_db->db_hash = 0;
+  mcperftBoardInfoPrint(&board_db);
 
-  /* Push the datbase to non-volatile storage.
-  */
-  {
-    int rc;
+  free (board_db.sort_block);
 
-    printf ("\n");
-    printf ("Writing position database to disk...\n");
-
-    rc = msync (board_db, board_db->position_database_size, MS_SYNC);
-    if (rc < 0)
-    {
-      perror ("msync on position database");
-      exit (-1);
-    }
-
-    printf ("Database Write Done.\n\n");
-  }
-
-  mcperftBoardInfoPrint(board_db);
-
-  const unsigned int db_error = 
-   ((board_db->highest_ply_with_positions != ply_depth) ||
-      (board_db->ply_table[board_db->highest_ply_with_positions - 1].num_boards_in_ply !=
-      board_db->ply_table[board_db->highest_ply_with_positions - 1].num_boards_processed))?1:0;
-
-  (void) munmap (board_db, board_db->position_database_size);
-
-  if (db_error)
-  {
-    printf ("ERROR: Insufficient positions or moves for database with depth of %u plies.\n", ply_depth);
-    printf ("       Erasing the position database...\n");
-    printf ("       Consider increasing CHESS_MAX_POSITIONS or CHESS_MAX_MOVES.\n");
-    printf ("\n");
-    (void) unlink (POSITION_DB_FILE);
-    (void) rmdir (WORK_DIRECTORY_NAME);
-    exit (-1);
-  }
   printf ("SUCCESS! Created the position database with depth of %u plies.\n", ply_depth);
 }
 
@@ -1340,6 +2010,28 @@ void brdDbCount (const char *workload_file)
 }
 
 /********************************************************************
+** Get the number of positions in the specified ply.
+********************************************************************/
+static unsigned long long brdPlyNumPositionsGet (unsigned int ply)
+{
+  char buf[1024];
+  sprintf (buf, "%s%u_positions", 
+                    PLY_FILE_PREFIX,
+                    ply);
+
+  struct stat statbuf;
+
+  if (0 != stat (buf, &statbuf))
+  {
+    perror ("fstat - position database");
+    printf ("        File:%s\n", buf);
+    exit (-1);
+  }
+
+  return (unsigned long long) statbuf.st_size / sizeof(plyPositionEntry_t);
+}
+
+/********************************************************************
 ** Create files containing fen positions for each ply in the database.
 **
 ** Return Codes
@@ -1348,46 +2040,19 @@ void brdDbCount (const char *workload_file)
 ********************************************************************/
 void brdDbFenGenerate (void)
 {
-  const int position_db_fd = open (POSITION_DB_FILE, O_RDONLY);
-  if (position_db_fd < 0)
+  const unsigned int ply_depth = brdDbPlyDepthGet();
+
+  for (unsigned int ply = 0; ply <= ply_depth; ply++)
   {
-    printf ("ERROR: Can't open %s\n", POSITION_DB_FILE);
-    printf ("       Please create a new position database.\n");
-    exit (-1);
-  }
+    const unsigned long long num_boards_in_ply = brdPlyNumPositionsGet (ply);
 
-  brdDb_t board_db;
-  if (sizeof(brdDb_t) != read (position_db_fd, &board_db, sizeof(brdDb_t)))
-  {
-    perror("read - position datbase");
-    exit (-1);
-  }
+    char buf[1024];
+    sprintf (buf, "%s%u_positions", 
+                    PLY_FILE_PREFIX,
+                    ply);
 
-  if (board_db.db_state != BRD_DB_POSITIONS_CREATED)
-  {
-    printf ("ERROR: The position database seems to be corrupted.\n");
-    printf ("       Please create a new position database.\n");
-    exit (-1);
-  }
+    const int position_db_fd = open (buf, O_RDONLY);
 
-  unsigned char *const addr = mmap(0, board_db.position_database_size,
-          PROT_READ,
-                  MAP_SHARED,
-                  position_db_fd,0);
-  (void) close (position_db_fd); // Note that the mapping is still valid after the fd is closed.
-
-  if (addr == MAP_FAILED)
-  {
-    perror ("mmap - position database");
-    exit (-1);
-  }
-  madvise (addr, board_db.position_database_size, MADV_HUGEPAGE);
-
-  board_db.db_entry = (brdDbEntry_t *) (addr + board_db.start_of_db_entry);
-
-
-  for (unsigned int ply = 0; ply < board_db.max_db_plies; ply++)
-  {
     unsigned int write_buf_size = 10000;
     unsigned int num_bytes_in_buf = 0;
     char write_buf[write_buf_size];
@@ -1402,18 +2067,22 @@ void brdDbFenGenerate (void)
       exit (-1);
     }
 
-    for (unsigned int i = 0; i < board_db.ply_table[ply].num_boards_in_ply; i++)
+    for (unsigned int i = 0; i < num_boards_in_ply; i++)
     {
-      const brdDbEntry_t *db_entry = 
-            &board_db.db_entry[board_db.ply_table[ply].first_board_in_ply_index + i];
+      plyPositionEntry_t db_entry;
+      if (sizeof(plyPositionEntry_t) != read (position_db_fd, &db_entry, sizeof(plyPositionEntry_t)))
+      {
+        perror ("Error reading position database.");
+        exit (-1);
+      }
 
       brd_t brd;
 
-      brdUnpack (&brd, db_entry->position);
+      brdUnpack (&brd, db_entry.position);
 
       char fen[128];
       
-      brdutilBrdToFenConvert (&brd, &db_entry->brd_info.brd_info, fen);
+      brdutilBrdToFenConvert (&brd, &db_entry.brd_info.brd_info, fen);
 
       const unsigned int size = (unsigned int) strlen (fen);
 
@@ -1438,9 +2107,8 @@ void brdDbFenGenerate (void)
       }
     }
     (void) close (fen_fd);
+    (void) close (position_db_fd);
   }
-
-  (void) munmap (addr, board_db.position_database_size);
 
   printf ("FEN files are ready!\n");
 }
@@ -1459,6 +2127,23 @@ void brdDbCountSetup (const unsigned int depth,
 {
   char buf[1024];
   int rc;
+  const unsigned int ply_depth = brdDbPlyDepthGet();
+
+  sprintf (buf, "%s%u_positions", 
+                    PLY_FILE_PREFIX,
+                    ply_depth);
+
+  const int position_db_fd = open (buf, O_RDONLY);
+  if (position_db_fd < 0)
+  {
+    perror ("open - position database");
+    printf ("Can't find file: %s\n", buf);
+    exit (-1);
+  }
+
+  const unsigned long long num_boards_in_ply = brdPlyNumPositionsGet (ply_depth);
+
+  printf ("Found existing board database with ply depth %u.\n", ply_depth);
 
   printf ("Erasing existing workload and move count result directories if present...\n");
 
@@ -1494,58 +2179,24 @@ void brdDbCountSetup (const unsigned int depth,
     exit (-1);
   }
 
-  const int position_db_fd = open (POSITION_DB_FILE, O_RDONLY);
-  if (position_db_fd < 0)
-  {
-    perror ("open - position database");
-    exit (-1);
-  }
 
-  brdDb_t board_db;
-  if (sizeof(brdDb_t) != read (position_db_fd, &board_db, sizeof(brdDb_t)))
-  {
-    perror("read - position datbase");
-    exit (-1);
-  }
-
-  if (board_db.db_state != BRD_DB_POSITIONS_CREATED)
-  {
-    printf ("ERROR: The position database seems to be corrupted.\n");
-    printf ("       Please create a new position database.\n");
-    exit (-1);
-  }
-
-  if ((depth <= board_db.ply_depth) && (split_factor > 1))
+  if ((depth <= ply_depth) && (split_factor > 1))
   {
     printf ("ERROR: Split Factor must be 1 for depth less or equal to %u\n",
-                    board_db.ply_depth);
+                    ply_depth);
     exit (-1);
   }
 
-  unsigned char *const addr = mmap(0, board_db.position_database_size, 
-          PROT_READ,
-                  MAP_SHARED,
-                  position_db_fd,0);
-  (void) close (position_db_fd); // Note that the mapping is still valid after the fd is closed.
 
-  if (addr == MAP_FAILED)
-  {
-    perror ("mmap - position database");
-    exit (-1);
-  }
-  madvise (addr, board_db.position_database_size, MADV_HUGEPAGE);
-
-  board_db.db_entry = (brdDbEntry_t *) (addr + board_db.start_of_db_entry);
 
   printf ("Writing workload files...\n");
-  const plyInfo_t *const ply = &board_db.ply_table[board_db.ply_depth];
-  unsigned long long start_workload_number = ply->first_board_in_ply_index;
+  unsigned long long start_workload_number = 0;
 
   for (unsigned int i = 0; i < split_factor; i++)
   {
     unsigned long long num_workloads;
 
-    if (depth <= board_db.ply_depth)
+    if (depth <= ply_depth)
     {
       /* When perft depth is smaller than position database depth then there is no 
       ** work to do for search machines. 
@@ -1553,8 +2204,8 @@ void brdDbCountSetup (const unsigned int depth,
       num_workloads = 0;
     } else
     {
-      num_workloads = ply->num_boards_in_ply / split_factor;
-      if (i < (ply->num_boards_in_ply % split_factor))
+      num_workloads = num_boards_in_ply / split_factor;
+      if (i < (num_boards_in_ply % split_factor))
       {
         num_workloads += 1;
       }
@@ -1563,8 +2214,8 @@ void brdDbCountSetup (const unsigned int depth,
     workloadHeader_t workload_header = {
      .search_result = 0,
      .depth = depth,
-     .workload_depth = (depth > board_db.ply_depth)?depth - board_db.ply_depth:0,
-     .position_db_depth = board_db.ply_depth,
+     .workload_depth = (depth > ply_depth)?depth - ply_depth:0,
+     .position_db_depth = ply_depth,
      .split_factor = split_factor,
      .workload_factor = i + 1,
      .num_workloads = num_workloads,
@@ -1606,11 +2257,19 @@ void brdDbCountSetup (const unsigned int depth,
        const unsigned long long j_inc = ((j + block_size) < workload_header.num_workloads)?block_size:
                                         workload_header.num_workloads - j;
 
+       plyPositionEntry_t db_entry[j_inc];
+       if ((j_inc * sizeof(plyPositionEntry_t)) != 
+            (unsigned long long) read (position_db_fd, db_entry, j_inc * sizeof(plyPositionEntry_t)))
+       {
+         perror ("Error reading position file.");
+         exit (-1);
+       }
+
        for (unsigned long long k = 0; k < j_inc; k++)
        {
          memcpy (workload_record[k].position, 
-               board_db.db_entry[workload_header.start_workload_number + j + k].position, 32);
-         workload_record[k].brd_info = board_db.db_entry[workload_header.start_workload_number + j + k].brd_info;
+               db_entry[workload_header.start_workload_number + k].position, 32);
+         workload_record[k].brd_info = db_entry[workload_header.start_workload_number + k].brd_info;
          workload_record[k].pad1 = 0;
          workload_record[k].pad2 = 0;
        }
@@ -1628,7 +2287,7 @@ void brdDbCountSetup (const unsigned int depth,
   }
 
 
-  (void) munmap (addr, board_db.position_database_size);
+  (void) close (position_db_fd);
 
   printf ("Workload files are ready!\n");
 }
@@ -1642,24 +2301,24 @@ void brdDbCountSetup (const unsigned int depth,
 **
 ********************************************************************/
 static void brdDbLastPlyMovesCount (const unsigned int search_depth, 
-                            const brdDb_t *const board_db, 
                             unsigned _BitInt(128) *const position_count_space)
 {
-  const plyInfo_t *ply = &board_db->ply_table[search_depth - 1];
-  const unsigned long long num_boards_in_ply = ply->num_boards_in_ply;
+  const unsigned long long num_boards_in_ply = brdPlyNumPositionsGet (search_depth - 1);
 
-#if 0 // HACK
+#if 1 // HACK
   printf ("%s %d - search_depth:%u num_board_in_ply:%'llu\n",
                     __FUNCTION__, __LINE__,
                     search_depth, 
                     num_boards_in_ply);
 #endif
 
+  plyPositionFileReadOnlyStart (search_depth - 1);
   for (unsigned long long i = 0; i < num_boards_in_ply; i++)
   {
-    brdDbEntry_t *position = &board_db->db_entry[ply->first_board_in_ply_index + i];
-    position_count_space[i] = position->status.num_legal_moves;
+    plyPositionEntry_t *position = plyPositionFileRead ();
+    position_count_space[i] = position->num_moves;
   }
+  (void) plyPositionFileRead(); // Close the position database file.
 }
 
 /********************************************************************
@@ -1672,36 +2331,55 @@ static void brdDbLastPlyMovesCount (const unsigned int search_depth,
 ********************************************************************/
 static void brdDbDeepSearchAggregate (
                                const unsigned int position_db_depth,
-                               const brdDb_t *const board_db, 
                                const unsigned long long *const deep_search_result,
                                unsigned _BitInt(128) *const position_count_space)
 {
-  const unsigned long long index_offset = 
-                board_db->ply_table[position_db_depth].first_board_in_ply_index;
+  const unsigned long long num_boards_in_ply = brdPlyNumPositionsGet (position_db_depth - 1);
 
+  char move_file_name[1024];
+  int  fd;
 
-  const plyInfo_t *ply = &board_db->ply_table[position_db_depth - 1];
-  const unsigned long long num_boards_in_ply = ply->num_boards_in_ply;
+  sprintf (move_file_name, "%s%u_moves", PLY_FILE_PREFIX, position_db_depth - 1);
+  fd = open (move_file_name, O_RDONLY);
+  if (fd < 0)
+  {
+    perror ("open ply moves file");
+    exit (-1);
+  }
 
-#if 0 // HACK
-  printf ("%s %d - position_db_depth:%u index_offset:%'llu num_board_in_ply:%'llu\n",
+#if 1 // HACK
+  printf ("%s %d - position_db_depth:%u num_board_in_ply:%'llu\n",
                     __FUNCTION__, __LINE__,
                     position_db_depth,
-                    index_offset, num_boards_in_ply);
+                    num_boards_in_ply);
 #endif
 
+  plyPositionFileReadOnlyStart (position_db_depth - 1);
   for (unsigned long long i = 0; i < num_boards_in_ply; i++)
   {
     position_count_space[i] = 0;
-    brdDbEntry_t *position = &board_db->db_entry[ply->first_board_in_ply_index + i];
-    for (unsigned int j = 0; j < position->status.num_legal_moves; j++)
+    plyPositionEntry_t *position = plyPositionFileRead ();
+    for (unsigned int j = 0; j < position->num_moves; j++)
     {
-      const unsigned long long next_node_index = 
-                        moveEntryToIndex(board_db->db_move[moveEntryToIndex(position->legal_move_entry) + j]);
-      position_count_space[i] += deep_search_result[next_node_index - index_offset];
+      const unsigned long long move_index = moveEntryToIndex(position->first_move_index) + j;
+      moveEntry_t move_entry;
+
+      if (sizeof(moveEntry_t) != pread (fd, &move_entry, sizeof(moveEntry_t),
+                                           (__off_t) (move_index * sizeof(moveEntry_t))))
+      {
+        perror ("can't pread() move entry file");
+        exit (-1);
+      }
+
+      const unsigned long long next_node_index = moveEntryToIndex(move_entry);
+                        
+      position_count_space[i] += deep_search_result[next_node_index];
     }
   }
+  (void) plyPositionFileRead(); // Close the position database file.
+  close (fd); // Close Move File 
 }
+
 /********************************************************************
 ** Aggregate all the move counts in the position tree.
 ** When this function is invoked, the deepest ply in the position
@@ -1714,19 +2392,29 @@ static void brdDbDeepSearchAggregate (
 ********************************************************************/
 static void brdDbPositionTreeAggregate (const unsigned int search_depth,
                                const unsigned int position_db_depth,
-                               const brdDb_t *const board_db,
                                unsigned _BitInt(128) **const position_count_space)
 {
   const unsigned int tree_search_depth = (search_depth > position_db_depth)?
                                                 position_db_depth - 2:
                                                 search_depth - 2;
                                                         
-  for (int ply_number = (int) tree_search_depth; ply_number >= 0; ply_number--)
+  for (int ply_number =  (int) tree_search_depth; ply_number >= 0; ply_number--)
   {
-    const plyInfo_t *ply = &board_db->ply_table[ply_number];
-    const unsigned long long num_boards_in_ply = ply->num_boards_in_ply;
+    const unsigned long long num_boards_in_ply = brdPlyNumPositionsGet ((unsigned int) ply_number);
 
-#if 0 // HACK
+    char move_file_name[1024];
+    int  fd;
+
+    sprintf (move_file_name, "%s%u_moves", PLY_FILE_PREFIX, ply_number);
+    fd = open (move_file_name, O_RDONLY);
+    if (fd < 0)
+    {
+      perror ("open ply moves file");
+      exit (-1);
+    }
+
+    plyPositionFileReadOnlyStart ((unsigned int) ply_number);
+#if 1 // HACK
     printf ("%s %d - search_depth:%u position_db_depth:%u ply_number:%d num_board_in_ply:%'llu\n",
                     __FUNCTION__, __LINE__,
                     search_depth, position_db_depth,
@@ -1736,19 +2424,30 @@ static void brdDbPositionTreeAggregate (const unsigned int search_depth,
     for (unsigned long long i = 0; i < num_boards_in_ply; i++)
     {
       position_count_space[ply_number][i] = 0;
-      brdDbEntry_t *position = &board_db->db_entry[ply->first_board_in_ply_index + i];
-      unsigned int num_legal_moves = position->status.num_legal_moves;
+      plyPositionEntry_t *position = plyPositionFileRead ();
+      unsigned int num_legal_moves = position->num_moves;
 
       for (unsigned int j = 0; j < num_legal_moves; j++)
       {
-        const unsigned long long next_node_index = 
-                moveEntryToIndex(board_db->db_move[moveEntryToIndex(position->legal_move_entry) + j]);
-        const unsigned long long index_offset_2 = board_db->ply_table[ply_number + 1].first_board_in_ply_index;
+        const unsigned long long move_index = moveEntryToIndex(position->first_move_index) + j;
+        moveEntry_t move_entry;
+
+        if (sizeof(moveEntry_t) != pread (fd, &move_entry, sizeof(moveEntry_t),
+                                           (__off_t) (move_index * sizeof(moveEntry_t))))
+        {
+          perror ("can't pread() move entry file");
+          exit (-1);
+        }
+
+        const unsigned long long next_node_index = moveEntryToIndex(move_entry);
 
         position_count_space[ply_number][i] += 
-                        position_count_space[ply_number + 1][next_node_index - index_offset_2];
+                        position_count_space[ply_number + 1][next_node_index];
       }
     }
+
+    (void) plyPositionFileRead(); // Close the position database file.
+    close (fd);
   }
 }
 
@@ -1773,48 +2472,11 @@ void brdDbAggregate (unsigned int *depth,
     exit (-1);
   }
 
-  /* Open the position database.
-  */
-  const int position_db_fd = open (POSITION_DB_FILE, O_RDONLY);
-  if (position_db_fd < 0)
-  {
-    perror ("open - position database");
-    exit (-1);
-  }
+  const unsigned int max_db_plies = brdDbPlyDepthGet() + 1;
 
-  brdDb_t board_db;
-  if (sizeof(brdDb_t) != read (position_db_fd, &board_db, sizeof(brdDb_t)))
-  {
-    perror("read - position datbase");
-    exit (-1);
-  }
-
-  if (board_db.db_state != BRD_DB_POSITIONS_CREATED)
-  {
-    printf ("ERROR: The position database seems to be corrupted.\n");
-    printf ("       Please create a new position database.\n");
-    exit (-1);
-  }
-
-  unsigned char *const addr = mmap(0, board_db.position_database_size, 
-          PROT_READ,
-                  MAP_SHARED,
-                  position_db_fd,0);
-  (void) close (position_db_fd); // Note that the mapping is still valid after the fd is closed.
-
-  if (addr == MAP_FAILED)
-  {
-    perror ("mmap - position database");
-    exit (-1);
-  }
-  madvise (addr, board_db.position_database_size, MADV_HUGEPAGE);
-
-  board_db.db_entry = (brdDbEntry_t *) (addr + board_db.start_of_db_entry);
-  board_db.db_move = (moveEntry_t *) (addr + board_db.start_of_move_entry);
-
-  unsigned _BitInt(128) *position_count_space[board_db.max_db_plies - 1];
-  unsigned long long position_count_size[board_db.max_db_plies];
-  const unsigned int position_db_depth = board_db.max_db_plies - 1;
+  unsigned _BitInt(128) *position_count_space[max_db_plies - 1];
+  unsigned long long position_count_size[max_db_plies];
+  const unsigned int position_db_depth = max_db_plies - 1;
 
 
   /* We need to allocate memory for position counters for every ply in 
@@ -1822,9 +2484,10 @@ void brdDbAggregate (unsigned int *depth,
   ** For example if a position database has a depth of 8 then we need to allocate
   ** counter space for ply 0 to ply 7.
   */
-  for (unsigned int i = 0; i < (board_db.max_db_plies - 1); i++)
+  for (unsigned int i = 0; i < (max_db_plies - 1); i++)
   {
-    position_count_size[i] = board_db.ply_table[i].num_boards_in_ply * sizeof(_BitInt(128));
+    const unsigned long long num_boards_in_ply = brdPlyNumPositionsGet (i);
+    position_count_size[i] = num_boards_in_ply * sizeof(_BitInt(128));
     if (0 == position_count_size[i])
     {
       printf ("ERROR: Unexpected 0 positions in ply %u\n", i);
@@ -1847,14 +2510,8 @@ void brdDbAggregate (unsigned int *depth,
   ** billion positions, which is 80GB of DRAM. The 80GB is still a lot, so we will
   ** probably end up using swap space, but I am hoping that things will not be 
   ** too slow.
-  **
-  ** TODO: 
-  **  If memory becomes an issue then we may be able to reduce memory usage
-  **  by storing results in 4-byte integers. Since for perft 15 with database
-  **  depth of 9 the deep search depth is only 6, the 4 bytes should be sufficient 
-  **  to store the move count. 
   */
-  const unsigned long long position_count = board_db.ply_table[position_db_depth].num_boards_in_ply;
+  const unsigned long long position_count = brdPlyNumPositionsGet (position_db_depth);
 
   position_count_size[position_db_depth] = position_count * sizeof(unsigned long long);
 
@@ -1898,7 +2555,7 @@ void brdDbAggregate (unsigned int *depth,
         exit (-1);
       }
 
-#if 0 // HACK
+#if 1 // HACK
       printf ("search_result:         %u\n", workload.search_result);
       printf ("depth:                 %u\n", workload.depth);
       printf ("workload_depth:        %u\n", workload.workload_depth);
@@ -1916,7 +2573,7 @@ void brdDbAggregate (unsigned int *depth,
       if (workload.position_db_depth != position_db_depth)
       {
         printf ("ERROR: The results file position database depth %u doesn't match detected depth %u\n",
-                    workload.position_db_depth, board_db.max_db_plies);
+                    workload.position_db_depth, position_db_depth);
         exit (-1);
       }
       search_depth = workload.depth;
@@ -1934,11 +2591,10 @@ void brdDbAggregate (unsigned int *depth,
       unsigned long long bytes_read = 0;
       while (1)
       {
-        unsigned long long w_index = (workload.start_workload_number - 
-                                              board_db.ply_table[position_db_depth].first_board_in_ply_index)
+        unsigned long long w_index = workload.start_workload_number  
                                              + (bytes_read / sizeof(unsigned long long));
                                              
- #if 0 // HACK
+ #if 1 // HACK
         printf ("bytes_read:%'llu read_request_size:%'llu Next Index:%'llu\n", 
                     bytes_read, read_request_size, w_index); 
  #endif
@@ -1994,7 +2650,7 @@ void brdDbAggregate (unsigned int *depth,
     */
     printf ("Aggregating deep search results...\n");
     brdDbDeepSearchAggregate (position_db_depth,
-                              &board_db, deep_search_result,
+                              deep_search_result,
                               position_count_space[position_db_depth - 1]);
   } else
   {
@@ -2005,7 +2661,6 @@ void brdDbAggregate (unsigned int *depth,
     printf ("Search depth %u is smaller than position database depth %u. Counting Last Ply Moves...\n",
                 search_depth, position_db_depth);
     brdDbLastPlyMovesCount (search_depth, 
-                            &board_db, 
                             position_count_space[search_depth - 1]);
   }
 
@@ -2017,7 +2672,6 @@ void brdDbAggregate (unsigned int *depth,
   {
     brdDbPositionTreeAggregate (search_depth,
                                position_db_depth,
-                               &board_db,
                                position_count_space);
   }
 
@@ -2026,19 +2680,17 @@ void brdDbAggregate (unsigned int *depth,
 
   /* Report perft counts for ply 1. 
   */
-  for (unsigned long long i = 0; i < board_db.ply_table[1].num_boards_in_ply; i++)
+  const unsigned long long num_boards_in_ply_1 = brdPlyNumPositionsGet (1);
+  for (unsigned long long i = 0; i < num_boards_in_ply_1; i++)
   {
     ply1_perft_result[i] = position_count_space[1][i];
   }
 
-  for (unsigned int i = 0; i < (board_db.max_db_plies - 1); i++)
+  for (unsigned int i = 0; i < (max_db_plies - 1); i++)
   {
     free (position_count_space[i]); 
   }
   (void) munmap (deep_search_result, position_count_size[position_db_depth]);
-  (void) munmap (addr, board_db.position_database_size);
   closedir (dir);
-
-
 }
 

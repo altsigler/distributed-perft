@@ -6,15 +6,16 @@ a specified position to specified number of plies.
 The Distributed Perft is intended to count the number of possible positions
 at ply 15 from the standard starting position on an x86 machine.
 
-The mcperft program, which is the multicore distributed perft implementation,
+The mcperft program, which is the multi-core distributed perft implementation,
 distributes the move counting to all cores on the same machine
 and also can distribute move counting to multiple machines. 
 
 In addition to the mcperft application, this project includes a 
 very fast single core "scperft" move counter. 
-The scperft function is used by the mcperft when distributing work to multiple cores.
+The single core move counting functionality is used by the mcperft when 
+distributing work to multiple cores.
 
-## Distributed Perft Acrhitecture
+## Distributed Perft Architecture
 The distributed move counting operation is divided into four stages. 
 Generate a tree of unique positions, create workload files for one or more 
 machines, perform a single-core perft computation on each workload, 
@@ -29,16 +30,22 @@ and aggregates results into the final "perft 10" position count. In order
 to run the complete test, the computer must have at least 16GB of DRAM in order 
 to have enough space to generate the depth 7 unique position tree.
 
+In order to run the mcperft position tree and move count aggregation code the 
+computer must have a solid state internal SSD. This is needed because some of
+the files are accessed in non-sequential locations during database creation 
+and the final move count aggregation. 
+
 ### Generate a tree of unique positions
 The first stage generates a tree of unique positions up to ply 7, 8, or 9.
-The depth of this tree is limited by how much DRAM is available on the 
-computer generating the tree. The required memory is 16GB, 128GB, and 1TB
-respectively.  
+The depth of the position tree is limited by how much DRAM and SSD is available on the 
+computer generating the tree. The required DRAM is 16GB for ply 7 and 8 trees,
+and 128GB for ply 9 trees. The required SSD is 1TB for ply 7 and 8 trees and 4TB
+for ply 9 tree.
 
 The reason for generating a tree of unique positions, is to greatly reduce the 
 number of computations needed for the perft count. The duplicate positions 
 start showing up at ply 3, where about 40 percent of the positions are duplicate.
-The duplicate percentage goes up with every ply after that to about XX percent
+The duplicate percentage goes up with every ply after that to about 68 percent
 at ply 9. This means that the number of positions we need to compute drops 
 roughly in half for plies 3 through 9, which is a big savings in computation time.
 
@@ -53,18 +60,23 @@ and 3,540 leading to duplicate positions.
 This proceeds until ply 9 with the following unique/duplicate position counts:
 Ply 4 (72,078/46,444), Ply 5 (822,518/974/871), Ply 6 (9,417,683/10,779,500),
 Ply 7 (96,400,335/160,579,818), Ply 8 (988,192,872/1,593,495,486), 
-Ply 9 (XXX/YYY).
+Ply 9 (9,183,507,426/19,485,194,300).
 
 Once the tree for ply 9 is generated it can 
-be used on 128GB machine to perform workload generartion and final perft count 
+be used on 128GB machine to perform workload generation and final perft count 
 aggregation. The single core move counting machines can have just 1GB of DRAM and
 are not impacted by the position tree size.
 
-If you have access to a 128GB machine then use the command "./mcperft create-db 8" to 
-create the position database of depth 8. 
+If you have access to a 128GB machine then use the command "./mcperft create-db 9" to 
+create the position database of depth 9. This takes about 7 hours.
 If the depth is omitted then the application uses depth 7 by default. 
-The position database file is called position_db and is located in the board-db
+The position database directory is called position_db and is located in the board-db
 subdirectory, which is created automatically in the current working directory.
+
+The database is comprised of a position file for each ply and of move file for 
+each ply up to maximum depth minus 1. The file name for position files are 
+ply_0_positions, ply_1_positions, and so on until ply_9 positions. The file
+names for move files are ply_0_moves, ply_1_moves, and so on until ply_8_moves.
 
 The database only needs to be created one time. Subsequent commands to generate 
 workloads for different perft depths and to trigger perft computation can be 
@@ -121,13 +133,13 @@ The third stage is to perform move counting for each position in all the workloa
 the "./mcperft count [workload-file]" command. If the workload-file is omitted then the "workload_1" file is used.
 The mcperft expects to find the workload file in the board-db/workload-files directory and expects to put result files
 into board-db/result-files directory. Therefore when starting the ./mcperft application on different computers make sure 
-to create the board-db/result-files and board-db/workload-files directory and compy the workload_n files into the 
+to create the board-db/result-files and board-db/workload-files directory and copy the workload_n files into the 
 workload-files directory. 
 
 While the move counting is in progress the mcperft prints a message once per minute indicating how many workloads have been 
 processed and some performance information. This information can be used to estimate when the move counting will finish.
 While counting moves, the mcperft updates the board-db/result-files/temp_result file every few minutes with the counted positions.
-If the counting is interruped with CTRL-C or due to power loss then the "./mcperft count" automatically restarts from 
+If the counting is interrupted with CTRL-C or due to power loss then the "./mcperft count" automatically restarts from 
 the last checkpointed position. For counts that expect to take days, the user can set up scripts to automatically restart 
 the count if the computer reboots.
 
@@ -136,6 +148,8 @@ workload file number.
 
 The computers that count the position in the workload files don't need access to the position database generated in the 
 first stage, and only need about 1GB of DRAM. 
+
+The "./mcperft count" command uses every existing core on the computer to run the move counting algorithm. 
 
 
 ### Aggregate Results
@@ -148,11 +162,11 @@ so this needs to be done manually for testing. The mcperft does perform checks t
 are present, but it is largely up to the sure to make sure that the database and result files match and all result 
 files are present in the board-db/result-files directory.
 
-Although the mcperft needs acces to the position database for the final perft computation, a computer with 128GB can 
-perform this operation on the "ply 9" position database that required 1TB of DRAM to generate. 
+The ply 9 move aggregation requires about 80GB of DRAM. I tested the ply 9 move aggregation on 128GB DRAM machine.
 
 
 ## Other tools included in the project
-
+scperft - Single core perft with position caching.
+perft - Single core perft without position caching.
 
 
