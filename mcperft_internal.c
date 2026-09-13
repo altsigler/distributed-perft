@@ -2359,19 +2359,19 @@ static void brdDbDeepSearchAggregate (
   {
     position_count_space[i] = 0;
     plyPositionEntry_t *position = plyPositionFileRead ();
+    const unsigned long long move_index = moveEntryToIndex(position->first_move_index);
+    moveEntry_t move_entry[position->num_moves];
+    const ssize_t read_request_size = sizeof(moveEntry_t) * position->num_moves;
+    
+    if (read_request_size != pread (fd, move_entry, (size_t) read_request_size,
+                                           (__off_t) (move_index * sizeof(moveEntry_t))))
+    {
+      perror ("can't pread() move entry file");
+      exit (-1);
+    }
     for (unsigned int j = 0; j < position->num_moves; j++)
     {
-      const unsigned long long move_index = moveEntryToIndex(position->first_move_index) + j;
-      moveEntry_t move_entry;
-
-      if (sizeof(moveEntry_t) != pread (fd, &move_entry, sizeof(moveEntry_t),
-                                           (__off_t) (move_index * sizeof(moveEntry_t))))
-      {
-        perror ("can't pread() move entry file");
-        exit (-1);
-      }
-
-      const unsigned long long next_node_index = moveEntryToIndex(move_entry);
+      const unsigned long long next_node_index = moveEntryToIndex(move_entry[j]);
                         
       position_count_space[i] += deep_search_result[next_node_index];
     }
@@ -2425,22 +2425,21 @@ static void brdDbPositionTreeAggregate (const unsigned int search_depth,
     {
       position_count_space[ply_number][i] = 0;
       plyPositionEntry_t *position = plyPositionFileRead ();
-      unsigned int num_legal_moves = position->num_moves;
 
-      for (unsigned int j = 0; j < num_legal_moves; j++)
-      {
-        const unsigned long long move_index = moveEntryToIndex(position->first_move_index) + j;
-        moveEntry_t move_entry;
-
-        if (sizeof(moveEntry_t) != pread (fd, &move_entry, sizeof(moveEntry_t),
+      const unsigned long long move_index = moveEntryToIndex(position->first_move_index);
+      moveEntry_t move_entry[position->num_moves];
+      const ssize_t read_request_size = sizeof(moveEntry_t) * position->num_moves;
+    
+      if (read_request_size != pread (fd, move_entry, (size_t) read_request_size,
                                            (__off_t) (move_index * sizeof(moveEntry_t))))
-        {
-          perror ("can't pread() move entry file");
-          exit (-1);
-        }
-
-        const unsigned long long next_node_index = moveEntryToIndex(move_entry);
-
+      {
+        perror ("can't pread() move entry file");
+        exit (-1);
+      }
+      for (unsigned int j = 0; j < position->num_moves; j++)
+      {
+        const unsigned long long next_node_index = moveEntryToIndex(move_entry[j]);
+                          
         position_count_space[ply_number][i] += 
                         position_count_space[ply_number + 1][next_node_index];
       }
@@ -2507,9 +2506,7 @@ void brdDbAggregate (unsigned int *depth,
   ** last ply of the position database, so we don't need 1TB of DRAM in order 
   ** to compute the perft count on position database of depth 9. The 128GB DRAM
   ** is sufficient because each perft result is only 8 bytes, and we need about 10
-  ** billion positions, which is 80GB of DRAM. The 80GB is still a lot, so we will
-  ** probably end up using swap space, but I am hoping that things will not be 
-  ** too slow.
+  ** billion positions, which is 80GB of DRAM. 
   */
   const unsigned long long position_count = brdPlyNumPositionsGet (position_db_depth);
 
