@@ -2282,8 +2282,8 @@ void brdDbCountSetup (const unsigned int depth,
        for (unsigned long long k = 0; k < j_inc; k++)
        {
          memcpy (workload_record[k].position, 
-               db_entry[workload_header.start_workload_number + k].position, 32);
-         workload_record[k].brd_info = db_entry[workload_header.start_workload_number + k].brd_info;
+               db_entry[k].position, 32);
+         workload_record[k].brd_info = db_entry[k].brd_info;
          workload_record[k].pad1 = 0;
          workload_record[k].pad2 = 0;
        }
