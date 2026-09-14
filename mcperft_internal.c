@@ -2081,7 +2081,7 @@ void brdDbFenGenerate (void)
       exit (-1);
     }
 
-    for (unsigned int i = 0; i < num_boards_in_ply; i++)
+    for (unsigned long long i = 0; i < num_boards_in_ply; i++)
     {
       plyPositionEntry_t db_entry;
       if (sizeof(plyPositionEntry_t) != read (position_db_fd, &db_entry, sizeof(plyPositionEntry_t)))
