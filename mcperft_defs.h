@@ -48,17 +48,23 @@
 */
 #define PLY_FILE_PREFIX POSITION_DB_DIRECTORY "ply_"
 
-/* While generating positions for a ply, the code generates temporary files 
+/* While generating positions for a ply, the code creates temporary files 
 ** of positions. The positions contained in each files are sorted, but can have 
 ** duplicates. These files are called sort blocks. The files are deleted after the 
 ** ply position file is generated. 
-** The file names start with "position_block_1". The first file is always created,
+** The file names start with "position_block_0". The first file is always created,
 ** even when there is only one position in the ply. The subsequent files are called 
 ** position_block_2, position_block_3, and so on until all ply positions are generated.
-**
-** The sort block size is defined by SORT_BLOCK_SIZE.
 */
 #define SORT_BLOCK_PREFIX WORK_DIRECTORY_NAME "position_block_"
+
+/* While generating moves for a ply, the code creates temporary files
+** of moves. The moves contained in each file are sorted by move index and 
+** can NOT have duplicates. 
+** The sort block files are deleted after the final move file is generated.
+** The sort blocks are named move_block_0, move_block_1, and so on.
+*/
+#define SORT_MOVE_BLOCK_PREFIX WORK_DIRECTORY_NAME "move_block_"
 
 
 /* The FEN database file prefix. 
@@ -162,6 +168,13 @@ inline unsigned long long moveEntryToIndex (const moveEntry_t move_entry)
   return ((unsigned long long) move_entry.high << 32) | (unsigned long long) move_entry.low;
 } 
   
+/* This structure is used for the temporary sort block move files.
+*/
+typedef struct
+{
+  unsigned long long position_index; // The actual move record.
+  unsigned long long move_index; // Position of the move record in the final move file.
+} sortBlockMoveEntry_t __attribute__ ((aligned (8)));
 
 /* This structure is used for the temporary sort block position files.
 */
@@ -172,6 +185,23 @@ typedef struct
   moveEntry_t move_entry; /* 5-byte move entry which points to this position */
   unsigned char pad; /* Pad to align to 8-byte boundary */
 } sortBlockEntry_t __attribute__ ((aligned (8)));
+
+/* Buffered file context.
+*/
+typedef struct
+{
+    unsigned char *buffer;
+    unsigned long long buffer_size_in_bytes;
+    unsigned long long entry_size_in_bytes;
+    unsigned long long max_entries_in_buffer;
+
+    unsigned long long num_entries_in_buffer; 
+
+
+    int fd;
+
+} bufferedFile_t;
+
 
 /* Structure for holding information about sorted blocks while
 ** merging these blocks into the ply position file.
@@ -190,6 +220,24 @@ typedef struct
 
     char file_name[1024];
 } mergeBlock_t;
+
+/* Structure for holding information about sorted move blocks while
+** merging these blocks into the ply position file.
+*/
+typedef struct
+{
+    sortBlockMoveEntry_t *buffer;
+    unsigned long long buffer_index;
+    int fd;
+    unsigned int file_is_open;
+    unsigned int file_is_empty; /* No More Positions in this file */
+
+    /* Number of positions in the current block. 
+    */
+    unsigned long long num_elements_in_block; 
+
+    char file_name[1024];
+} mergeMoveBlock_t;
 
 /* This structure is used for ply position files.
 */
@@ -237,6 +285,9 @@ typedef struct
   sortBlockEntry_t *sort_block_position;
   unsigned long long max_sortblock_positions;
 
+  sortBlockMoveEntry_t *sort_block_move;
+  unsigned long long max_sortblock_moves;
+
   /* Number of plies with positions.
   */
   unsigned int ply_depth;
@@ -263,7 +314,8 @@ typedef struct
   unsigned long long positions_processed;
 
   /* Number of blocks that have been sorted and stored in a file.
-  ** This counter is the number of temporary files that have been created.
+  ** This counter is the number of temporary files that have been created
+  ** to store positions.
   */
   unsigned int sort_blocks_created;
 

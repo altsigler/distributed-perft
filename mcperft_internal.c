@@ -151,11 +151,102 @@ static unsigned long long currentPositionReadIndex;
 static unsigned long long lastPositionReadIndex;
 
 
-/* File descriptors for position and move files. 
-** The value of -1 means that the files are closed.
+/* File descriptors for position file. 
+** The value of -1 means that the file is closed.
 */
 static int positionFd = -1;
-static int moveFd = -1;
+
+/******************************************************************************
+** Open buffered file for writing.
+**
+******************************************************************************/
+static bufferedFile_t bufferedFileWriteStart (const char *file_name, 
+                                    const unsigned long long buffer_size_in_bytes,
+                                    const unsigned long long element_size_in_bytes)
+{
+  bufferedFile_t bf = {};
+
+  bf.buffer_size_in_bytes = buffer_size_in_bytes;
+  bf.buffer = malloc (bf.buffer_size_in_bytes);
+  assert (bf.buffer);
+
+  bf.entry_size_in_bytes = element_size_in_bytes;
+  bf.max_entries_in_buffer = bf.buffer_size_in_bytes / bf.entry_size_in_bytes;
+
+  bf.fd = open (file_name, O_WRONLY | O_APPEND | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+  if (bf.fd < 0)
+  {
+    perror ("create buffered file");
+    exit (-1);
+  }
+
+  return bf;
+}
+/******************************************************************************
+** Write one element to the file. 
+** The file is accessed only when the buffer is full.
+**
+******************************************************************************/
+static void bufferedFileWrite  (bufferedFile_t *const bf,
+                                const void *const entry)
+{
+  memcpy (&bf->buffer[bf->num_entries_in_buffer * bf->entry_size_in_bytes],
+            entry, bf->entry_size_in_bytes);
+  bf->num_entries_in_buffer++;
+
+  if (bf->num_entries_in_buffer == bf->max_entries_in_buffer)
+  {
+    ssize_t bytes_written;
+    ssize_t total_bytes_written = 0;
+    size_t write_request_size = bf->num_entries_in_buffer * bf->entry_size_in_bytes;
+    const unsigned char *write_buffer = bf->buffer;
+
+    do 
+    {
+      bytes_written = write (bf->fd, &write_buffer[total_bytes_written], write_request_size);
+      if (bytes_written < 0)
+      {
+        perror ("Write to buffered file");
+        exit (-1);
+      }
+      total_bytes_written += bytes_written;
+      write_request_size -= (size_t) bytes_written;
+    } while (write_request_size);
+    
+    bf->num_entries_in_buffer = 0;
+  }
+
+}
+/******************************************************************************
+** Write all buffered elements to the file and close the file.
+**
+******************************************************************************/
+static void bufferedFileFinish  (bufferedFile_t *const bf)
+{
+  if (0 != bf->num_entries_in_buffer)
+  {
+    ssize_t bytes_written;
+    ssize_t total_bytes_written = 0;
+    size_t write_request_size = bf->num_entries_in_buffer * bf->entry_size_in_bytes;
+    const unsigned char *write_buffer = bf->buffer;
+
+    do
+    {
+      bytes_written = write (bf->fd, &write_buffer[total_bytes_written], write_request_size);
+      if (bytes_written < 0)
+      {
+        perror ("Write to buffered file");
+        exit (-1);
+      }
+      total_bytes_written += bytes_written;
+      write_request_size -= (size_t) bytes_written;
+    } while (write_request_size);
+
+    bf->num_entries_in_buffer = 0;
+  }
+  close (bf->fd);
+}
+
 
 /******************************************************************************
 ** Start new position file for the specified ply.
@@ -504,76 +595,6 @@ static void plyPositionFileFinish (void)
 }
 
 /******************************************************************************
-** Start new move file for the specified ply.
-** The ply numbers start with 0 and go up.
-**
-** The function opens the ply move file. If file already exists then 
-** it is deleted. The file is opened in write-only mode.
-**
-** This move file is written in random locations, so must be placed
-** on a solid state drive as opposed to HDD. 
-******************************************************************************/
-static void plyMoveFileStart (const unsigned int ply,
-                              const unsigned long long num_entries)
-{
-  char move_file_name[1024];
-
-  if (moveFd != -1)
-  {
-    printf ("ERROR: Ply Move File is already open.\n");
-    exit (-1);
-  }
-  sprintf (move_file_name, "%s%u_moves", PLY_FILE_PREFIX, ply);
-  moveFd = open (move_file_name, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
-  if (moveFd < 0)
-  {
-    perror ("create ply moves file");
-    exit (-1);
-  }
-
-  if (0 != ftruncate (moveFd, (__off_t) (num_entries * sizeof(moveEntry_t))))
-  {
-    perror ("truncate - move file");
-    exit (-1);
-  }
-}
-
-/******************************************************************************
-** Add new entry to the ply moves file.
-** The new entries are buffered until the buffer is full. Once the buffer
-** is full the entries are written to file.
-**
-******************************************************************************/
-static void plyMoveFileWrite (const moveEntry_t *const move,
-                              const unsigned long long entry_index)
-{
-  if (sizeof(moveEntry_t) != pwrite (moveFd, move, 
-         sizeof(moveEntry_t), (__off_t) (entry_index * sizeof(moveEntry_t))))
-  {
-    perror ("Write to ply moves file");
-    exit (-1);
-  }
-}
-
-/******************************************************************************
-** Close the move file.
-**
-******************************************************************************/
-static void plyMoveFileFinish (void)
-{
-  if (moveFd < 0)
-  {
-    printf ("ERROR: Attempting to close move file when it is already closed.\n");
-    exit (-1);
-  }
-
-  close (moveFd);
-  moveFd = -1;
-}
-
-
-
-/******************************************************************************
 ** Create the new position database directory. 
 **
 ** Return Values:
@@ -733,6 +754,23 @@ static int positionCompare (const void *const p1,
   return 0;
 
 }
+
+/******************************************************************************
+** Compare two moves.
+** We are guaranteed that move entries don't have duplicates.
+******************************************************************************/
+static int moveCompare (const void *const p1,
+                            const void *const p2)
+{
+  const sortBlockMoveEntry_t *const move1 = p1;
+  const sortBlockMoveEntry_t *const move2 = p2;
+
+  if (move1->move_index < move2->move_index)
+                                        return -1;
+
+  return 1;
+}
+
 
 /******************************************************************************
 ** Parallel sort.
@@ -943,6 +981,24 @@ static void positionsTempFileCreate (void *const sort_block,
 }
 
 /******************************************************************************
+** Sort the move entries and create a temporary file.
+**
+**
+******************************************************************************/
+static void movesTempFileCreate (void *const sort_block,
+                                     const unsigned int sort_block_number,
+                                     const unsigned long long sort_block_entries)
+{
+  char file_name[1024];
+
+  sprintf (file_name, "%s%u", SORT_MOVE_BLOCK_PREFIX, sort_block_number);
+
+  parallelSort (file_name, sort_block, sort_block_entries,
+                        sizeof (sortBlockMoveEntry_t), moveCompare);
+
+}
+
+/******************************************************************************
 ** Create all positions that can be reached from the current position.
 **
 **
@@ -972,6 +1028,101 @@ static void nextPositionsCreate (const brd_t *const brd,
 
     ndb_entry->pad = 0;
   }
+}
+
+/******************************************************************************
+** Find the next entry in the specified sorted positions file.
+** If the third parameter is 0 then the entry remains in the file. 
+** If the third parameter is not zero then the entry is removed.
+** 
+** To improve performance the entries are read in groups from the file
+** into memory, so most calls to this function don't access the file.
+**
+** Return Values:
+** 0 - No entries in the specified sort block.
+**   - Pointer to the next entry. The pointer is valid until next call to 
+**     this function for the specified block.
+******************************************************************************/
+static sortBlockMoveEntry_t *mergeMoveBlockNextGet (mergeMoveBlock_t *const merge_block,
+                                            const unsigned int block_number,
+                                            const unsigned int remove_entry)
+{
+  constexpr unsigned int buffered_elements = 100'000;
+
+  mergeMoveBlock_t *const merge_entry = &merge_block[block_number];
+
+  if (0 != merge_entry->file_is_empty)
+  {
+    return 0;
+  }
+
+  /* If the file hasn't been open yet then open it now.
+  */
+  if (0 == merge_entry->file_is_open)
+  {
+    merge_entry->file_is_open = 1;
+    merge_entry->buffer = malloc (buffered_elements * sizeof(sortBlockMoveEntry_t));
+    assert (merge_entry->buffer);
+
+    merge_entry->buffer_index = 0;
+
+    sprintf (merge_entry->file_name, "%s%u", SORT_MOVE_BLOCK_PREFIX, block_number);
+
+    merge_entry->fd = open (merge_entry->file_name, O_RDONLY);
+    if (merge_entry->fd < 0)
+    {
+      perror ("open temporary move file");
+      exit (-1);
+    }
+  }
+
+  /* If we have read all elements in the current block then get the next block.
+  ** Note that when the file has just been opened and nothing has been read then 
+  ** buffer_index and num_elements_in_block are both 0, which triggers the 
+  ** next read from file.
+  */
+  if (merge_entry->buffer_index == merge_entry->num_elements_in_block)
+  {
+    merge_entry->buffer_index = 0;
+
+    unsigned long long total_bytes_read = 0;
+    const unsigned long long read_request_size = buffered_elements * sizeof(sortBlockMoveEntry_t);
+    unsigned char *buffer = (unsigned char *) merge_entry->buffer;
+
+    do
+    {
+      const ssize_t bytes_read = read (merge_entry->fd, &buffer[total_bytes_read], read_request_size);
+      if (bytes_read < 0)
+      {
+        perror ("Read move merge buffer");
+        exit (-1);
+      }
+      if (bytes_read == 0)
+      { 
+        break;
+      }
+      total_bytes_read += (unsigned long long) bytes_read;
+
+    } while (total_bytes_read < read_request_size);
+    if (0 == total_bytes_read)
+    {
+      merge_entry->file_is_empty = 1;
+      free (merge_entry->buffer);
+      close (merge_entry->fd);
+      unlink (merge_entry->file_name);
+      return 0;
+    }
+    merge_entry->num_elements_in_block = total_bytes_read / sizeof(sortBlockMoveEntry_t);
+  }
+
+  sortBlockMoveEntry_t *entry = &merge_entry->buffer[merge_entry->buffer_index];
+
+  if (remove_entry)
+  {
+    merge_entry->buffer_index++;
+  }
+
+  return entry;
 }
 
 /******************************************************************************
@@ -1163,9 +1314,11 @@ static void * brd_db_generate (void *arg)
   gen_status->processed_new_ply_positions = 0;
   gen_status->ply_processing_phase = 3;  
 
-  /* Create the file for storing moves for this ply.
+  /* We are resetting the sort block index to prepare for using the 
+  ** sort block in the move file creation.
   */
-  plyMoveFileStart (ply_number, ply->num_boards_in_ply);
+  sort_block_index = 0;
+  unsigned int move_sort_blocks_created = 0;
 
   /* Open position file for the next ply.
   */
@@ -1247,9 +1400,21 @@ static void * brd_db_generate (void *arg)
     /* Update the move file for the current ply to point to the 
     ** newly added position.
     */
-    const moveEntry_t next_move = moveIndexToEntry (ply_position_index++);
+    unsigned long long next_move_index = ply_position_index++;
+    board_db->sort_block_move[sort_block_index].position_index = next_move_index;
+    board_db->sort_block_move[sort_block_index].move_index = moveEntryToIndex(min_position.move_entry);
+    sort_block_index++;
 
-    plyMoveFileWrite (&next_move, moveEntryToIndex(min_position.move_entry));
+    /* If the sort block is full then sort it and write it to a temporaty file.
+    */
+    if (sort_block_index == board_db->max_sortblock_moves)
+    {
+      movesTempFileCreate (board_db->sort_block, 
+                                    move_sort_blocks_created, sort_block_index);
+      sort_block_index = 0;
+      move_sort_blocks_created++;
+    }
+
     board_db->ply_table[ply_number].stats.total_moves_added++;
 
     /* We need to read all duplicate positions and set the moves for those 
@@ -1270,7 +1435,20 @@ static void * brd_db_generate (void *arg)
       {
         /* Create move entry for this position.
         */
-        plyMoveFileWrite (&next_move, moveEntryToIndex(next_block->move_entry));
+        board_db->sort_block_move[sort_block_index].position_index = next_move_index;
+        board_db->sort_block_move[sort_block_index].move_index = moveEntryToIndex(next_block->move_entry);
+        sort_block_index++;
+
+        /* If the sort block is full then sort it and write it to a temporaty file.
+        */
+        if (sort_block_index == board_db->max_sortblock_moves)
+        {
+          movesTempFileCreate (board_db->sort_block, 
+                                    move_sort_blocks_created, sort_block_index);
+          sort_block_index = 0;
+          move_sort_blocks_created++;
+        }
+
         board_db->ply_table[ply_number].stats.total_moves_added++;
         ply->stats.duplicate_positions_detected++;
 
@@ -1283,14 +1461,91 @@ static void * brd_db_generate (void *arg)
 
   } while (1);
 
-
-  /* Close the ply move file.
+  /* Write the last sort block to file.
   */
-  plyMoveFileFinish ();
+  if (0 != sort_block_index)
+  {
+    movesTempFileCreate (board_db->sort_block, 
+                                  move_sort_blocks_created, sort_block_index);
+    move_sort_blocks_created++;
+  }
 
   /* Close the ply position file.
   */
   plyPositionFileFinish ();
+
+  /* Create the file for storing moves for this ply.
+  */
+  char move_file_name[1024];
+  sprintf (move_file_name, "%s%u_moves", PLY_FILE_PREFIX, ply_number);
+  bufferedFile_t move_file = bufferedFileWriteStart (move_file_name,
+                                                    16'000'000'000,
+                                                    sizeof (moveEntry_t));
+
+  /* Merge all sorted move blocks into a single move database.
+  **
+  ** The code opens all block files at the same time. 
+  ** For each block file allocate a buffer so that we don't 
+  ** need to do a read() call for each entry. 
+  */
+  mergeMoveBlock_t move_sort_table[move_sort_blocks_created] = {};
+
+  for (unsigned long long move_count = 0; 
+            move_count < board_db->ply_table[ply_number].stats.total_moves_added;
+            move_count++)
+  {
+    sortBlockMoveEntry_t min_move;
+    memset (&min_move, 0xff, sizeof (sortBlockMoveEntry_t));
+    unsigned int min_move_stream;
+
+    for (unsigned int i = 0; i < move_sort_blocks_created; i++)
+    {
+      /* Get pointer to next move from specified block without removing
+      ** the move from the block.
+      ** Note that some of the blocks may become empty before other blocks,
+      ** so we need to handle that.
+      */
+      const sortBlockMoveEntry_t *const next_block = mergeMoveBlockNextGet (move_sort_table, i, 0);
+
+      if (0 != next_block)
+      {
+        if (0 < moveCompare(&min_move, next_block))
+        {
+          memcpy (&min_move, next_block,
+                                    sizeof (sortBlockMoveEntry_t));
+          min_move_stream = i;
+        }
+      }
+    }
+
+    /* Remove the smallest entry from the sorted block where it was found.
+    */
+    if (0 == mergeMoveBlockNextGet (move_sort_table, min_move_stream, 1))
+    {
+      printf ("ERROR: Unexpected end of move temp file data stream.\n");
+      exit (-1);
+    }
+
+    /* Create the move entry for the smallest move.
+    */
+    const moveEntry_t move_entry = moveIndexToEntry(min_move.position_index);
+
+    bufferedFileWrite  (&move_file, &move_entry);
+
+    /* When we are processing the last move, call the mergeMobeBlockNextGet() one last time 
+    ** to delete the move sort block.
+    */
+    if (move_count == (board_db->ply_table[ply_number].stats.total_moves_added - 1))
+    {
+      (void) mergeMoveBlockNextGet (move_sort_table, min_move_stream, 1);
+    }
+  }
+
+
+  /* Close the ply move file.
+  */
+  bufferedFileFinish  (&move_file);
+
 
 
   chessStat_t *const ply_stats = &board_db->ply_table[ply_number].stats;
@@ -1383,6 +1638,9 @@ void brdDbGenerate(
   board_db.sort_block = malloc (sort_block_size);
   board_db.sort_block_position = board_db.sort_block;
   assert (board_db.sort_block);
+
+  board_db.sort_block_move = board_db.sort_block;
+  board_db.max_sortblock_moves = sort_block_size / sizeof(sortBlockMoveEntry_t);
 
   /* Start the board generator thread for each ply.
   ** The code exits when there are no more moves to be 
