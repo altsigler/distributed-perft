@@ -29,6 +29,7 @@
 ** The sort block files are temporary, and are deleted after the ply position
 ** file is generated.
 */
-#define MAX_SORT_BLOCK_SIZE (20LLU*1024LLU*1024LLU*1024LLU)
+//#define MAX_SORT_BLOCK_SIZE (20LLU*1024LLU*1024LLU*1024LLU)
+#define MAX_SORT_BLOCK_SIZE (40LLU*1024LLU*1024LLU*1024LLU)
 
 #endif /* MCPERFT_H_INCLUDED */

@@ -195,10 +195,13 @@ typedef struct
     unsigned long long entry_size_in_bytes;
     unsigned long long max_entries_in_buffer;
 
+
     unsigned long long num_entries_in_buffer; 
 
 
     int fd;
+    unsigned long file_block_size;
+    unsigned long long total_bytes_written_in_file;
 
 } bufferedFile_t;
 
@@ -211,8 +214,11 @@ typedef struct
     sortBlockEntry_t *buffer;
     unsigned long long buffer_index;
     int fd;
+    unsigned long file_block_size;
     unsigned int file_is_open;
     unsigned int file_is_empty; /* No More Positions in this file */
+
+    unsigned long long max_elements_in_block; 
 
     /* Number of positions in the current block. 
     */

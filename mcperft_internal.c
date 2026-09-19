@@ -8,22 +8,112 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include <sys/mman.h>
 #include <pthread.h>
 #include <assert.h>
 #include <sched.h>
 #include <stdbool.h>
 #include <unistd.h>
 #include <errno.h>
-#include <sys/stat.h>
 #include <fcntl.h>
 #include <dirent.h>
+#include <sys/stat.h>
+#include <sys/mman.h>
 #include <sys/sysinfo.h>
+#include <sys/statvfs.h>
 
 #include "bytebrd_api.h"
 #include "onecore_api.h"
 #include "mcperft_defs.h"
 #include "mcperft.h"
+
+
+#include <stdio.h>
+
+#if 0 // HACK
+// Example structure to simulate your large structure dataset
+typedef struct {
+    int key; 
+    char data[256]; // Represents a large payload
+} Record;
+
+// Helper function to swap two structures
+void swap(Record *a, Record *b) {
+    Record temp = *a;
+    *a = *b;
+    *b = temp;
+}
+
+// Strictly iterative sift-down (max-heapify) function
+void siftDown(Record arr[], int start, int end) {
+    int root = start;
+
+    while (root * 2 + 1 <= end) {      // While the root has at least one child
+        int child = root * 2 + 1;      // Left child
+        int swap_idx = root;           // Keeps track of the largest element
+
+        // If left child is greater than root
+        if (arr[swap_idx].key < arr[child].key) {
+            swap_idx = child;
+        }
+        
+        // If right child exists and is greater than the largest so far
+        if (child + 1 <= end && arr[swap_idx].key < arr[child + 1].key) {
+            swap_idx = child + 1;
+        }
+
+        // If the root is already the largest, the heap property is restored
+        if (swap_idx == root) {
+            return;
+        } else {
+            swap(&arr[root], &arr[swap_idx]);
+            root = swap_idx;           // Move down to the swapped child to repeat
+        }
+    }
+}
+
+// Main iterative Heapsort function
+void heapSort(Record arr[], int n) {
+    // Step 1: Build the heap (heapify phase)
+    // Start from the last parent node and sift down to the root
+    for (int start = (n - 2) / 2; start >= 0; start--) {
+        siftDown(arr, start, n - 1);
+    }
+
+    // Step 2: Extract elements from the heap one by one (sorting phase)
+    for (int end = n - 1; end > 0; end--) {
+        // Move current root (maximum element) to the end of the unsorted part
+        swap(&arr[0], &arr[end]);
+        
+        // Call siftDown on the reduced heap to restore max-heap property
+        siftDown(arr, 0, end - 1);
+    }
+}
+
+// Driver program to test the sorting
+int main() {
+    Record arr[] = {
+        {40, "Data A"},
+        {10, "Data B"},
+        {30, "Data C"},
+        {15, "Data D"},
+        {50, "Data E"},
+        {22, "Data F"}
+    };
+    int n = sizeof(arr) / sizeof(arr[0]);
+
+    printf("Original array keys:\n");
+    for (int i = 0; i < n; i++) printf("%d ", arr[i].key);
+    printf("\n");
+
+    heapSort(arr, n);
+
+    printf("\nSorted array keys:\n");
+    for (int i = 0; i < n; i++) printf("%d ", arr[i].key);
+    printf("\n");
+
+    return 0;
+}
+#endif // HACK
 
 /*********************************************************************
 ** Display status and statistic for specified ply number.
@@ -140,7 +230,8 @@ unsigned long long sysUpTimeMillisecondsGet(void)
 /* To reduce file I/O we buffer positions in memory.
 ** When the buffer fills up, the postions are written to the file.
 */
-constexpr unsigned int positionBufferMaxEntries = 1'000'000;
+//constexpr unsigned int positionBufferMaxEntries = 1'000'000;
+constexpr unsigned int positionBufferMaxEntries = 2'000'000;
 static plyPositionEntry_t positionBuffer[positionBufferMaxEntries];
 
 static unsigned long long numEntriesInPositionFileBuffer;
@@ -166,12 +257,13 @@ static bufferedFile_t bufferedFileWriteStart (const char *file_name,
 {
   bufferedFile_t bf = {};
 
-  bf.buffer_size_in_bytes = buffer_size_in_bytes;
-  bf.buffer = malloc (bf.buffer_size_in_bytes);
-  assert (bf.buffer);
-
-  bf.entry_size_in_bytes = element_size_in_bytes;
-  bf.max_entries_in_buffer = bf.buffer_size_in_bytes / bf.entry_size_in_bytes;
+  /* In the future we may want to enable direct IO to avoid
+  ** double buffering files. The rest of the code is enabled for that.
+  ** On systems with plenty of DRAM and idle cores using O_DIRECT actually slows down 
+  ** the program because waiting for disk takes longer than simply allowing an idle core 
+  ** to asynchronously update the file on disk.
+  */
+  //  bf.fd = open (file_name, O_DIRECT | O_WRONLY | O_APPEND | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
 
   bf.fd = open (file_name, O_WRONLY | O_APPEND | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
   if (bf.fd < 0)
@@ -179,6 +271,31 @@ static bufferedFile_t bufferedFileWriteStart (const char *file_name,
     perror ("create buffered file");
     exit (-1);
   }
+
+  struct statvfs stat;
+  if (0 != fstatvfs (bf.fd, &stat))
+  {
+    perror ("fstatvfs of buffer file");
+    exit (-1);
+  }
+  bf.file_block_size = stat.f_bsize;
+
+  /* Make sure that the buffer size is aligned on block size and element size.
+  */
+  const unsigned long long align_size = bf.file_block_size * element_size_in_bytes;
+
+  bf.buffer_size_in_bytes = buffer_size_in_bytes;
+  if (bf.buffer_size_in_bytes % align_size)
+  {
+    bf.buffer_size_in_bytes = ((bf.buffer_size_in_bytes / align_size) + 1) * align_size;
+  }
+
+  bf.buffer = aligned_alloc (bf.file_block_size, bf.buffer_size_in_bytes);
+  assert (bf.buffer);
+
+  bf.entry_size_in_bytes = element_size_in_bytes;
+  bf.max_entries_in_buffer = bf.buffer_size_in_bytes / bf.entry_size_in_bytes;
+
 
   return bf;
 }
@@ -197,7 +314,7 @@ static void bufferedFileWrite  (bufferedFile_t *const bf,
   if (bf->num_entries_in_buffer == bf->max_entries_in_buffer)
   {
     ssize_t bytes_written;
-    ssize_t total_bytes_written = 0;
+    unsigned long long total_bytes_written = 0;
     size_t write_request_size = bf->num_entries_in_buffer * bf->entry_size_in_bytes;
     const unsigned char *write_buffer = bf->buffer;
 
@@ -209,10 +326,11 @@ static void bufferedFileWrite  (bufferedFile_t *const bf,
         perror ("Write to buffered file");
         exit (-1);
       }
-      total_bytes_written += bytes_written;
+      total_bytes_written += (unsigned long long) bytes_written;
       write_request_size -= (size_t) bytes_written;
     } while (write_request_size);
-    
+
+    bf->total_bytes_written_in_file += total_bytes_written;
     bf->num_entries_in_buffer = 0;
   }
 
@@ -228,7 +346,23 @@ static void bufferedFileFinish  (bufferedFile_t *const bf)
     ssize_t bytes_written;
     ssize_t total_bytes_written = 0;
     size_t write_request_size = bf->num_entries_in_buffer * bf->entry_size_in_bytes;
-    const unsigned char *write_buffer = bf->buffer;
+    const unsigned char *const write_buffer = bf->buffer;
+
+    /* The last write may not be aligned on block boundary, so we may need to 
+    ** truncate the file.
+    */
+    unsigned int truncate_needed = 0;
+    const unsigned long long real_write_size = (unsigned long long) write_request_size;
+    if (write_request_size % bf->file_block_size)
+    {
+      truncate_needed = 1;
+      write_request_size = ((write_request_size / bf->file_block_size) + 1) * bf->file_block_size;
+
+      /* Make sure that the tail end of the buffer is initialized.
+      ** This avoids accesses to uninitialized memory.
+      */
+      memset (&bf->buffer[real_write_size], 0, (write_request_size - real_write_size));
+    }
 
     do
     {
@@ -242,7 +376,14 @@ static void bufferedFileFinish  (bufferedFile_t *const bf)
       write_request_size -= (size_t) bytes_written;
     } while (write_request_size);
 
-    bf->num_entries_in_buffer = 0;
+    if (truncate_needed)
+    {
+      if (0 != ftruncate (bf->fd, (__off_t) (bf->total_bytes_written_in_file + real_write_size)))
+      {
+        perror ("ftruncate - buffered file");
+        exit (-1);
+      }
+    }
   }
   close (bf->fd);
 }
@@ -895,9 +1036,11 @@ static void parallelSort (const char *const file_name,
   /* To reduce the number of I/O operations we store data in a buffer.
   ** When the buffer fills up then we write it to disk.
   */
-  constexpr unsigned int max_elements_in_buffer = 100000;
-  unsigned char output_buffer [max_elements_in_buffer * element_size];
+  constexpr unsigned int max_elements_in_buffer = 1'000'000;
+  unsigned char *const output_buffer = malloc (max_elements_in_buffer * element_size);
   unsigned int num_elements_in_buffer = 0;
+
+  assert (output_buffer);
 
   for (unsigned long long i = 0; i < num_elements; i++)
   {
@@ -957,6 +1100,8 @@ static void parallelSort (const char *const file_name,
       num_elements_in_buffer = 0;
     }
   }
+
+  free (output_buffer);
 
   close (fd);
 
@@ -1142,7 +1287,7 @@ static sortBlockEntry_t *mergeBlockNextGet (mergeBlock_t *const merge_block,
                                             const unsigned int block_number,
                                             const unsigned int remove_entry)
 {
-  constexpr unsigned int buffered_elements = 100'000;
+  constexpr unsigned long long buffer_size_in_bytes = 80'000'000;
 
   mergeBlock_t *const merge_entry = &merge_block[block_number];
 
@@ -1156,19 +1301,39 @@ static sortBlockEntry_t *mergeBlockNextGet (mergeBlock_t *const merge_block,
   if (0 == merge_entry->file_is_open)
   {
     merge_entry->file_is_open = 1;
-    merge_entry->buffer = malloc (buffered_elements * sizeof(sortBlockEntry_t));
-    assert (merge_entry->buffer);
 
     merge_entry->buffer_index = 0;
 
     sprintf (merge_entry->file_name, "%s%u", SORT_BLOCK_PREFIX, block_number);
 
-    merge_entry->fd = open (merge_entry->file_name, O_RDONLY);
+    /* Although we are only reading from this file, we are also reducing the 
+    ** file size as the data is read, so the file needs to be opened in RDWR mode.
+    */
+    merge_entry->fd = open (merge_entry->file_name, O_RDWR);
     if (merge_entry->fd < 0)
     {
       perror ("open temporary position file");
       exit (-1);
     }
+
+    struct statvfs stat;
+    if (0 != fstatvfs (merge_entry->fd, &stat))
+    {
+      perror ("fstatvfs of position merge file");
+      exit (-1);
+    }
+    merge_entry->file_block_size = stat.f_bsize;
+
+    const unsigned long long align_boundary = merge_entry->file_block_size * sizeof(sortBlockEntry_t);
+    unsigned long long aligned_size = buffer_size_in_bytes;
+    if (aligned_size % align_boundary)
+    {
+      aligned_size = ((aligned_size / align_boundary) + 1) * align_boundary;
+    } 
+    merge_entry->max_elements_in_block = aligned_size / sizeof(sortBlockEntry_t);
+
+    merge_entry->buffer = malloc (merge_entry->max_elements_in_block * sizeof(sortBlockEntry_t));
+    assert (merge_entry->buffer);
   }
 
   /* If we have read all elements in the current block then get the next block.
@@ -1181,7 +1346,7 @@ static sortBlockEntry_t *mergeBlockNextGet (mergeBlock_t *const merge_block,
     merge_entry->buffer_index = 0;
 
     unsigned long long total_bytes_read = 0;
-    const unsigned long long read_request_size = buffered_elements * sizeof(sortBlockEntry_t);
+    const unsigned long long read_request_size = merge_entry->max_elements_in_block * sizeof(sortBlockEntry_t);
     unsigned char *buffer = (unsigned char *) merge_entry->buffer;
 
     do
@@ -1208,6 +1373,35 @@ static sortBlockEntry_t *mergeBlockNextGet (mergeBlock_t *const merge_block,
       return 0;
     }
     merge_entry->num_elements_in_block = total_bytes_read / sizeof(sortBlockEntry_t);
+
+    /* To conserve disk space we need to reduce the file size to remove all the 
+    ** elements that we have already read.
+    ** This is only done for complete blocks.
+    */
+    if (merge_entry->num_elements_in_block == merge_entry->max_elements_in_block)
+    {
+      if (0 != fallocate (merge_entry->fd, FALLOC_FL_COLLAPSE_RANGE, 0, (__off_t) total_bytes_read))
+      {
+        perror ("fallocate - Reduce temporary position file size.");
+        exit (-1);
+      }
+
+      /* Reset the read pointer to the start of file.
+      */
+      if (0 != lseek (merge_entry->fd, 0, SEEK_SET))
+      {
+        perror ("lseek - Reset temporary position file read pointer.");
+        exit (-1);
+      }
+
+      /* Tell the kernel to start reading the next block into cache.
+      */
+      if (0 != posix_fadvise (merge_entry->fd, 0, (off_t) total_bytes_read, POSIX_FADV_WILLNEED))
+      {
+        perror ("posix_fadvise - Temporary Position File");
+        exit (-1);
+      }
+    }
   }
 
   sortBlockEntry_t *entry = &merge_entry->buffer[merge_entry->buffer_index];
@@ -1632,10 +1826,13 @@ void brdDbGenerate(
   const unsigned long long sort_block_size = ((total_ram / 2) < MAX_SORT_BLOCK_SIZE)?
                                 total_ram / 2:
                                 MAX_SORT_BLOCK_SIZE;
+  /* Make sure that the sort block size is multiple of 1MB
+  */
+  assert (0 == (sort_block_size & 0x3fff'ffff));
 
   board_db.max_sortblock_positions = sort_block_size / sizeof(sortBlockEntry_t);
 
-  board_db.sort_block = malloc (sort_block_size);
+  board_db.sort_block = aligned_alloc (0x4000'0000, sort_block_size);
   board_db.sort_block_position = board_db.sort_block;
   assert (board_db.sort_block);
 
