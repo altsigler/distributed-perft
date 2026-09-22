@@ -14,7 +14,6 @@
 #include "bytebrd_api.h"
 #include "mcperft_api.h"
 #include "mcperft_defs.h"
-#include "mcperft.h"
 
 /******************************************************************************
 ** Initialize the application.

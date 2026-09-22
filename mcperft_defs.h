@@ -7,7 +7,6 @@
 #ifndef MCPERFT_DEFS_H_INCLUDED
 #define MCPERFT_DEFS_H_INCLUDED
 
-#include "mcperft.h"
 #include "mcperft_api.h"
 
 /* Maximum number of plies in the board database.
@@ -211,14 +210,20 @@ typedef struct
 */
 typedef struct
 {
-    sortBlockEntry_t *buffer;
+    unsigned char *buffer;
     unsigned long long buffer_index;
     int fd;
-    unsigned long file_block_size;
-    unsigned int file_is_open;
     unsigned int file_is_empty; /* No More Positions in this file */
 
+    unsigned long long element_size;
     unsigned long long max_elements_in_block; 
+
+    /* When this flag is set to 1, the merge block file size is reduced as the 
+    ** data is read from the merge block. 
+    ** This slows down the file read operation and should only be used to 
+    ** when needed to conserve disk space.
+    */
+    unsigned int trim_needed;
 
     /* Number of positions in the current block. 
     */
@@ -237,6 +242,7 @@ typedef struct
     int fd;
     unsigned int file_is_open;
     unsigned int file_is_empty; /* No More Positions in this file */
+
 
     /* Number of positions in the current block. 
     */
@@ -294,6 +300,9 @@ typedef struct
   sortBlockMoveEntry_t *sort_block_move;
   unsigned long long max_sortblock_moves;
 
+  void *read_sort_block; // Memory shared by all block files
+  unsigned long long read_sort_block_size;  // In Bytes
+
   /* Number of plies with positions.
   */
   unsigned int ply_depth;
@@ -326,21 +335,16 @@ typedef struct
   unsigned int sort_blocks_created;
 
   /* There are three phases while creating positions for the ply.
-  ** 1 - Generating next positions.
-  ** 2 - Sorting positions.
-  ** 3 - Detecting Duplicate Positions.
-  **
-  ** The phases 1 and 2 may repeat several times depending on how many sort blocks 
-  ** are needed to process all ply positions.
-  **
-  ** Phase 3 is when all sort blocks are merged together into one ply_n_positions
-  ** file and ply_n_moves file is updated to remove references to duplicate positions.
+  ** 1 - Generating and Sorting next positions.
+  ** 2 - Detecting and Eliminating Duplicate Positions.
+  ** 3 - Generating the Move file.
   */
   unsigned int ply_processing_phase;
 
-
-  /* These counters refer to the number of positions processed in phase 3.
+  /* How many ply positions in the current ply. 
   */
+  unsigned long long total_ply_positions;
+
   /* How many total positions are in the new ply.
   */
   unsigned long long total_new_ply_positions;
@@ -348,6 +352,14 @@ typedef struct
   /* How many positions from total_new_ply_positions have been processed.
   */
   unsigned long long processed_new_ply_positions;
+
+  /* How many moves need to be created.
+  */
+  unsigned long long total_new_moves;
+
+  /* How many new moves have been processed.
+  */
+  unsigned long long processed_new_moves;
 } brdGenThreadStatus_t;
 
 /******************************************************************************

@@ -1,6 +1,6 @@
 #CC=gcc
-#CC=clang
-CC=icx
+CC=clang
+#CC=icx
 OPTFLAG=-O3
 CFLAG=-std=c23 -Wall -Wextra -Werror -Wshadow -Wconversion
 
@@ -67,10 +67,10 @@ zen4_build: clean2
 	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -static -o bin/mcperft-zen4 mcperft.c chlib.a 
 	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -static -o bin/scperft-zen4 scperft.c chlib.a
 
-mcperft_internal.o : mcperft_internal.c bytebrd_api.h mcperft_defs.h mcperft.h onecore_api.h brdutil_api.h
+mcperft_internal.o : mcperft_internal.c bytebrd_api.h mcperft_defs.h onecore_api.h brdutil_api.h
 	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -c mcperft_internal.c -o mcperft_internal.o 
 
-mcperft_api.o : mcperft_api.c bytebrd_api.h mcperft_api.h mcperft_defs.h mcperft.h
+mcperft_api.o : mcperft_api.c bytebrd_api.h mcperft_api.h mcperft_defs.h
 	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -c mcperft_api.c -o mcperft_api.o 
 
 brdutil.o : brdutil.c brdutil_api.h

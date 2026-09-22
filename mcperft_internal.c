@@ -24,96 +24,9 @@
 #include "bytebrd_api.h"
 #include "onecore_api.h"
 #include "mcperft_defs.h"
-#include "mcperft.h"
 
 
 #include <stdio.h>
-
-#if 0 // HACK
-// Example structure to simulate your large structure dataset
-typedef struct {
-    int key; 
-    char data[256]; // Represents a large payload
-} Record;
-
-// Helper function to swap two structures
-void swap(Record *a, Record *b) {
-    Record temp = *a;
-    *a = *b;
-    *b = temp;
-}
-
-// Strictly iterative sift-down (max-heapify) function
-void siftDown(Record arr[], int start, int end) {
-    int root = start;
-
-    while (root * 2 + 1 <= end) {      // While the root has at least one child
-        int child = root * 2 + 1;      // Left child
-        int swap_idx = root;           // Keeps track of the largest element
-
-        // If left child is greater than root
-        if (arr[swap_idx].key < arr[child].key) {
-            swap_idx = child;
-        }
-        
-        // If right child exists and is greater than the largest so far
-        if (child + 1 <= end && arr[swap_idx].key < arr[child + 1].key) {
-            swap_idx = child + 1;
-        }
-
-        // If the root is already the largest, the heap property is restored
-        if (swap_idx == root) {
-            return;
-        } else {
-            swap(&arr[root], &arr[swap_idx]);
-            root = swap_idx;           // Move down to the swapped child to repeat
-        }
-    }
-}
-
-// Main iterative Heapsort function
-void heapSort(Record arr[], int n) {
-    // Step 1: Build the heap (heapify phase)
-    // Start from the last parent node and sift down to the root
-    for (int start = (n - 2) / 2; start >= 0; start--) {
-        siftDown(arr, start, n - 1);
-    }
-
-    // Step 2: Extract elements from the heap one by one (sorting phase)
-    for (int end = n - 1; end > 0; end--) {
-        // Move current root (maximum element) to the end of the unsorted part
-        swap(&arr[0], &arr[end]);
-        
-        // Call siftDown on the reduced heap to restore max-heap property
-        siftDown(arr, 0, end - 1);
-    }
-}
-
-// Driver program to test the sorting
-int main() {
-    Record arr[] = {
-        {40, "Data A"},
-        {10, "Data B"},
-        {30, "Data C"},
-        {15, "Data D"},
-        {50, "Data E"},
-        {22, "Data F"}
-    };
-    int n = sizeof(arr) / sizeof(arr[0]);
-
-    printf("Original array keys:\n");
-    for (int i = 0; i < n; i++) printf("%d ", arr[i].key);
-    printf("\n");
-
-    heapSort(arr, n);
-
-    printf("\nSorted array keys:\n");
-    for (int i = 0; i < n; i++) printf("%d ", arr[i].key);
-    printf("\n");
-
-    return 0;
-}
-#endif // HACK
 
 /*********************************************************************
 ** Display status and statistic for specified ply number.
@@ -461,7 +374,7 @@ static void plyPositionFileReadOnlyStart (const unsigned int ply)
 ** These parameters are in global variables, so only one ply 
 ** position file can be opened at any one time for reading/updating or writing.
 ******************************************************************************/
-static void plyPositionFileReadUpdateStart (const unsigned int ply)
+static unsigned long long plyPositionFileReadUpdateStart (const unsigned int ply)
 {
   char pos_file_name[1024];
 
@@ -478,11 +391,23 @@ static void plyPositionFileReadUpdateStart (const unsigned int ply)
     exit (-1);
   }
 
+  struct stat statbuf;
+  if (0 > fstat (positionFd, &statbuf))
+  {
+    perror ("stat position file");
+    exit (-1);
+  }
+
+  const unsigned long long num_positions = (unsigned long long) statbuf.st_size / sizeof (plyPositionEntry_t);
+
+
   numEntriesInPositionFileBuffer = 0;
   currentPositionReadIndex = 0;
   lastPositionReadIndex = 0;
   positionFileBlockStart = 0;
   positionFileBlockSize = 0;
+
+  return num_positions;
 }
 
 /******************************************************************************
@@ -1036,7 +961,7 @@ static void parallelSort (const char *const file_name,
   /* To reduce the number of I/O operations we store data in a buffer.
   ** When the buffer fills up then we write it to disk.
   */
-  constexpr unsigned int max_elements_in_buffer = 1'000'000;
+  constexpr unsigned int max_elements_in_buffer = 10'000'000;
   unsigned char *const output_buffer = malloc (max_elements_in_buffer * element_size);
   unsigned int num_elements_in_buffer = 0;
 
@@ -1048,7 +973,7 @@ static void parallelSort (const char *const file_name,
     */
     unsigned char smallest_element[element_size];
     memset (smallest_element, 0xff, element_size);
-    unsigned int min_position_stream;
+    unsigned int min_position_stream = 0;
 
     for (unsigned int j = 0; j < num_sort_threads; j++)
     {
@@ -1083,8 +1008,8 @@ static void parallelSort (const char *const file_name,
     if ((num_elements_in_buffer == max_elements_in_buffer) ||
         (i == (num_elements - 1)))
     {
-      const unsigned int output_buffer_size = (unsigned int) (num_elements_in_buffer * element_size);
-      unsigned int total_bytes_written = 0;
+      const unsigned long long output_buffer_size = (unsigned long long) (num_elements_in_buffer * element_size);
+      unsigned long long total_bytes_written = 0;
       do 
       {
         const ssize_t bytes_written = write (fd, &output_buffer[total_bytes_written], 
@@ -1094,7 +1019,7 @@ static void parallelSort (const char *const file_name,
           perror ("writing sort block");
           exit (-1);
         }
-        total_bytes_written += bytes_written;
+        total_bytes_written += (unsigned long long) bytes_written;
       } while (total_bytes_written < output_buffer_size);
 
       num_elements_in_buffer = 0;
@@ -1271,6 +1196,73 @@ static sortBlockMoveEntry_t *mergeMoveBlockNextGet (mergeMoveBlock_t *const merg
 }
 
 /******************************************************************************
+** 
+** The caller passes the list and the number of merge blocks as well
+** as a pointer to the pre-allocated memory which is shared by all blocks. 
+**
+******************************************************************************/
+static void mergeBlockReadInit (mergeBlock_t *const merge_block,
+                                            const unsigned int num_blocks,
+                                            const unsigned long long element_size,
+                                            const char *const file_prefix,
+                                            const unsigned int trim_needed)
+{
+  memset (merge_block, 0, sizeof(mergeBlock_t) * num_blocks);
+
+  for (unsigned int i = 0; i < num_blocks; i++) 
+  {
+    mergeBlock_t *const merge_entry = &merge_block[i];
+
+    merge_entry->element_size = element_size;
+    merge_entry->buffer_index = 0;
+
+    sprintf (merge_entry->file_name, "%s%u", file_prefix, i);
+
+    if (trim_needed)
+    {
+      merge_entry->trim_needed = 1;
+
+      /* Although we are only reading from this file, we are also reducing the 
+      ** file size as the data is read, so the file needs to be opened in RDWR mode.
+      */
+      merge_entry->fd = open (merge_entry->file_name, O_RDWR);
+      if (merge_entry->fd < 0)
+      {
+        perror ("open merge file (O_RDWR)");
+        exit (-1);
+      }
+    } else
+    {
+      merge_entry->fd = open (merge_entry->file_name, O_RDONLY);
+      if (merge_entry->fd < 0)
+      {
+        perror ("open merge file (O_RDONLY)");
+        exit (-1);
+      }
+    }
+
+    struct statvfs stat;
+    if (0 != fstatvfs (merge_entry->fd, &stat))
+    {
+      perror ("fstatvfs of position merge file");
+      exit (-1);
+    }
+
+    constexpr unsigned long long buffer_size_in_bytes = 80'000'000;
+    const unsigned long long align_boundary = stat.f_bsize * element_size;
+    unsigned long long aligned_size = buffer_size_in_bytes;
+    if (aligned_size % align_boundary)
+    {
+      aligned_size = ((aligned_size / align_boundary) + 1) * align_boundary;
+    } 
+    merge_entry->max_elements_in_block = aligned_size / element_size;
+
+    merge_entry->buffer = malloc (merge_entry->max_elements_in_block * merge_entry->element_size);
+    assert (merge_entry->buffer);
+  }
+}
+
+/******************************************************************************
 ** Find the next entry in the specified sorted positions file.
 ** If the third parameter is 0 then the entry remains in the file. 
 ** If the third parameter is not zero then the entry is removed.
@@ -1283,57 +1275,15 @@ static sortBlockMoveEntry_t *mergeMoveBlockNextGet (mergeMoveBlock_t *const merg
 **   - Pointer to the next entry. The pointer is valid until next call to 
 **     this function for the specified block.
 ******************************************************************************/
-static sortBlockEntry_t *mergeBlockNextGet (mergeBlock_t *const merge_block,
+static void *mergeBlockNextGet (mergeBlock_t *const merge_block,
                                             const unsigned int block_number,
                                             const unsigned int remove_entry)
 {
-  constexpr unsigned long long buffer_size_in_bytes = 80'000'000;
-
   mergeBlock_t *const merge_entry = &merge_block[block_number];
 
   if (0 != merge_entry->file_is_empty)
   {
     return 0;
-  }
-
-  /* If the file hasn't been open yet then open it now.
-  */
-  if (0 == merge_entry->file_is_open)
-  {
-    merge_entry->file_is_open = 1;
-
-    merge_entry->buffer_index = 0;
-
-    sprintf (merge_entry->file_name, "%s%u", SORT_BLOCK_PREFIX, block_number);
-
-    /* Although we are only reading from this file, we are also reducing the 
-    ** file size as the data is read, so the file needs to be opened in RDWR mode.
-    */
-    merge_entry->fd = open (merge_entry->file_name, O_RDWR);
-    if (merge_entry->fd < 0)
-    {
-      perror ("open temporary position file");
-      exit (-1);
-    }
-
-    struct statvfs stat;
-    if (0 != fstatvfs (merge_entry->fd, &stat))
-    {
-      perror ("fstatvfs of position merge file");
-      exit (-1);
-    }
-    merge_entry->file_block_size = stat.f_bsize;
-
-    const unsigned long long align_boundary = merge_entry->file_block_size * sizeof(sortBlockEntry_t);
-    unsigned long long aligned_size = buffer_size_in_bytes;
-    if (aligned_size % align_boundary)
-    {
-      aligned_size = ((aligned_size / align_boundary) + 1) * align_boundary;
-    } 
-    merge_entry->max_elements_in_block = aligned_size / sizeof(sortBlockEntry_t);
-
-    merge_entry->buffer = malloc (merge_entry->max_elements_in_block * sizeof(sortBlockEntry_t));
-    assert (merge_entry->buffer);
   }
 
   /* If we have read all elements in the current block then get the next block.
@@ -1346,8 +1296,8 @@ static sortBlockEntry_t *mergeBlockNextGet (mergeBlock_t *const merge_block,
     merge_entry->buffer_index = 0;
 
     unsigned long long total_bytes_read = 0;
-    const unsigned long long read_request_size = merge_entry->max_elements_in_block * sizeof(sortBlockEntry_t);
-    unsigned char *buffer = (unsigned char *) merge_entry->buffer;
+    const unsigned long long read_request_size = merge_entry->max_elements_in_block * merge_entry->element_size;
+    unsigned char *buffer = merge_entry->buffer;
 
     do
     {
@@ -1367,18 +1317,19 @@ static sortBlockEntry_t *mergeBlockNextGet (mergeBlock_t *const merge_block,
     if (0 == total_bytes_read)
     {
       merge_entry->file_is_empty = 1;
-      free (merge_entry->buffer);
       close (merge_entry->fd);
       unlink (merge_entry->file_name);
+      free (merge_entry->buffer);
       return 0;
     }
-    merge_entry->num_elements_in_block = total_bytes_read / sizeof(sortBlockEntry_t);
+    merge_entry->num_elements_in_block = total_bytes_read / merge_entry->element_size;
 
     /* To conserve disk space we need to reduce the file size to remove all the 
     ** elements that we have already read.
     ** This is only done for complete blocks.
     */
-    if (merge_entry->num_elements_in_block == merge_entry->max_elements_in_block)
+    if ((0 != merge_entry->trim_needed) &&
+        (merge_entry->num_elements_in_block == merge_entry->max_elements_in_block))
     {
       if (0 != fallocate (merge_entry->fd, FALLOC_FL_COLLAPSE_RANGE, 0, (__off_t) total_bytes_read))
       {
@@ -1404,7 +1355,7 @@ static sortBlockEntry_t *mergeBlockNextGet (mergeBlock_t *const merge_block,
     }
   }
 
-  sortBlockEntry_t *entry = &merge_entry->buffer[merge_entry->buffer_index];
+  void *entry = merge_entry->buffer + (merge_entry->buffer_index * merge_entry->element_size);
 
   if (remove_entry)
   {
@@ -1441,7 +1392,7 @@ static void * brd_db_generate (void *arg)
   plyInfo_t *const ply = &board_db->ply_table[ply_number + 1];
 
 
-  plyPositionFileReadUpdateStart (ply_number);
+  gen_status->total_ply_positions = plyPositionFileReadUpdateStart (ply_number);
 
   while (0 != (position_entry = plyPositionFileNextGet ()))
   {
@@ -1481,7 +1432,6 @@ static void * brd_db_generate (void *arg)
     */
     if ((sort_block_index + MAX_BRD_MOVES) >= board_db->max_sortblock_positions)
     {
-      gen_status->ply_processing_phase = 2;  
       positionsTempFileCreate (board_db->sort_block, 
                                     gen_status->sort_blocks_created, sort_block_index);
       sort_block_index = 0;
@@ -1498,7 +1448,6 @@ static void * brd_db_generate (void *arg)
   */
   if (0 != sort_block_index)
   {
-    gen_status->ply_processing_phase = 2;  
     positionsTempFileCreate (board_db->sort_block, 
                                     gen_status->sort_blocks_created, sort_block_index);
     gen_status->sort_blocks_created++;
@@ -1506,7 +1455,6 @@ static void * brd_db_generate (void *arg)
 
   gen_status->total_new_ply_positions = ply->num_boards_in_ply;
   gen_status->processed_new_ply_positions = 0;
-  gen_status->ply_processing_phase = 3;  
 
   /* We are resetting the sort block index to prepare for using the 
   ** sort block in the move file creation.
@@ -1525,7 +1473,13 @@ static void * brd_db_generate (void *arg)
   ** For each block file allocate a buffer so that we don't 
   ** need to do a read() call for each entry. 
   */
-  mergeBlock_t sort_table[gen_status->sort_blocks_created] = {};
+  mergeBlock_t sort_table[gen_status->sort_blocks_created];
+
+  mergeBlockReadInit (sort_table, 
+                      gen_status->sort_blocks_created,
+                      sizeof (sortBlockEntry_t),
+                      SORT_BLOCK_PREFIX,
+                      1);
 
   /* Read until all positions from all blocks are read.
   */
@@ -1535,6 +1489,7 @@ static void * brd_db_generate (void *arg)
   */
   unsigned long long ply_position_index = 0;
 
+  gen_status->ply_processing_phase = 2;  
   do 
   {
     sortBlockEntry_t min_position;
@@ -1668,6 +1623,9 @@ static void * brd_db_generate (void *arg)
   */
   plyPositionFileFinish ();
 
+  gen_status->total_new_moves = board_db->ply_table[ply_number].stats.total_moves_added;
+  gen_status->processed_new_moves = 0;
+  gen_status->ply_processing_phase = 3;  
   /* Create the file for storing moves for this ply.
   */
   char move_file_name[1024];
@@ -1690,7 +1648,7 @@ static void * brd_db_generate (void *arg)
   {
     sortBlockMoveEntry_t min_move;
     memset (&min_move, 0xff, sizeof (sortBlockMoveEntry_t));
-    unsigned int min_move_stream;
+    unsigned int min_move_stream = 0;
 
     for (unsigned int i = 0; i < move_sort_blocks_created; i++)
     {
@@ -1733,6 +1691,8 @@ static void * brd_db_generate (void *arg)
     {
       (void) mergeMoveBlockNextGet (move_sort_table, min_move_stream, 1);
     }
+
+    gen_status->processed_new_moves++;
   }
 
 
@@ -1823,13 +1783,12 @@ void brdDbGenerate(
   }
 
   const unsigned long long total_ram = (unsigned long long) mem_info.totalram * mem_info.mem_unit;
-  const unsigned long long sort_block_size = ((total_ram / 2) < MAX_SORT_BLOCK_SIZE)?
-                                total_ram / 2:
-                                MAX_SORT_BLOCK_SIZE;
-  /* Make sure that the sort block size is multiple of 1MB
-  */
-  assert (0 == (sort_block_size & 0x3fff'ffff));
 
+  /* Use one third of physical memory for the sort block. Make sure that the sort block size 
+  ** is in whole megabytes.
+  */
+  const unsigned long long sort_block_size = (total_ram / 3) & ~0x3fff'ffffLLU;
+                               
   board_db.max_sortblock_positions = sort_block_size / sizeof(sortBlockEntry_t);
 
   board_db.sort_block = aligned_alloc (0x4000'0000, sort_block_size);
@@ -1879,7 +1838,6 @@ void brdDbGenerate(
 
     /* Wait until the ply position generation thread is done.
     */
-    unsigned long long prev_brd_processed = 0;
     unsigned long long prev_ply_positions = 0;
     unsigned int wait_time_sec = 0;
     unsigned int wait_message_interval_sec = 60;
@@ -1907,21 +1865,15 @@ void brdDbGenerate(
       {
         if (gen_status.ply_processing_phase == 1)
         {
-          printf ("Inserting... %'u seconds - Ply:%u Entry:%'llu/%'llu  (%'llu Entries/s) - Block:%u\n",
+          printf ("Generating and Sorting Positions... %'u seconds - Ply:%u - Block:%u - Entry:%'llu/%'llu (%u%%)\n",
                     wait_time_sec, 
-                    i,
+                    i, gen_status.sort_blocks_created,
                     gen_status.positions_processed, 
-                    board_db.ply_table[i].num_boards_in_ply,
-                     ((gen_status.positions_processed - prev_brd_processed) / 
-                                                        wait_message_interval_sec),
-                    gen_status.sort_blocks_created);
-                    
+                    gen_status.total_ply_positions,
+                    (unsigned int) (gen_status.positions_processed / 
+                         (gen_status.total_ply_positions / 100))
+                    );
         } else if (gen_status.ply_processing_phase == 2)
-        {
-          printf ("Sorting... %'u seconds - Ply:%u - Block:%u\n",
-                    wait_time_sec, 
-                    i, gen_status.sort_blocks_created);
-        } else if (gen_status.ply_processing_phase == 3)
         {
           printf ("Eliminating Duplicates... %'u seconds - Ply:%u - Processed:%'llu/%'llu (%'llu Pos/Sec - %u%%)\n",
                     wait_time_sec, 
@@ -1929,10 +1881,19 @@ void brdDbGenerate(
                     gen_status.total_new_ply_positions,
                     ((gen_status.processed_new_ply_positions - prev_ply_positions) / 
                                                         wait_message_interval_sec),
-                    (unsigned int) (gen_status.processed_new_ply_positions / (gen_status.total_new_ply_positions / 100))
+                    (unsigned int) (gen_status.processed_new_ply_positions / 
+                                                (gen_status.total_new_ply_positions / 100))
+                    );
+        } else if (gen_status.ply_processing_phase == 3)
+        {
+          printf ("Generating Move File... %'u seconds - Ply:%u - Processed:%'llu/%'llu (%u%%)\n",
+                    wait_time_sec, 
+                    i, 
+                    gen_status.processed_new_moves,
+                    gen_status.total_new_moves,
+                    (unsigned int) (gen_status.processed_new_moves / (gen_status.total_new_moves / 100))
                     );
         }
-        prev_brd_processed = gen_status.positions_processed;
         prev_ply_positions = gen_status.processed_new_ply_positions;
       }
     } while (rc == ETIMEDOUT);

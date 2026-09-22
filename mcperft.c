@@ -32,9 +32,9 @@ int main (int argc, char *argv[])
       {
         ply_depth = (unsigned int) atoi (argv[2]);
       }
-      if ((ply_depth < 7) || (ply_depth > 9))
+      if ((ply_depth < 7) || (ply_depth > 10))
       {
-        printf ("ERROR: The database ply %u is invalid. Valid values are 7, 8, or 9.\n", ply_depth);
+        printf ("ERROR: The database ply %u is invalid. Valid values are 7, 8, 9, or 10.\n", ply_depth);
         exit (-1);
       }
       printf ("Creating Database of Unique Positions to ply %u...\n\n", ply_depth);
@@ -78,7 +78,7 @@ int main (int argc, char *argv[])
     } else
     {
       printf ("Unknown Command. Valid commands are:\n");
-      printf ("%s create-db [ply]             - Create Position Database to specified ply. Default 7, valid values 7, 8, or 9.\n", argv[0]);
+      printf ("%s create-db [ply]             - Create Position Database to specified ply. Default 7, valid values 7, 8, 9, or 10.\n", argv[0]);
       printf ("%s count-setup <depth> [split] - Set up \"perft <depth>\" and split the workload into specified number of files. Default 1 file.\n", argv[0]);
       printf ("%s count [workload-file]       - Count positions for each workload in specified file. Default file 'workload_1'.\n", argv[0]);
       printf ("%s aggregate                   - Use computed move counts in board-db/results directory to calculate perft result.\n", argv[0]);
