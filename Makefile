@@ -1,6 +1,6 @@
 #CC=gcc
-CC=clang
-#CC=icx
+#CC=clang
+CC=icx
 OPTFLAG=-O3
 CFLAG=-std=c23 -Wall -Wextra -Werror -Wshadow -Wconversion
 
