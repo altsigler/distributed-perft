@@ -225,31 +225,17 @@ typedef struct
     */
     unsigned int trim_needed;
 
+    /* The trim is not done on every write. This variable keeps track of
+    ** how many segments need to be trimmed.
+    */
+    unsigned int num_trim_segments;
+
     /* Number of positions in the current block. 
     */
     unsigned long long num_elements_in_block; 
 
     char file_name[1024];
 } mergeBlock_t;
-
-/* Structure for holding information about sorted move blocks while
-** merging these blocks into the ply position file.
-*/
-typedef struct
-{
-    sortBlockMoveEntry_t *buffer;
-    unsigned long long buffer_index;
-    int fd;
-    unsigned int file_is_open;
-    unsigned int file_is_empty; /* No More Positions in this file */
-
-
-    /* Number of positions in the current block. 
-    */
-    unsigned long long num_elements_in_block; 
-
-    char file_name[1024];
-} mergeMoveBlock_t;
 
 /* This structure is used for ply position files.
 */
@@ -300,7 +286,8 @@ typedef struct
   sortBlockMoveEntry_t *sort_block_move;
   unsigned long long max_sortblock_moves;
 
-  void *read_sort_block; // Memory shared by all block files
+  /* Amount of memory to dedicate to reading all block files.
+  */
   unsigned long long read_sort_block_size;  // In Bytes
 
   /* Number of plies with positions.
@@ -361,6 +348,16 @@ typedef struct
   */
   unsigned long long processed_new_moves;
 } brdGenThreadStatus_t;
+
+/* Board Database Generation Thread Status.
+*/
+typedef struct
+{
+  unsigned int depth;
+  unsigned int split_factor;
+  unsigned long long total_workloads;
+  unsigned long long workloads_processed;
+} countSetupThreadStatus_t;
 
 /******************************************************************************
 ** Generate the board database from the given position.

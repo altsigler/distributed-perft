@@ -1101,101 +1101,6 @@ static void nextPositionsCreate (const brd_t *const brd,
 }
 
 /******************************************************************************
-** Find the next entry in the specified sorted positions file.
-** If the third parameter is 0 then the entry remains in the file. 
-** If the third parameter is not zero then the entry is removed.
-** 
-** To improve performance the entries are read in groups from the file
-** into memory, so most calls to this function don't access the file.
-**
-** Return Values:
-** 0 - No entries in the specified sort block.
-**   - Pointer to the next entry. The pointer is valid until next call to 
-**     this function for the specified block.
-******************************************************************************/
-static sortBlockMoveEntry_t *mergeMoveBlockNextGet (mergeMoveBlock_t *const merge_block,
-                                            const unsigned int block_number,
-                                            const unsigned int remove_entry)
-{
-  constexpr unsigned int buffered_elements = 100'000;
-
-  mergeMoveBlock_t *const merge_entry = &merge_block[block_number];
-
-  if (0 != merge_entry->file_is_empty)
-  {
-    return 0;
-  }
-
-  /* If the file hasn't been open yet then open it now.
-  */
-  if (0 == merge_entry->file_is_open)
-  {
-    merge_entry->file_is_open = 1;
-    merge_entry->buffer = malloc (buffered_elements * sizeof(sortBlockMoveEntry_t));
-    assert (merge_entry->buffer);
-
-    merge_entry->buffer_index = 0;
-
-    sprintf (merge_entry->file_name, "%s%u", SORT_MOVE_BLOCK_PREFIX, block_number);
-
-    merge_entry->fd = open (merge_entry->file_name, O_RDONLY);
-    if (merge_entry->fd < 0)
-    {
-      perror ("open temporary move file");
-      exit (-1);
-    }
-  }
-
-  /* If we have read all elements in the current block then get the next block.
-  ** Note that when the file has just been opened and nothing has been read then 
-  ** buffer_index and num_elements_in_block are both 0, which triggers the 
-  ** next read from file.
-  */
-  if (merge_entry->buffer_index == merge_entry->num_elements_in_block)
-  {
-    merge_entry->buffer_index = 0;
-
-    unsigned long long total_bytes_read = 0;
-    const unsigned long long read_request_size = buffered_elements * sizeof(sortBlockMoveEntry_t);
-    unsigned char *buffer = (unsigned char *) merge_entry->buffer;
-
-    do
-    {
-      const ssize_t bytes_read = read (merge_entry->fd, &buffer[total_bytes_read], read_request_size);
-      if (bytes_read < 0)
-      {
-        perror ("Read move merge buffer");
-        exit (-1);
-      }
-      if (bytes_read == 0)
-      { 
-        break;
-      }
-      total_bytes_read += (unsigned long long) bytes_read;
-
-    } while (total_bytes_read < read_request_size);
-    if (0 == total_bytes_read)
-    {
-      merge_entry->file_is_empty = 1;
-      free (merge_entry->buffer);
-      close (merge_entry->fd);
-      unlink (merge_entry->file_name);
-      return 0;
-    }
-    merge_entry->num_elements_in_block = total_bytes_read / sizeof(sortBlockMoveEntry_t);
-  }
-
-  sortBlockMoveEntry_t *entry = &merge_entry->buffer[merge_entry->buffer_index];
-
-  if (remove_entry)
-  {
-    merge_entry->buffer_index++;
-  }
-
-  return entry;
-}
-
-/******************************************************************************
 ** 
 ** The caller passes the list and the number of merge blocks as well
 ** as a pointer to the pre-allocated memory which is shared by all blocks. 
@@ -1248,7 +1153,7 @@ static void mergeBlockReadInit (mergeBlock_t *const merge_block,
       exit (-1);
     }
 
-    constexpr unsigned long long buffer_size_in_bytes = 80'000'000;
+    constexpr unsigned long long buffer_size_in_bytes = 8'000'000;
     const unsigned long long align_boundary = stat.f_bsize * element_size;
     unsigned long long aligned_size = buffer_size_in_bytes;
     if (aligned_size % align_boundary)
@@ -1631,7 +1536,7 @@ static void * brd_db_generate (void *arg)
   char move_file_name[1024];
   sprintf (move_file_name, "%s%u_moves", PLY_FILE_PREFIX, ply_number);
   bufferedFile_t move_file = bufferedFileWriteStart (move_file_name,
-                                                    16'000'000'000,
+                                                    16'000'000,
                                                     sizeof (moveEntry_t));
 
   /* Merge all sorted move blocks into a single move database.
@@ -1640,7 +1545,14 @@ static void * brd_db_generate (void *arg)
   ** For each block file allocate a buffer so that we don't 
   ** need to do a read() call for each entry. 
   */
-  mergeMoveBlock_t move_sort_table[move_sort_blocks_created] = {};
+  mergeBlock_t move_sort_table[move_sort_blocks_created];
+
+  mergeBlockReadInit (move_sort_table, 
+                      move_sort_blocks_created,
+                      sizeof (sortBlockMoveEntry_t),
+                      SORT_MOVE_BLOCK_PREFIX,
+                      1);
+
 
   for (unsigned long long move_count = 0; 
             move_count < board_db->ply_table[ply_number].stats.total_moves_added;
@@ -1657,7 +1569,7 @@ static void * brd_db_generate (void *arg)
       ** Note that some of the blocks may become empty before other blocks,
       ** so we need to handle that.
       */
-      const sortBlockMoveEntry_t *const next_block = mergeMoveBlockNextGet (move_sort_table, i, 0);
+      const sortBlockMoveEntry_t *const next_block = mergeBlockNextGet (move_sort_table, i, 0);
 
       if (0 != next_block)
       {
@@ -1672,7 +1584,7 @@ static void * brd_db_generate (void *arg)
 
     /* Remove the smallest entry from the sorted block where it was found.
     */
-    if (0 == mergeMoveBlockNextGet (move_sort_table, min_move_stream, 1))
+    if (0 == mergeBlockNextGet (move_sort_table, min_move_stream, 1))
     {
       printf ("ERROR: Unexpected end of move temp file data stream.\n");
       exit (-1);
@@ -1689,7 +1601,7 @@ static void * brd_db_generate (void *arg)
     */
     if (move_count == (board_db->ply_table[ply_number].stats.total_moves_added - 1))
     {
-      (void) mergeMoveBlockNextGet (move_sort_table, min_move_stream, 1);
+      (void) mergeBlockNextGet (move_sort_table, min_move_stream, 1);
     }
 
     gen_status->processed_new_moves++;
@@ -2544,22 +2456,20 @@ void brdDbFenGenerate (void)
 }
 
 /******************************************************************************
-** Generate Deep Search Workload Files.
+** Generate Deep Search Workload Files Thread.
 **
-** depth - Search Depth.
-** split_factor - Number of workload files.
-**
-** Return Values:
 ******************************************************************************/
-void brdDbCountSetup (const unsigned int depth,
-                      const unsigned int split_factor)
-                      
+static void * brd_db_count_setup (void *arg)
+
 {
+  countSetupThreadStatus_t *count_setup = arg;
+  const unsigned int depth = count_setup->depth;
+  const unsigned int split_factor = count_setup->split_factor;
   char buf[1024];
   int rc;
   const unsigned int ply_depth = brdDbPlyDepthGet();
 
-  sprintf (buf, "%s%u_positions", 
+  sprintf (buf, "%s%u_positions",
                     PLY_FILE_PREFIX,
                     ply_depth);
 
@@ -2572,6 +2482,8 @@ void brdDbCountSetup (const unsigned int depth,
   }
 
   const unsigned long long num_boards_in_ply = brdPlyNumPositionsGet (ply_depth);
+
+  count_setup->total_workloads = num_boards_in_ply;
 
   printf ("Found existing board database with ply depth %u.\n", ply_depth);
 
@@ -2628,8 +2540,8 @@ void brdDbCountSetup (const unsigned int depth,
 
     if (depth <= ply_depth)
     {
-      /* When perft depth is smaller than position database depth then there is no 
-      ** work to do for search machines. 
+      /* When perft depth is smaller than position database depth then there is no
+      ** work to do for search machines.
       */
       num_workloads = 0;
     } else
@@ -2661,7 +2573,7 @@ void brdDbCountSetup (const unsigned int depth,
                workload_header.workload_factor, workload_header.num_workloads,
                workload_header.start_workload_number, workload_header.end_workload_number);
 #endif
-     
+
      /* Create the workload file.
      */
      char file_name[1024];
@@ -2682,13 +2594,13 @@ void brdDbCountSetup (const unsigned int depth,
 
      for (unsigned long long j = 0; j < workload_header.num_workloads; )
      {
-       constexpr unsigned int block_size = 100;
+       constexpr unsigned int block_size = 10000;
        workloadRecord_t workload_record[block_size];
        const unsigned long long j_inc = ((j + block_size) < workload_header.num_workloads)?block_size:
                                         workload_header.num_workloads - j;
 
        plyPositionEntry_t db_entry[j_inc];
-       if ((j_inc * sizeof(plyPositionEntry_t)) != 
+       if ((j_inc * sizeof(plyPositionEntry_t)) !=
             (unsigned long long) read (position_db_fd, db_entry, j_inc * sizeof(plyPositionEntry_t)))
        {
          perror ("Error reading position file.");
@@ -2697,14 +2609,14 @@ void brdDbCountSetup (const unsigned int depth,
 
        for (unsigned long long k = 0; k < j_inc; k++)
        {
-         memcpy (workload_record[k].position, 
+         memcpy (workload_record[k].position,
                db_entry[k].position, 32);
          workload_record[k].brd_info = db_entry[k].brd_info;
          workload_record[k].pad1 = 0;
          workload_record[k].pad2 = 0;
        }
 
-       if ((j_inc * sizeof(workloadRecord_t)) != 
+       if ((j_inc * sizeof(workloadRecord_t)) !=
                  (unsigned long long) write (fd, &workload_record, j_inc * sizeof(workloadRecord_t)))
        {
          perror ("write workload file.");
@@ -2712,12 +2624,87 @@ void brdDbCountSetup (const unsigned int depth,
        }
 
        j += j_inc;
+       count_setup->workloads_processed += j_inc;
      }
      (void) close (fd);
   }
 
 
   (void) close (position_db_fd);
+
+
+  return 0;
+}
+
+/******************************************************************************
+** Generate Deep Search Workload Files.
+**
+** depth - Search Depth.
+** split_factor - Number of workload files.
+**
+** Return Values:
+******************************************************************************/
+void brdDbCountSetup (const unsigned int depth,
+                      const unsigned int split_factor)
+
+{
+  pthread_t cs_thread;
+  countSetupThreadStatus_t count_setup = {};
+  count_setup.depth = depth;
+  count_setup.split_factor = split_factor;
+
+  int rc = pthread_create (&cs_thread, 0, brd_db_count_setup, &count_setup);
+  if (rc)
+  {
+    perror ("pthread_create: Count Setup");
+    exit (-1);
+  }
+
+  constexpr unsigned long long wait_message_interval_sec = 10;
+  unsigned long long last_event_time_sec = sysUpTimeMillisecondsGet() / 1000;
+  unsigned long long wait_time_sec = 0;
+  unsigned long long prev_workloads_processed = 0;
+  do
+  {
+    struct timespec ts;
+    unsigned long long current_time_sec = sysUpTimeMillisecondsGet() / 1000;
+
+    if (-1 == clock_gettime (CLOCK_REALTIME, &ts))
+    {
+      perror ("clock_gettime");
+      exit (-1);
+    }
+    if ((current_time_sec - last_event_time_sec) < wait_message_interval_sec)
+    {
+      ts.tv_sec += (__time_t) (wait_message_interval_sec - (current_time_sec - last_event_time_sec));
+    }
+
+    rc = pthread_timedjoin_np (cs_thread, 0, &ts);
+    if ((0 != rc) && (ETIMEDOUT != rc))
+    {
+      perror ("pthread_join workload create");
+      exit (-1);
+    }
+
+    current_time_sec = sysUpTimeMillisecondsGet() / 1000;
+    const unsigned long long actual_wait_time = current_time_sec - last_event_time_sec;
+
+    if (actual_wait_time >= wait_message_interval_sec)
+    {
+      wait_time_sec += actual_wait_time;
+
+      printf ("Generating Workloads... %'llu sec - Searched %'llu/%'llu (%llu%%, %'llu Wl/s)\n",
+                wait_time_sec,
+                count_setup.workloads_processed,
+                count_setup.total_workloads,
+                ((count_setup.total_workloads / 100) > 0)?count_setup.workloads_processed / (count_setup.total_workloads / 100):0,
+                 (((count_setup.workloads_processed - prev_workloads_processed) /
+                                                    actual_wait_time))
+                );
+      prev_workloads_processed = count_setup.workloads_processed;
+      last_event_time_sec = current_time_sec;
+    }
+  } while (rc == ETIMEDOUT);
 
   printf ("Workload files are ready!\n");
 }
