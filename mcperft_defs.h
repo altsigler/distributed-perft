@@ -226,9 +226,9 @@ typedef struct
     unsigned int trim_needed;
 
     /* The trim is not done on every write. This variable keeps track of
-    ** how many segments need to be trimmed.
+    ** how many bytes have been read since the last trim.
     */
-    unsigned int num_trim_segments;
+    unsigned long long num_trim_bytes;
 
     /* Number of positions in the current block. 
     */

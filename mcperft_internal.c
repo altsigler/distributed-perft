@@ -1200,25 +1200,25 @@ static void *mergeBlockNextGet (mergeBlock_t *const merge_block,
   {
     merge_entry->buffer_index = 0;
 
-    unsigned long long total_bytes_read = 0;
     const unsigned long long read_request_size = merge_entry->max_elements_in_block * merge_entry->element_size;
     unsigned char *buffer = merge_entry->buffer;
 
-    do
+    const ssize_t bytes_read = read (merge_entry->fd, buffer, read_request_size);
+    if (bytes_read < 0)
     {
-      const ssize_t bytes_read = read (merge_entry->fd, &buffer[total_bytes_read], read_request_size);
-      if (bytes_read < 0)
-      {
-        perror ("Read merge buffer");
-        exit (-1);
-      }
-      if (bytes_read == 0)
-      { 
-        break;
-      }
-      total_bytes_read += (unsigned long long) bytes_read;
+      perror ("Read merge buffer");
+      exit (-1);
+    }
+    const unsigned long long total_bytes_read = (unsigned long long) bytes_read;
 
-    } while (total_bytes_read < read_request_size);
+    if (0 != (total_bytes_read % merge_entry->element_size))
+    {
+      printf ("ERROR: Read unexpected number of bytes:%'llu from %s\n",
+                    total_bytes_read,
+                    merge_entry->file_name);
+      exit (-1);
+    }
+
     if (0 == total_bytes_read)
     {
       merge_entry->file_is_empty = 1;
@@ -1227,6 +1227,14 @@ static void *mergeBlockNextGet (mergeBlock_t *const merge_block,
       free (merge_entry->buffer);
       return 0;
     }
+
+    /* We don't trim the file on every read because that can cause 
+    ** performance issues. The constant below defines how many bytes
+    ** must be read from the file before trimming.
+    */
+    constexpr unsigned long long max_trim_bytes = 128LLU*1024LLU*1024LLU;
+
+    merge_entry->num_trim_bytes += total_bytes_read;
     merge_entry->num_elements_in_block = total_bytes_read / merge_entry->element_size;
 
     /* To conserve disk space we need to reduce the file size to remove all the 
@@ -1234,9 +1242,13 @@ static void *mergeBlockNextGet (mergeBlock_t *const merge_block,
     ** This is only done for complete blocks.
     */
     if ((0 != merge_entry->trim_needed) &&
+        (merge_entry->num_trim_bytes > max_trim_bytes) &&
         (merge_entry->num_elements_in_block == merge_entry->max_elements_in_block))
     {
-      if (0 != fallocate (merge_entry->fd, FALLOC_FL_COLLAPSE_RANGE, 0, (__off_t) total_bytes_read))
+      const __off_t trim_size = (__off_t) merge_entry->num_trim_bytes;
+      merge_entry->num_trim_bytes = 0;
+
+      if (0 != fallocate (merge_entry->fd, FALLOC_FL_COLLAPSE_RANGE, 0,  trim_size))
       {
         perror ("fallocate - Reduce temporary position file size.");
         exit (-1);
