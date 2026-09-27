@@ -20,6 +20,7 @@
 #include <sys/mman.h>
 #include <sys/sysinfo.h>
 #include <sys/statvfs.h>
+#include <sys/resource.h>
 
 #include "bytebrd_api.h"
 #include "onecore_api.h"
@@ -1107,10 +1108,11 @@ static void nextPositionsCreate (const brd_t *const brd,
 **
 ******************************************************************************/
 static void mergeBlockReadInit (mergeBlock_t *const merge_block,
-                                            const unsigned int num_blocks,
-                                            const unsigned long long element_size,
-                                            const char *const file_prefix,
-                                            const unsigned int trim_needed)
+                                const unsigned long long read_sort_block_size,
+                                const unsigned int num_blocks,
+                                const unsigned long long element_size,
+                                const char *const file_prefix,
+                                const unsigned int trim_needed)
 {
   memset (merge_block, 0, sizeof(mergeBlock_t) * num_blocks);
 
@@ -1134,6 +1136,9 @@ static void mergeBlockReadInit (mergeBlock_t *const merge_block,
       if (merge_entry->fd < 0)
       {
         perror ("open merge file (O_RDWR)");
+        printf ("i:%u\n", i);
+        printf ("num_blocks:%u\n", num_blocks);
+        printf ("merge_entry-fd:%u\n", merge_entry->fd);
         exit (-1);
       }
     } else
@@ -1153,13 +1158,25 @@ static void mergeBlockReadInit (mergeBlock_t *const merge_block,
       exit (-1);
     }
 
-    constexpr unsigned long long buffer_size_in_bytes = 8'000'000;
+    unsigned long long buffer_size_in_bytes = read_sort_block_size / num_blocks;
+    /* Limit the size of the read block to 80MB.
+    */
+    constexpr unsigned long long max_buf_size = 80*1024*1024;
+    if (buffer_size_in_bytes > max_buf_size)
+    {
+      buffer_size_in_bytes = max_buf_size;
+    }
+
     const unsigned long long align_boundary = stat.f_bsize * element_size;
     unsigned long long aligned_size = buffer_size_in_bytes;
     if (aligned_size % align_boundary)
     {
       aligned_size = ((aligned_size / align_boundary) + 1) * align_boundary;
     } 
+    if (0 == aligned_size)
+    {
+      aligned_size = align_boundary;
+    }
     merge_entry->max_elements_in_block = aligned_size / element_size;
 
     merge_entry->buffer = malloc (merge_entry->max_elements_in_block * merge_entry->element_size);
@@ -1390,9 +1407,11 @@ static void * brd_db_generate (void *arg)
   ** For each block file allocate a buffer so that we don't 
   ** need to do a read() call for each entry. 
   */
-  mergeBlock_t sort_table[gen_status->sort_blocks_created];
+  mergeBlock_t *const sort_table = malloc (gen_status->sort_blocks_created * sizeof(mergeBlock_t));
+  assert (sort_table);
 
   mergeBlockReadInit (sort_table, 
+                      board_db->read_sort_block_size,
                       gen_status->sort_blocks_created,
                       sizeof (sortBlockEntry_t),
                       SORT_BLOCK_PREFIX,
@@ -1535,6 +1554,7 @@ static void * brd_db_generate (void *arg)
                                   move_sort_blocks_created, sort_block_index);
     move_sort_blocks_created++;
   }
+  free (sort_table);
 
   /* Close the ply position file.
   */
@@ -1557,9 +1577,11 @@ static void * brd_db_generate (void *arg)
   ** For each block file allocate a buffer so that we don't 
   ** need to do a read() call for each entry. 
   */
-  mergeBlock_t move_sort_table[move_sort_blocks_created];
+  mergeBlock_t *const move_sort_table = malloc (move_sort_blocks_created * sizeof(mergeBlock_t));
+  assert (move_sort_table);
 
   mergeBlockReadInit (move_sort_table, 
+                      board_db->read_sort_block_size,
                       move_sort_blocks_created,
                       sizeof (sortBlockMoveEntry_t),
                       SORT_MOVE_BLOCK_PREFIX,
@@ -1623,6 +1645,8 @@ static void * brd_db_generate (void *arg)
   /* Close the ply move file.
   */
   bufferedFileFinish  (&move_file);
+
+  free (move_sort_table);
 
 
 
@@ -1712,6 +1736,38 @@ void brdDbGenerate(
   ** is in whole megabytes.
   */
   const unsigned long long sort_block_size = (total_ram / 3) & ~0x3fff'ffffLLU;
+
+  /* By default the Linux process can have only 1024 open files.
+  ** The hard limit is usually 500K open files. 
+  ** On platforms with small DRAM size that attempt to create depth 9, 10 or 11 
+  ** position database we can have a lot of open files. 
+  ** Therefore increase the soft open file limit to be as big as we can make it.
+  */
+  struct rlimit rlim;
+  if (0 != getrlimit (RLIMIT_NOFILE, &rlim))
+  {
+    perror ("getrlimit RLIMIT_NOFILE");
+    exit (-1);
+  }
+
+  rlim.rlim_cur = rlim.rlim_max;
+  if (0 != setrlimit (RLIMIT_NOFILE, &rlim))
+  {
+    perror ("gesrlimit RLIMIT_NOFILE");
+    exit (-1);
+  }
+
+
+#if 0
+  if (0 != getrlimit (RLIMIT_NOFILE, &rlim))
+  {
+    perror ("getrlimit RLIMIT_NOFILE");
+    exit (-1);
+  }
+  printf ("RLIMIT_NOFILE rlim_cur:%'llu  rlim_max:%'llu\n",
+            (unsigned long long) rlim.rlim_cur,
+            (unsigned long long) rlim.rlim_max);
+#endif
                                
   board_db.max_sortblock_positions = sort_block_size / sizeof(sortBlockEntry_t);
 
@@ -1721,6 +1777,14 @@ void brdDbGenerate(
 
   board_db.sort_block_move = board_db.sort_block;
   board_db.max_sortblock_moves = sort_block_size / sizeof(sortBlockMoveEntry_t);
+
+  /* Use one third of memory when reading and merging sort block files.
+  ** This is just the suggested size. The allocated memory may be smaller when there
+  ** are only a few merge blocks. The allocated memory may be larger if there are
+  ** a lot of merge block files because each merge file requires at least 163,840 byte
+  ** read buffer.
+  */
+  board_db.read_sort_block_size = total_ram / 3;
 
   /* Start the board generator thread for each ply.
   ** The code exits when there are no more moves to be 
