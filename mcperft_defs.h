@@ -225,10 +225,21 @@ typedef struct
     */
     unsigned int trim_needed;
 
+    /* Flag indicating whether the FALLOC_FL_COLLAPSE_RANGE feature is supported
+    ** on the target file system. This is the preferred way to trim files 
+    ** because the file size reported by the "ls -l" command is reduced as the 
+    ** file is trimmed.
+    */
+    unsigned int trim_collapse_range_supported;
+
     /* The trim is not done on every write. This variable keeps track of
     ** how many bytes have been read since the last trim.
     */
     unsigned long long num_trim_bytes;
+
+    /* position in file where the last trim was done.
+    */
+    unsigned long long last_trim_location;
 
     /* Number of positions in the current block. 
     */

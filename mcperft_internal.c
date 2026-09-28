@@ -1128,6 +1128,8 @@ static void mergeBlockReadInit (mergeBlock_t *const merge_block,
     if (trim_needed)
     {
       merge_entry->trim_needed = 1;
+      merge_entry->trim_collapse_range_supported = 1;
+
 
       /* Although we are only reading from this file, we are also reducing the 
       ** file size as the data is read, so the file needs to be opened in RDWR mode.
@@ -1138,7 +1140,6 @@ static void mergeBlockReadInit (mergeBlock_t *const merge_block,
         perror ("open merge file (O_RDWR)");
         printf ("i:%u\n", i);
         printf ("num_blocks:%u\n", num_blocks);
-        printf ("merge_entry-fd:%u\n", merge_entry->fd);
         exit (-1);
       }
     } else
@@ -1181,6 +1182,55 @@ static void mergeBlockReadInit (mergeBlock_t *const merge_block,
 
     merge_entry->buffer = malloc (merge_entry->max_elements_in_block * merge_entry->element_size);
     assert (merge_entry->buffer);
+
+    /* Check whether the fallocate() function is supported, and which mode we can use.
+    */
+    if (merge_entry->trim_needed)
+    {
+      char test_file[1024];
+      strcpy (test_file, merge_entry->file_name);
+      strcat (test_file, "-test");
+      const int test_fd = open (test_file, O_RDWR | O_APPEND | O_CREAT, S_IRUSR | S_IWUSR);
+
+      if (0 != ftruncate (test_fd, (off_t) (align_boundary * 2)))
+      {
+        perror ("ftruncate test_fd");
+        exit (-1);
+      }
+
+      if (0 != fallocate (test_fd, FALLOC_FL_COLLAPSE_RANGE, 0,  (off_t) align_boundary))
+      {
+        if (errno == EOPNOTSUPP)
+        {
+          /* NFS file systems don't support COLLASE_RANGE, so check whether the 
+          ** PUNCH_HOLE option is supported. The PUNCH_HOLE can be used to reduce the 
+          ** space the file takes up on disk, but the "ls -l" command will not show
+          ** that the file size is going down.
+          */
+          merge_entry->trim_collapse_range_supported = 0;
+          if (0 != fallocate (test_fd, FALLOC_FL_PUNCH_HOLE, 0,  (off_t) align_boundary))
+          {
+            if (errno == EOPNOTSUPP)
+            {
+              /* Some file systems, including NFS prior to version 4.2, don't support 
+              ** fallocate() feature at all, so file trimming is disabled.
+              */
+              merge_entry->trim_needed = 0;
+            } else
+            {
+              perror ("fallocate test_fd - FALLOC_FL_PUNCH_HOLE");
+              exit (-1);
+            }
+          }
+        } else
+        {
+          perror ("fallocate test_fd - FALLOC_FL_COLLAPSE_RANGE");
+          exit (-1);
+        }
+      }
+      close (test_fd);
+      unlink (test_file);
+    }
   }
 }
 
@@ -1265,26 +1315,42 @@ static void *mergeBlockNextGet (mergeBlock_t *const merge_block,
       const __off_t trim_size = (__off_t) merge_entry->num_trim_bytes;
       merge_entry->num_trim_bytes = 0;
 
-      if (0 != fallocate (merge_entry->fd, FALLOC_FL_COLLAPSE_RANGE, 0,  trim_size))
+      if (0 == merge_entry->trim_collapse_range_supported)
       {
-        perror ("fallocate - Reduce temporary position file size.");
-        exit (-1);
-      }
+        if (0 != fallocate (merge_entry->fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 
+                                  (__off_t) merge_entry->last_trim_location,  trim_size))
+        {
+          perror ("fallocate - FALLOC_FL_PUNCH_HOLE - Reduce file size.");
+          exit (-1);
+        }
 
-      /* Reset the read pointer to the start of file.
-      */
-      if (0 != lseek (merge_entry->fd, 0, SEEK_SET))
+        merge_entry->last_trim_location += (unsigned long long) trim_size;
+      } else
       {
-        perror ("lseek - Reset temporary position file read pointer.");
-        exit (-1);
-      }
+        /* We already tested and verified that COLLAPSE_RANGE should work on this file
+        ** system. 
+        ** We are not checking the error code because if the trim_size just happens to 
+        ** be the last block of the file then the function will return an error.
+        ** this only occurs if the file size is an exact multiple of trim_size. 
+        ** This is unlikely, but possible.
+        */
+        (void) fallocate (merge_entry->fd, FALLOC_FL_COLLAPSE_RANGE, 0,  trim_size);
 
-      /* Tell the kernel to start reading the next block into cache.
-      */
-      if (0 != posix_fadvise (merge_entry->fd, 0, (off_t) total_bytes_read, POSIX_FADV_WILLNEED))
-      {
-        perror ("posix_fadvise - Temporary Position File");
-        exit (-1);
+        /* Reset the read pointer to the start of file.
+        */
+        if (0 != lseek (merge_entry->fd, 0, SEEK_SET))
+        {
+          perror ("lseek - Reset file read pointer.");
+          exit (-1);
+        }
+
+        /* Tell the kernel to start reading the next block into cache.
+        */
+        if (0 != posix_fadvise (merge_entry->fd, 0, (off_t) total_bytes_read, POSIX_FADV_WILLNEED))
+        {
+          perror ("posix_fadvise - POSIX_FADV_WILLNEED");
+          exit (-1);
+        }
       }
     }
   }
