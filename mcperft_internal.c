@@ -2860,11 +2860,13 @@ void brdDbCountSetup (const unsigned int depth,
 **
 ********************************************************************/
 static void brdDbLastPlyMovesCount (const unsigned int search_depth, 
-                            unsigned _BitInt(128) *const position_count_space)
+                            unsigned _BitInt(128) *const position_count_space,
+                            aggregateThreadStatus_t *const aggregate)
 {
   const unsigned long long num_boards_in_ply = brdPlyNumPositionsGet (search_depth - 1);
+  aggregate->total_workloads = num_boards_in_ply;
 
-#if 1 // HACK
+#if 0 // HACK
   printf ("%s %d - search_depth:%u num_board_in_ply:%'llu\n",
                     __FUNCTION__, __LINE__,
                     search_depth, 
@@ -2876,6 +2878,7 @@ static void brdDbLastPlyMovesCount (const unsigned int search_depth,
   {
     plyPositionEntry_t *position = plyPositionFileRead ();
     position_count_space[i] = position->num_moves;
+    aggregate->workloads_processed++;
   }
   (void) plyPositionFileRead(); // Close the position database file.
 }
@@ -2891,9 +2894,11 @@ static void brdDbLastPlyMovesCount (const unsigned int search_depth,
 static void brdDbDeepSearchAggregate (
                                const unsigned int position_db_depth,
                                const unsigned long long *const deep_search_result,
-                               unsigned _BitInt(128) *const position_count_space)
+                               unsigned _BitInt(128) *const position_count_space,
+                               aggregateThreadStatus_t *const aggregate)
 {
   const unsigned long long num_boards_in_ply = brdPlyNumPositionsGet (position_db_depth - 1);
+  aggregate->total_workloads = num_boards_in_ply;
 
   char move_file_name[1024];
   int  fd;
@@ -2906,7 +2911,7 @@ static void brdDbDeepSearchAggregate (
     exit (-1);
   }
 
-#if 1 // HACK
+#if 0 // HACK
   printf ("%s %d - position_db_depth:%u num_board_in_ply:%'llu\n",
                     __FUNCTION__, __LINE__,
                     position_db_depth,
@@ -2934,6 +2939,7 @@ static void brdDbDeepSearchAggregate (
                         
       position_count_space[i] += deep_search_result[next_node_index];
     }
+    aggregate->workloads_processed++;
   }
   (void) plyPositionFileRead(); // Close the position database file.
   close (fd); // Close Move File 
@@ -2951,7 +2957,8 @@ static void brdDbDeepSearchAggregate (
 ********************************************************************/
 static void brdDbPositionTreeAggregate (const unsigned int search_depth,
                                const unsigned int position_db_depth,
-                               unsigned _BitInt(128) **const position_count_space)
+                               unsigned _BitInt(128) **const position_count_space,
+                               aggregateThreadStatus_t *const aggregate)
 {
   const unsigned int tree_search_depth = (search_depth > position_db_depth)?
                                                 position_db_depth - 2:
@@ -2960,6 +2967,9 @@ static void brdDbPositionTreeAggregate (const unsigned int search_depth,
   for (int ply_number =  (int) tree_search_depth; ply_number >= 0; ply_number--)
   {
     const unsigned long long num_boards_in_ply = brdPlyNumPositionsGet ((unsigned int) ply_number);
+    aggregate->ply = (unsigned int) ply_number;
+    aggregate->total_workloads = num_boards_in_ply;
+    aggregate->workloads_processed = 0;
 
     char move_file_name[1024];
     int  fd;
@@ -3002,6 +3012,7 @@ static void brdDbPositionTreeAggregate (const unsigned int search_depth,
         position_count_space[ply_number][i] += 
                         position_count_space[ply_number + 1][next_node_index];
       }
+      aggregate->workloads_processed++;
     }
 
     (void) plyPositionFileRead(); // Close the position database file.
@@ -3010,16 +3021,21 @@ static void brdDbPositionTreeAggregate (const unsigned int search_depth,
 }
 
 /********************************************************************
-** Analyze all the result files and compute the final perft value.
+** Analyze all the result files and compute the final perft value
+** thread.
 **
 ** Return Codes
 **  None
 **
 ********************************************************************/
-void brdDbAggregate (unsigned int *depth,
-                     unsigned _BitInt(128) *perft_result,
-                     unsigned _BitInt(128) *ply1_perft_result)
+static void * brd_db_aggregate (void *arg)
 {
+  aggregateThreadStatus_t *aggregate = arg;
+  unsigned int *depth = aggregate->depth;
+  unsigned _BitInt(128) *perft_result = aggregate->perft_result;
+  unsigned _BitInt(128) *ply1_perft_result = aggregate->ply1_perft_result;
+
+
   DIR *dir;
   struct dirent *entry;
 
@@ -3073,6 +3089,11 @@ void brdDbAggregate (unsigned int *depth,
 
   printf ("Position Database Contains %'llu positions in ply:%u\n",
                     position_count, position_db_depth);
+
+  aggregate->phase = 1;
+  aggregate->ply = position_db_depth;
+  aggregate->total_workloads = position_count;
+  aggregate->workloads_processed = 0;
 
   unsigned long long *const deep_search_result = mmap(0, position_count_size[position_db_depth],
           PROT_READ | PROT_WRITE,
@@ -3150,7 +3171,7 @@ void brdDbAggregate (unsigned int *depth,
         unsigned long long w_index = workload.start_workload_number  
                                              + (bytes_read / sizeof(unsigned long long));
                                              
- #if 1 // HACK
+ #if 0 // HACK
         printf ("bytes_read:%'llu read_request_size:%'llu Next Index:%'llu\n", 
                     bytes_read, read_request_size, w_index); 
  #endif
@@ -3172,6 +3193,8 @@ void brdDbAggregate (unsigned int *depth,
 
         bytes_read += (unsigned long long) read_size;
         read_request_size -= (unsigned long long) read_size;
+
+        aggregate->workloads_processed = bytes_read / sizeof (unsigned long long);
 
         if (0 == read_request_size)
         {
@@ -3205,9 +3228,15 @@ void brdDbAggregate (unsigned int *depth,
     ** position database depth.
     */
     printf ("Aggregating deep search results...\n");
+    aggregate->phase = 2;
+    aggregate->total_workloads = 0;
+    aggregate->workloads_processed = 0;
+    aggregate->counter_size = 16;
+    aggregate->ply = position_db_depth - 1;
     brdDbDeepSearchAggregate (position_db_depth,
                               deep_search_result,
-                              position_count_space[position_db_depth - 1]);
+                              position_count_space[position_db_depth - 1],
+                              aggregate);
   } else
   {
     /* The search depth is the same or smaller than the position tree depth.
@@ -3216,8 +3245,14 @@ void brdDbAggregate (unsigned int *depth,
     */
     printf ("Search depth %u is smaller than position database depth %u. Counting Last Ply Moves...\n",
                 search_depth, position_db_depth);
+    aggregate->phase = 3;
+    aggregate->total_workloads = 0;
+    aggregate->workloads_processed = 0;
+    aggregate->counter_size = 16;
+    aggregate->ply = position_db_depth - 1;
     brdDbLastPlyMovesCount (search_depth, 
-                            position_count_space[search_depth - 1]);
+                            position_count_space[search_depth - 1],
+                            aggregate);
   }
 
   /* We don't need the deep search results anymore.
@@ -3226,9 +3261,15 @@ void brdDbAggregate (unsigned int *depth,
 
   if (search_depth > 1)
   {
+    aggregate->phase = 3;
+    aggregate->total_workloads = 0;
+    aggregate->workloads_processed = 0;
+    aggregate->counter_size = 16;
+
     brdDbPositionTreeAggregate (search_depth,
                                position_db_depth,
-                               position_count_space);
+                               position_count_space,
+                               aggregate);
   }
 
   *depth = search_depth;
@@ -3248,5 +3289,129 @@ void brdDbAggregate (unsigned int *depth,
   }
   (void) munmap (deep_search_result, position_count_size[position_db_depth]);
   closedir (dir);
+
+  return 0;
 }
 
+
+/********************************************************************
+** Analyze all the result files and compute the final perft value.
+**
+** Return Codes
+**  None
+**
+********************************************************************/
+void brdDbAggregate (unsigned int *depth,
+                     unsigned _BitInt(128) *perft_result,
+                     unsigned _BitInt(128) *ply1_perft_result)
+{
+  pthread_t aggregate_thread;
+  aggregateThreadStatus_t aggregate = {};
+
+  aggregate.depth = depth;
+  aggregate.perft_result = perft_result;
+  aggregate.ply1_perft_result = ply1_perft_result;
+
+  int rc = pthread_create (&aggregate_thread, 0, brd_db_aggregate, &aggregate);
+  if (rc)
+  {
+    perror ("pthread_create: Count Setup");
+    exit (-1);
+  }
+
+  constexpr unsigned long long wait_message_interval_sec = 10;
+  unsigned long long last_event_time_sec = sysUpTimeMillisecondsGet() / 1000;
+  unsigned long long wait_time_sec = 0;
+  unsigned long long prev_workloads_processed = 0;
+  unsigned int prev_phase = 0;
+
+  do
+  {
+    struct timespec ts;
+    unsigned long long current_time_sec = sysUpTimeMillisecondsGet() / 1000;
+
+    if (-1 == clock_gettime (CLOCK_REALTIME, &ts))
+    {
+      perror ("clock_gettime");
+      exit (-1);
+    }
+    if ((current_time_sec - last_event_time_sec) < wait_message_interval_sec)
+    {
+      ts.tv_sec += (__time_t) (wait_message_interval_sec - (current_time_sec - last_event_time_sec));
+    }
+
+    rc = pthread_timedjoin_np (aggregate_thread, 0, &ts);
+    if ((0 != rc) && (ETIMEDOUT != rc))
+    {
+      perror ("pthread_join workload aggregate");
+      exit (-1);
+    }
+
+    current_time_sec = sysUpTimeMillisecondsGet() / 1000;
+    const unsigned long long actual_wait_time = current_time_sec - last_event_time_sec;
+
+    if (actual_wait_time >= wait_message_interval_sec)
+    {
+      if (prev_phase != aggregate.phase)
+      {
+        prev_workloads_processed = 0;
+      }
+      if (prev_workloads_processed > aggregate.workloads_processed)
+      {
+        prev_workloads_processed = 0;
+      }
+
+      prev_phase = aggregate.phase;
+
+      wait_time_sec += actual_wait_time;
+
+      const unsigned long long percent_complete =  
+                      ((aggregate.total_workloads / 100) > 0)?
+                              aggregate.workloads_processed / (aggregate.total_workloads / 100):0;
+
+      const unsigned long long workloads_per_second = 
+                      ((aggregate.workloads_processed - prev_workloads_processed) /
+                                                    actual_wait_time);
+
+      switch (aggregate.phase)
+      {
+        case 1:
+           printf ("Loading Result File(s)... %'llu sec - Ply:%u Loaded %'llu/%'llu (%llu%%, %'llu Wl/s) - Counter Size:%u\n",
+                wait_time_sec,
+                aggregate.ply,
+                aggregate.workloads_processed,
+                aggregate.total_workloads,
+                percent_complete,
+                workloads_per_second,
+                aggregate.counter_size);
+          break;
+
+        case 2:
+           printf ("Aggregating Result File(s)... %'llu sec - Ply:%u Processed %'llu/%'llu (%llu%%, %'llu Wl/s)\n",
+                wait_time_sec,
+                aggregate.ply,
+                aggregate.workloads_processed,
+                aggregate.total_workloads,
+                percent_complete,
+                workloads_per_second);
+          break;
+
+        case 3:
+           printf ("Aggregating Counters... %'llu sec - Ply:%u Processed %'llu/%'llu (%llu%%, %'llu Wl/s)\n",
+                wait_time_sec,
+                aggregate.ply,
+                aggregate.workloads_processed,
+                aggregate.total_workloads,
+                percent_complete,
+                workloads_per_second);
+          break; 
+
+        default:
+          printf ("Aggregating Workloads... %'llu sec\n",
+                wait_time_sec);
+      }
+      prev_workloads_processed = aggregate.workloads_processed;
+      last_event_time_sec = current_time_sec;
+    }
+  } while (rc == ETIMEDOUT);
+}

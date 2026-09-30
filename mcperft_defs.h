@@ -370,6 +370,33 @@ typedef struct
   unsigned long long workloads_processed;
 } countSetupThreadStatus_t;
 
+/* Board Database Aggregation Thread Status.
+*/
+typedef struct
+{
+  /* Aggregation Phase.
+  ** 1 - Reading result files into a single counter table.
+  ** 2 - Aggregating counteres for the deepest ply.
+  ** 3 - Aggregating counters for database ply
+  */
+  unsigned int phase;
+
+  /* Information for the ply being aggregated.
+  */
+  unsigned int ply;
+  unsigned long long total_workloads;
+  unsigned long long workloads_processed;
+
+  unsigned int counter_size; /* 4, 8, or 16 */
+
+  /* Final output.
+  */
+  unsigned int *depth;
+  unsigned _BitInt(128) *perft_result;
+  unsigned _BitInt(128) *ply1_perft_result;
+} aggregateThreadStatus_t;
+
+
 /******************************************************************************
 ** Generate the board database from the given position.
 ** The assumption is that the start position is legal.
