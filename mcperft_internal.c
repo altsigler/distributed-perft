@@ -2742,8 +2742,9 @@ static void * brd_db_count_setup (void *arg)
                                         workload_header.num_workloads - j;
 
        plyPositionEntry_t db_entry[j_inc];
-       if ((j_inc * sizeof(plyPositionEntry_t)) !=
-            (unsigned long long) read (position_db_fd, db_entry, j_inc * sizeof(plyPositionEntry_t)))
+       const size_t read_size = j_inc * sizeof(plyPositionEntry_t);
+
+       if (read_size !=(size_t) read (position_db_fd, db_entry, read_size))
        {
          perror ("Error reading position file.");
          exit (-1);
@@ -3067,7 +3068,34 @@ static void * brd_db_aggregate (void *arg)
       printf ("ERROR: Unexpected 0 positions in ply %u\n", i);
       exit (-1);
     }
-    position_count_space[i] = malloc (position_count_size[i]);
+
+    {
+      char file_name[1024];
+      sprintf (file_name, "%s%u", PLY_COUNTER_FILE_PREFIX, i);
+      const int fd_map = open (file_name, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+      if (fd_map < 0)
+      {
+        perror ("open() ply counter file");
+        exit (-1);
+      }
+      if (0 != ftruncate (fd_map, (__off_t) position_count_size[i]))
+      {
+        perror ("ftruncate() ply counter file");
+        exit (-1);
+      }
+
+
+      position_count_space[i] = mmap(0, position_count_size[i],
+                       PROT_READ | PROT_WRITE,
+                       MAP_SHARED,
+                      fd_map,0);
+      if (position_count_space[i] == MAP_FAILED)
+      {
+        perror ("mmap() ply counter file");
+        exit (-1);
+      }
+      close (fd_map);
+    }
 #if 0 // HACK
     printf ("position_count_size[%u] = %'llu\n", i, position_count_size[i]);
 #endif
@@ -3094,12 +3122,35 @@ static void * brd_db_aggregate (void *arg)
   aggregate->ply = position_db_depth;
   aggregate->total_workloads = position_count;
   aggregate->workloads_processed = 0;
+  aggregate->counter_size = sizeof(unsigned long long);
 
-  unsigned long long *const deep_search_result = mmap(0, position_count_size[position_db_depth],
-          PROT_READ | PROT_WRITE,
-                  MAP_PRIVATE | MAP_ANONYMOUS,
-                  -1,0);
-  madvise (deep_search_result, position_count_size[position_db_depth], MADV_HUGEPAGE);
+  unsigned long long *deep_search_result;
+  {
+    const int fd_map = open (COMBINED_RESULT_TEMP_FILE, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+    if (fd_map < 0)
+    {
+      perror ("open() combined result file");
+      exit (-1);
+    }
+    if (0 != ftruncate (fd_map, (__off_t) position_count_size[position_db_depth]))
+    {
+      perror ("ftruncate() combined result file");
+      exit (-1);
+    }
+
+
+    deep_search_result = mmap(0, position_count_size[position_db_depth],
+                     PROT_WRITE,
+                     MAP_SHARED,
+                    fd_map,0);
+    if (deep_search_result == MAP_FAILED)
+    {
+      perror ("mmap() PROT_WRITE combined result file");
+      exit (-1);
+    }
+    close (fd_map);
+  }
+
 
   printf ("Allocated memory region for results. Size:%'llu bytes.\n", 
                     position_count_size[position_db_depth]);
@@ -3213,6 +3264,29 @@ static void * brd_db_aggregate (void *arg)
     }
   }
 
+  /* Re-open the mapped file in read-only mode.
+  */
+  {
+    (void) munmap (deep_search_result, position_count_size[position_db_depth]);
+    const int fd_map = open (COMBINED_RESULT_TEMP_FILE, O_RDONLY);
+    if (fd_map < 0)
+    {
+      perror ("open() RDONLY combined result file");
+      exit (-1);
+    }
+
+    deep_search_result = mmap(0, position_count_size[position_db_depth],
+                     PROT_READ,
+                     MAP_SHARED,
+                    fd_map,0);
+    if (deep_search_result == MAP_FAILED)
+    {
+      perror ("mmap() PROT_READ combined result file");
+      exit (-1);
+    }
+    close (fd_map);
+  }
+
   if (search_depth > position_db_depth)
   {
     printf ("Read %'llu results from all result files.\n", num_found_results);
@@ -3285,7 +3359,7 @@ static void * brd_db_aggregate (void *arg)
 
   for (unsigned int i = 0; i < (max_db_plies - 1); i++)
   {
-    free (position_count_space[i]); 
+    (void) munmap (position_count_space[i], position_count_size[i]);
   }
   (void) munmap (deep_search_result, position_count_size[position_db_depth]);
   closedir (dir);

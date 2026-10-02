@@ -91,6 +91,10 @@
 
 #define DEEP_SEARCH_RESULT_TEMP_FILE "temp_result"
 
+#define COMBINED_RESULT_TEMP_FILE WORK_DIRECTORY_NAME "combined_result"
+
+#define PLY_COUNTER_FILE_PREFIX WORK_DIRECTORY_NAME "counter_ply_"
+
 /* The deep search algorithm reads work loads from a file
 ** using the number of entries specified below.
 ** Since each workload entry is 40 bytes and search result is 8 bytes, 
@@ -111,8 +115,6 @@
 ** file update about every 10 minutes.
 */
 #define MAX_DEEP_SEARCH_PER_CORE_CHUNK_SIZE 1'000'000LLU
-
-
 
 typedef union
 {
