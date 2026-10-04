@@ -355,6 +355,11 @@ static void plyPositionFileReadOnlyStart (const unsigned int ply)
     perror ("open RDONLY ply positions file");
     exit (-1);
   }
+  if (0 != posix_fadvise (positionFd, 0, 0, POSIX_FADV_SEQUENTIAL))
+  {
+    perror ("posix_fadvise - position file - POSIX_FADV_SEQUENTIAL");
+    exit (-1);
+  }
 
   numEntriesInPositionFileBuffer = 0;
   currentPositionReadIndex = 0;
@@ -2894,7 +2899,7 @@ static void brdDbLastPlyMovesCount (const unsigned int search_depth,
 ********************************************************************/
 static void brdDbDeepSearchAggregate (
                                const unsigned int position_db_depth,
-                               const unsigned long long *const deep_search_result,
+                               const deepSearchCounter_t *const deep_search_result,
                                unsigned _BitInt(128) *const position_count_space,
                                aggregateThreadStatus_t *const aggregate)
 {
@@ -2911,6 +2916,15 @@ static void brdDbDeepSearchAggregate (
     perror ("open ply moves file");
     exit (-1);
   }
+  if (0 != posix_fadvise (fd, 0, 0, POSIX_FADV_SEQUENTIAL))
+  {
+    perror ("posix_fadvise - deep search move file - POSIX_FADV_SEQUENTIAL");
+    exit (-1);
+  }
+  constexpr unsigned long long max_move_elements_in_buffer = 100'000;
+  moveEntry_t move_element_buffer[max_move_elements_in_buffer];
+  unsigned long long move_element_index = 0;
+  unsigned long long move_elements_in_buffer = 0;
 
 #if 0 // HACK
   printf ("%s %d - position_db_depth:%u num_board_in_ply:%'llu\n",
@@ -2922,25 +2936,55 @@ static void brdDbDeepSearchAggregate (
   plyPositionFileReadOnlyStart (position_db_depth - 1);
   for (unsigned long long i = 0; i < num_boards_in_ply; i++)
   {
+    aggregate->workloads_processed++;
     position_count_space[i] = 0;
     plyPositionEntry_t *position = plyPositionFileRead ();
-    const unsigned long long move_index = moveEntryToIndex(position->first_move_index);
+
+    /* Skip positions that don't have any moves.
+    */
+    if (0 == position->num_moves)
+                            continue;
+
     moveEntry_t move_entry[position->num_moves];
-    const ssize_t read_request_size = sizeof(moveEntry_t) * position->num_moves;
     
-    if (read_request_size != pread (fd, move_entry, (size_t) read_request_size,
-                                           (__off_t) (move_index * sizeof(moveEntry_t))))
+    if ((move_element_index + position->num_moves) > move_elements_in_buffer)
     {
-      perror ("can't pread() move entry file");
-      exit (-1);
+      unsigned long long num_remaining_elements = move_elements_in_buffer - move_element_index;
+
+      /* Move any remaining elements in the buffer to the start of the buffer.
+      */
+      if (0 != num_remaining_elements)
+      {
+        memmove (move_element_buffer, &move_element_buffer[move_element_index],
+                    num_remaining_elements * sizeof (moveEntry_t));
+      }
+
+      const ssize_t read_size = read(fd, &move_element_buffer[num_remaining_elements], 
+                            sizeof(move_element_buffer) - (num_remaining_elements * sizeof(moveEntry_t)));
+      if (read_size <= 0)
+      {
+        perror ("can't read() move entry file");
+        exit (-1);
+      }
+      if (0 != (((unsigned long long) read_size) % sizeof(moveEntry_t)))
+      {
+        printf ("ERROR: Read size %'llu is not divisible by move entry size.\n", 
+                                                (unsigned long long) read_size);
+        exit (-1);
+      }
+      move_elements_in_buffer = num_remaining_elements + (((unsigned long long) read_size) / sizeof(moveEntry_t));
+      move_element_index = 0;
     }
+    memcpy (move_entry, &move_element_buffer[move_element_index],
+                position->num_moves * sizeof(moveEntry_t));
+    move_element_index += position->num_moves;
+
     for (unsigned int j = 0; j < position->num_moves; j++)
     {
       const unsigned long long next_node_index = moveEntryToIndex(move_entry[j]);
                         
       position_count_space[i] += deep_search_result[next_node_index];
     }
-    aggregate->workloads_processed++;
   }
   (void) plyPositionFileRead(); // Close the position database file.
   close (fd); // Close Move File 
@@ -2982,6 +3026,16 @@ static void brdDbPositionTreeAggregate (const unsigned int search_depth,
       perror ("open ply moves file");
       exit (-1);
     }
+    if (0 != posix_fadvise (fd, 0, 0, POSIX_FADV_SEQUENTIAL))
+    {
+      perror ("posix_fadvise - move file - POSIX_FADV_SEQUENTIAL");
+      exit (-1);
+    }
+
+    constexpr unsigned long long max_move_elements_in_buffer = 100'000;
+    moveEntry_t move_element_buffer[max_move_elements_in_buffer];
+    unsigned long long move_element_index = 0;
+    unsigned long long move_elements_in_buffer = 0;
 
     plyPositionFileReadOnlyStart ((unsigned int) ply_number);
 #if 1 // HACK
@@ -2996,16 +3050,40 @@ static void brdDbPositionTreeAggregate (const unsigned int search_depth,
       position_count_space[ply_number][i] = 0;
       plyPositionEntry_t *position = plyPositionFileRead ();
 
-      const unsigned long long move_index = moveEntryToIndex(position->first_move_index);
       moveEntry_t move_entry[position->num_moves];
-      const ssize_t read_request_size = sizeof(moveEntry_t) * position->num_moves;
-    
-      if (read_request_size != pread (fd, move_entry, (size_t) read_request_size,
-                                           (__off_t) (move_index * sizeof(moveEntry_t))))
+
+      if ((move_element_index + position->num_moves) > move_elements_in_buffer)
       {
-        perror ("can't pread() move entry file");
-        exit (-1);
+        unsigned long long num_remaining_elements = move_elements_in_buffer - move_element_index;
+
+        /* Move any remaining elements in the buffer to the start of the buffer.
+        */
+        if (0 != num_remaining_elements)
+        {
+          memmove (move_element_buffer, &move_element_buffer[move_element_index],
+                      num_remaining_elements * sizeof (moveEntry_t));
+        }
+
+        const ssize_t read_size = read(fd, &move_element_buffer[num_remaining_elements],
+                              sizeof(move_element_buffer) - (num_remaining_elements * sizeof(moveEntry_t)));
+        if (read_size <= 0)
+        {
+          perror ("can't read() move entry file");
+          exit (-1);
+        }
+        if (0 != (((unsigned long long) read_size) % sizeof(moveEntry_t)))
+        {
+          printf ("ERROR: Read size %'llu is not divisible by move entry size.\n",
+                                                  (unsigned long long) read_size);
+          exit (-1);
+        }
+        move_elements_in_buffer = num_remaining_elements + (((unsigned long long) read_size) / sizeof(moveEntry_t));
+        move_element_index = 0;
       }
+      memcpy (move_entry, &move_element_buffer[move_element_index],
+                  position->num_moves * sizeof(moveEntry_t));
+      move_element_index += position->num_moves;
+
       for (unsigned int j = 0; j < position->num_moves; j++)
       {
         const unsigned long long next_node_index = moveEntryToIndex(move_entry[j]);
@@ -3095,6 +3173,15 @@ static void * brd_db_aggregate (void *arg)
         exit (-1);
       }
       close (fd_map);
+
+#if 0 // HACK - Using RANDOM access slows down performance.
+      if (0 != madvise (position_count_space[i], position_count_size[i], 
+                        MADV_RANDOM))
+      {
+        perror ("madvise position_count_space MADV_RANDOM");
+        exit (-1);
+      }
+#endif
     }
 #if 0 // HACK
     printf ("position_count_size[%u] = %'llu\n", i, position_count_size[i]);
@@ -3113,7 +3200,7 @@ static void * brd_db_aggregate (void *arg)
   */
   const unsigned long long position_count = brdPlyNumPositionsGet (position_db_depth);
 
-  position_count_size[position_db_depth] = position_count * sizeof(unsigned long long);
+  position_count_size[position_db_depth] = position_count * sizeof(deepSearchCounter_t);
 
   printf ("Position Database Contains %'llu positions in ply:%u\n",
                     position_count, position_db_depth);
@@ -3122,9 +3209,9 @@ static void * brd_db_aggregate (void *arg)
   aggregate->ply = position_db_depth;
   aggregate->total_workloads = position_count;
   aggregate->workloads_processed = 0;
-  aggregate->counter_size = sizeof(unsigned long long);
+  aggregate->counter_size = sizeof(deepSearchCounter_t);
 
-  unsigned long long *deep_search_result;
+  deepSearchCounter_t *deep_search_result;
   {
     const int fd_map = open (COMBINED_RESULT_TEMP_FILE, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
     if (fd_map < 0)
@@ -3172,6 +3259,11 @@ static void * brd_db_aggregate (void *arg)
       if (fd < 0)
       {
         perror ("open results file");
+        exit (-1);
+      }
+      if (0 != posix_fadvise (fd, 0, 0, POSIX_FADV_SEQUENTIAL))
+      {
+        perror ("posix_fadvise - deep search result file - POSIX_FADV_SEQUENTIAL");
         exit (-1);
       }
 
@@ -3227,8 +3319,11 @@ static void * brd_db_aggregate (void *arg)
                     bytes_read, read_request_size, w_index); 
  #endif
 
+        constexpr unsigned long long max_results_to_read = 100'000;
+        unsigned long long result_buffer[max_results_to_read];
+
         ssize_t read_size = 
-             read (fd, &deep_search_result[w_index], read_request_size);
+             read (fd, result_buffer, sizeof(result_buffer));
                                        
         if (read_size < 0)
         {
@@ -3242,10 +3337,25 @@ static void * brd_db_aggregate (void *arg)
           exit (-1);
         }
 
+        for (unsigned long long i = 0; i < (unsigned long long) read_size / sizeof(unsigned long long); i++)
+        {
+          if (4 == sizeof(deepSearchCounter_t))
+          {
+            if (result_buffer[i] > 0xffff'ffffLLU)
+            {
+              printf ("ERROR: result_buffer[%'llu] == %'llu, whch doesn't fit into 4-byte integer.\n",
+                            i, result_buffer[i]);
+              printf ("       Please undefine the USE_4_BYTE_COUNTERS, re-compile the code, and run it again.\n");
+              exit (-1);
+            }
+          }
+          deep_search_result[w_index + i] = (deepSearchCounter_t) result_buffer[i]; 
+        }
+
         bytes_read += (unsigned long long) read_size;
         read_request_size -= (unsigned long long) read_size;
 
-        aggregate->workloads_processed = bytes_read / sizeof (unsigned long long);
+        aggregate->workloads_processed += ((unsigned long long) read_size) / sizeof(unsigned long long);
 
         if (0 == read_request_size)
         {
@@ -3285,6 +3395,15 @@ static void * brd_db_aggregate (void *arg)
       exit (-1);
     }
     close (fd_map);
+
+#if 0 // HACK - Using RANDOM access slows down performance.
+    if (0 != madvise (deep_search_result, position_count_size[position_db_depth], 
+                        MADV_RANDOM))
+    {
+      perror ("madvise deep_search_result MADV_RANDOM");
+      exit (-1);
+    }
+#endif
   }
 
   if (search_depth > position_db_depth)
@@ -3323,7 +3442,7 @@ static void * brd_db_aggregate (void *arg)
     aggregate->total_workloads = 0;
     aggregate->workloads_processed = 0;
     aggregate->counter_size = 16;
-    aggregate->ply = position_db_depth - 1;
+    aggregate->ply = search_depth - 1;
     brdDbLastPlyMovesCount (search_depth, 
                             position_count_space[search_depth - 1],
                             aggregate);
@@ -3357,11 +3476,16 @@ static void * brd_db_aggregate (void *arg)
     ply1_perft_result[i] = position_count_space[1][i];
   }
 
+  (void) unlink (COMBINED_RESULT_TEMP_FILE);
+
   for (unsigned int i = 0; i < (max_db_plies - 1); i++)
   {
     (void) munmap (position_count_space[i], position_count_size[i]);
+    char file_name[1024];
+    sprintf (file_name, "%s%u", PLY_COUNTER_FILE_PREFIX, i);
+
+    (void) unlink (file_name);
   }
-  (void) munmap (deep_search_result, position_count_size[position_db_depth]);
   closedir (dir);
 
   return 0;
@@ -3393,6 +3517,7 @@ void brdDbAggregate (unsigned int *depth,
     exit (-1);
   }
 
+//  constexpr unsigned long long wait_message_interval_sec = 60;
   constexpr unsigned long long wait_message_interval_sec = 10;
   unsigned long long last_event_time_sec = sysUpTimeMillisecondsGet() / 1000;
   unsigned long long wait_time_sec = 0;
