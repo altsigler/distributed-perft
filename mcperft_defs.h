@@ -239,6 +239,7 @@ typedef struct
     unsigned char *buffer;
     unsigned long long buffer_index;
     int fd;
+    unsigned long long file_system_block_size;
     unsigned int file_is_empty; /* No More Positions in this file */
 
     unsigned long long element_size;

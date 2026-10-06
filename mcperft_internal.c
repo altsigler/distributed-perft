@@ -1163,6 +1163,7 @@ static void mergeBlockReadInit (mergeBlock_t *const merge_block,
       perror ("fstatvfs of position merge file");
       exit (-1);
     }
+    merge_entry->file_system_block_size = stat.f_bsize;
 
     unsigned long long buffer_size_in_bytes = read_sort_block_size / num_blocks;
     /* Limit the size of the read block to 80MB.
@@ -1311,11 +1312,13 @@ static void *mergeBlockNextGet (mergeBlock_t *const merge_block,
 
     /* To conserve disk space we need to reduce the file size to remove all the 
     ** elements that we have already read.
-    ** This is only done for complete blocks.
+    ** Make sure that the trim size is a multiple of the file system block size.
+    ** Otherwise fallocate() will not work.
     */
     if ((0 != merge_entry->trim_needed) &&
         (merge_entry->num_trim_bytes > max_trim_bytes) &&
-        (merge_entry->num_elements_in_block == merge_entry->max_elements_in_block))
+        (0 == (merge_entry->num_trim_bytes % merge_entry->file_system_block_size)) &&
+        (0 != merge_entry->num_trim_bytes))
     {
       const __off_t trim_size = (__off_t) merge_entry->num_trim_bytes;
       merge_entry->num_trim_bytes = 0;
@@ -1334,28 +1337,30 @@ static void *mergeBlockNextGet (mergeBlock_t *const merge_block,
       {
         /* We already tested and verified that COLLAPSE_RANGE should work on this file
         ** system. 
-        ** We are not checking the error code because if the trim_size just happens to 
-        ** be the last block of the file then the function will return an error.
-        ** this only occurs if the file size is an exact multiple of trim_size. 
-        ** This is unlikely, but possible.
         */
-        (void) fallocate (merge_entry->fd, FALLOC_FL_COLLAPSE_RANGE, 0,  trim_size);
-
-        /* Reset the read pointer to the start of file.
-        */
-        if (0 != lseek (merge_entry->fd, 0, SEEK_SET))
+        if (0 == fallocate (merge_entry->fd, FALLOC_FL_COLLAPSE_RANGE, 0,  trim_size))
         {
-          perror ("lseek - Reset file read pointer.");
-          exit (-1);
+          /* Reset the read pointer to the start of file.
+          */
+          if (0 != lseek (merge_entry->fd, 0, SEEK_SET))
+          {
+            perror ("lseek - Reset file read pointer.");
+            exit (-1);
+          }
+
+          /* Tell the kernel to start reading the next block into cache.
+          */
+          if (0 != posix_fadvise (merge_entry->fd, 0, (off_t) total_bytes_read, POSIX_FADV_WILLNEED))
+          {
+            perror ("posix_fadvise - POSIX_FADV_WILLNEED");
+            exit (-1);
+          }
+        } else
+        {
+          perror ("fallocate failed, continuing without trimming.");
+          printf ("   fd:%d trim_size:%'llu\n", merge_entry->fd, (unsigned long long) trim_size);
         }
 
-        /* Tell the kernel to start reading the next block into cache.
-        */
-        if (0 != posix_fadvise (merge_entry->fd, 0, (off_t) total_bytes_read, POSIX_FADV_WILLNEED))
-        {
-          perror ("posix_fadvise - POSIX_FADV_WILLNEED");
-          exit (-1);
-        }
       }
     }
   }
