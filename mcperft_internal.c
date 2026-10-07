@@ -837,7 +837,7 @@ static int moveCompare (const void *const p1,
   const sortBlockMoveEntry_t *const move1 = p1;
   const sortBlockMoveEntry_t *const move2 = p2;
 
-  if (move1->move_index < move2->move_index)
+  if (moveEntryToIndex(move1->move_index) < moveEntryToIndex(move2->move_index))
                                         return -1;
 
   return 1;
@@ -1337,6 +1337,8 @@ static void *mergeBlockNextGet (mergeBlock_t *const merge_block,
       {
         /* We already tested and verified that COLLAPSE_RANGE should work on this file
         ** system. 
+        ** The fallocate will fail when we try to pass the last remaining block 
+        ** of the file, so we can just ignore that error.
         */
         if (0 == fallocate (merge_entry->fd, FALLOC_FL_COLLAPSE_RANGE, 0,  trim_size))
         {
@@ -1357,8 +1359,8 @@ static void *mergeBlockNextGet (mergeBlock_t *const merge_block,
           }
         } else
         {
-          perror ("fallocate failed, continuing without trimming.");
-          printf ("   fd:%d trim_size:%'llu\n", merge_entry->fd, (unsigned long long) trim_size);
+//          perror ("fallocate failed, continuing without trimming.");
+//          printf ("   fd:%d trim_size:%'llu\n", merge_entry->fd, (unsigned long long) trim_size);
         }
 
       }
@@ -1562,8 +1564,8 @@ static void * brd_db_generate (void *arg)
     ** newly added position.
     */
     unsigned long long next_move_index = ply_position_index++;
-    board_db->sort_block_move[sort_block_index].position_index = next_move_index;
-    board_db->sort_block_move[sort_block_index].move_index = moveEntryToIndex(min_position.move_entry);
+    board_db->sort_block_move[sort_block_index].position_index = moveIndexToEntry(next_move_index);
+    board_db->sort_block_move[sort_block_index].move_index = min_position.move_entry;
     sort_block_index++;
 
     /* If the sort block is full then sort it and write it to a temporaty file.
@@ -1596,8 +1598,8 @@ static void * brd_db_generate (void *arg)
       {
         /* Create move entry for this position.
         */
-        board_db->sort_block_move[sort_block_index].position_index = next_move_index;
-        board_db->sort_block_move[sort_block_index].move_index = moveEntryToIndex(next_block->move_entry);
+        board_db->sort_block_move[sort_block_index].position_index = moveIndexToEntry(next_move_index);
+        board_db->sort_block_move[sort_block_index].move_index = next_block->move_entry;
         sort_block_index++;
 
         /* If the sort block is full then sort it and write it to a temporaty file.
@@ -1702,7 +1704,7 @@ static void * brd_db_generate (void *arg)
 
     /* Create the move entry for the smallest move.
     */
-    const moveEntry_t move_entry = moveIndexToEntry(min_move.position_index);
+    const moveEntry_t move_entry = min_move.position_index;
 
     bufferedFileWrite  (&move_file, &move_entry);
 

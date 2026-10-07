@@ -195,11 +195,11 @@ inline unsigned long long moveEntryToIndex (const moveEntry_t move_entry)
   
 /* This structure is used for the temporary sort block move files.
 */
-typedef struct
+typedef struct __attribute__((packed))
 {
-  unsigned long long position_index; // The actual move record.
-  unsigned long long move_index; // Position of the move record in the final move file.
-} sortBlockMoveEntry_t __attribute__ ((aligned (8)));
+  moveEntry_t position_index; // The actual move record.
+  moveEntry_t move_index; // Position of the move record in the final move file.
+} sortBlockMoveEntry_t;
 
 /* This structure is used for the temporary sort block position files.
 */
