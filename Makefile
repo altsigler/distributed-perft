@@ -4,8 +4,8 @@ CC=icx
 OPTFLAG=-O3
 CFLAG=-std=c23 -Wall -Wextra -Werror -Wshadow -Wconversion
 
-DEBUG=-g
-#DEBUG=-g -Og
+#DEBUG=-g
+DEBUG=-g -Og
 #DEBUG=-g -Og -fsanitize=address -fsanitize=undefined
 #DEBUG= -fanalyzer
 #DEBUG=-g -O0 --coverage
@@ -32,8 +32,8 @@ MARCH=
 
 
 all: MARCH += -march=native
-all: brdutil.o movegen.o bytebrd.o onecore.o mcperft_api.o mcperft_internal.o
-	ar rcs chlib.a mcperft_api.o mcperft_internal.o movegen.o brdutil.o bytebrd.o onecore.o
+all: brdutil.o movegen.o bytebrd.o onecore.o mcperft_api.o mcperft_internal.o queue-lib.o 
+	ar rcs chlib.a mcperft_api.o mcperft_internal.o movegen.o brdutil.o bytebrd.o onecore.o queue-lib.o 
 	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -o perft perft.c chlib.a
 	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -o codecov codecov.c chlib.a
 	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -o mcperft mcperft.c chlib.a 
@@ -48,7 +48,8 @@ gen_build: clean
 	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -c brdutil.c
 	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -c mcperft_api.c -o mcperft_api.o 
 	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -c mcperft_internal.c -o mcperft_internal.o 
-	ar rcs chlib.a mcperft_api.o mcperft_internal.o movegen.o brdutil.o bytebrd.o onecore.o
+	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -c queue-lib.c -o queue-lib.o 
+	ar rcs chlib.a mcperft_api.o mcperft_internal.o movegen.o brdutil.o bytebrd.o onecore.o queue-lib.o
 	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -static -o bin/perft-gen perft.c chlib.a
 	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -static -o bin/mcperft-gen mcperft.c chlib.a 
 	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -static -o bin/scperft-gen scperft.c chlib.a
@@ -62,15 +63,19 @@ zen4_build: clean2
 	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -c brdutil.c
 	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -c mcperft_api.c -o mcperft_api.o 
 	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -c mcperft_internal.c -o mcperft_internal.o 
-	ar rcs chlib.a mcperft_api.o mcperft_internal.o movegen.o brdutil.o bytebrd.o onecore.o
+	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -c queue-lib.c -o queue-lib.o 
+	ar rcs chlib.a mcperft_api.o mcperft_internal.o movegen.o brdutil.o bytebrd.o onecore.o queue-lib.o
 	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -static -o bin/perft-zen4 perft.c chlib.a
 	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -static -o bin/mcperft-zen4 mcperft.c chlib.a 
 	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -static -o bin/scperft-zen4 scperft.c chlib.a
 
-mcperft_internal.o : mcperft_internal.c bytebrd_api.h mcperft_defs.h onecore_api.h brdutil_api.h
+queue-lib.o : queue-lib.c queue-lib.h queue-internal.h mutex-lib.h 
+	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -c queue-lib.c -o queue-lib.o 
+
+mcperft_internal.o : mcperft_internal.c bytebrd_api.h mcperft_defs.h onecore_api.h brdutil_api.h queue-lib.h
 	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -c mcperft_internal.c -o mcperft_internal.o 
 
-mcperft_api.o : mcperft_api.c bytebrd_api.h mcperft_api.h mcperft_defs.h
+mcperft_api.o : mcperft_api.c bytebrd_api.h mcperft_api.h mcperft_defs.h queue-lib.h
 	$(CC) $(MARCH) $(OPTFLAG) $(CFLAG) $(DEBUG) -c mcperft_api.c -o mcperft_api.o 
 
 brdutil.o : brdutil.c brdutil_api.h

@@ -14,6 +14,7 @@
 #include "bytebrd_api.h"
 #include "mcperft_api.h"
 #include "mcperft_defs.h"
+#include "queue-lib.h"
 
 /******************************************************************************
 ** Initialize the application.
@@ -31,6 +32,11 @@ void mcperftInit(void)
   setlocale (LC_NUMERIC, "");
 
   bytebrdInit();
+  if (0 != bsdlicQueueInit (MAX_MERGE_THREADS, 0, 0))
+  {
+    printf ("ERROR: bsdlicQueueInit()\n");
+    exit (-1);
+  }
 }
 
 /********************************************************************

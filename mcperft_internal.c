@@ -25,6 +25,7 @@
 #include "bytebrd_api.h"
 #include "onecore_api.h"
 #include "mcperft_defs.h"
+#include "queue-lib.h"
 
 
 #include <stdio.h>
@@ -1114,6 +1115,7 @@ static void nextPositionsCreate (const brd_t *const brd,
 ******************************************************************************/
 static void mergeBlockReadInit (mergeBlock_t *const merge_block,
                                 const unsigned long long read_sort_block_size,
+                                const unsigned int first_block_file_number,
                                 const unsigned int num_blocks,
                                 const unsigned long long element_size,
                                 const char *const file_prefix,
@@ -1128,7 +1130,7 @@ static void mergeBlockReadInit (mergeBlock_t *const merge_block,
     merge_entry->element_size = element_size;
     merge_entry->buffer_index = 0;
 
-    sprintf (merge_entry->file_name, "%s%u", file_prefix, i);
+    sprintf (merge_entry->file_name, "%s%u", file_prefix, i + first_block_file_number);
 
     if (trim_needed)
     {
@@ -1378,6 +1380,329 @@ static void *mergeBlockNextGet (mergeBlock_t *const merge_block,
 }
 
 /******************************************************************************
+** Pre-merge files.
+**
+** Return Values:
+******************************************************************************/
+static void * parallel_merge (void *arg)
+{
+  parallelMergeBlock_t *merge_stream = arg;
+  mergeBlock_t *const sort_table = malloc (merge_stream->num_merge_blocks * sizeof(mergeBlock_t));
+  assert (sort_table);
+    
+#if 1 // HACK
+  printf ("num_merge_blocks:%u file_prefix:%s first_merge_block:%u\n", 
+                merge_stream->num_merge_blocks, 
+                merge_stream->file_prefix,
+                merge_stream->first_merge_block);
+ #endif
+
+  mergeBlockReadInit (sort_table, 
+                      merge_stream->read_sort_block_size,
+                      merge_stream->first_merge_block,
+                      merge_stream->num_merge_blocks,
+                      merge_stream->element_size,
+                      merge_stream->file_prefix,
+                      merge_stream->trim_needed); 
+
+  unsigned char element_index = 0;
+
+  /* The first byte in the first elemenet in the message carries control information
+  ** about how many messages are in the buffer.
+  */
+  unsigned char msg[merge_stream->element_size * (MAX_ELEMENTS_IN_MESSAGE + 1)];
+  memset (msg, 0, merge_stream->element_size);
+
+  do
+  {
+    unsigned int all_blocks_empty = 1;
+    unsigned int min_stream_number = 0;
+    unsigned char *min_element = &msg[merge_stream->element_size * (element_index + 1)];
+
+    memset (min_element, 0xff, merge_stream->element_size);
+
+    for (unsigned int i = 0; i < merge_stream->num_merge_blocks; i++)
+    {
+      const unsigned char *const next_element = mergeBlockNextGet (sort_table, i, 0);
+
+      /* Check if the block is empty.
+      */
+      if (0 == next_element)
+      {
+        continue; 
+      }
+      all_blocks_empty = 0;
+
+      if (0 < merge_stream->compar(min_element, next_element))
+      {
+        memcpy (min_element, next_element, merge_stream->element_size);
+        min_stream_number = i;
+      }
+    }
+    if (0 != all_blocks_empty)
+    {
+      /* We read everything from the file.
+      */
+      break;
+    }
+
+    element_index++;
+    if (element_index == MAX_ELEMENTS_IN_MESSAGE)
+    {
+      /* Send the sorted entries to the merge stream.
+      */
+      msg[0] = element_index; // Indicate the number of elements.
+      if (0 != bsdlicQueueSend (&merge_stream->merged_stream, msg, 
+                  (unsigned int) sizeof(msg), QUEUE_WAIT_FOREVER))
+      {
+        printf ("ERROR: Sending full message to merge stream.\n");
+        exit (-1);
+      }
+      element_index = 0;
+    }
+
+    /* Remove the smallest entry from the sort block.
+    */
+    (void) mergeBlockNextGet (sort_table, min_stream_number, 1);
+
+  } while (1);
+
+  /* If there are some elements in the message buffer then send them now.
+  */
+  if (0 != element_index)
+  {
+    msg[0] = element_index; // Indicate the number of elements.
+    if (0 != bsdlicQueueSend (&merge_stream->merged_stream, msg, 
+                  (unsigned int) sizeof(msg), QUEUE_WAIT_FOREVER))
+    {
+      printf ("ERROR: Sending partial message to merge stream.\n");
+      exit (-1);
+    }
+  }
+
+  /* Send a message to the stream indicating that the stream is empty.
+  */
+  msg[0] = 0;
+  if (0 != bsdlicQueueSend (&merge_stream->merged_stream, msg, 
+                1, QUEUE_WAIT_FOREVER))
+  {
+    printf ("ERROR: Sending last message to merge stream.\n");
+    exit (-1);
+  }
+
+
+  free (sort_table);
+  return 0;
+}
+
+/******************************************************************************
+** When we sort large files, the number of generated merge blocks on disk
+** can be in the hundreds, or even thousands of blocks.
+**
+** In order to aggregate the merged blocks into a single sorted data stream 
+** we start multiple pre-merge threads that are responsible for a subset 
+** of the merge blocks. The pre-merge threads sort these blocks and send 
+** the sorted stream into a queue. 
+**
+** The final merge task reads the pre-merged data from the queues instead of
+** directly from the files, which makes the final merge processing much 
+** faster because there is only a small number of queues to read, and because
+** reading and pre-merging can continue while the main merge task is performing
+** other work.
+**
+******************************************************************************/
+static unsigned int parallelMergeBlockReadInit (parallelMergeBlock_t *const merge_stream,
+                                const unsigned long long read_sort_block_size,
+                                const unsigned int num_blocks,
+                                const unsigned long long element_size,
+                                const char *const file_prefix,
+                                const unsigned int trim_needed,
+                                int (*compar)(const void *, const void *))
+{
+  const unsigned int num_merge_threads = ((num_blocks / 2) >= MAX_MERGE_THREADS)?MAX_MERGE_THREADS:
+                                     (0 == (num_blocks / 2))?1:
+                                        num_blocks / 2;
+
+  const unsigned long long max_queue_memory_size = ((read_sort_block_size / 2) / num_merge_threads) & ~3LLU;
+  const unsigned int queue_memory_size = (max_queue_memory_size > MAX_QUEUE_SIZE)?MAX_QUEUE_SIZE:
+                                                    (unsigned int) max_queue_memory_size;
+  assert (queue_memory_size > (2 * element_size));
+
+  const unsigned long long per_thread_file_buffer_size = max_queue_memory_size;
+
+  unsigned int first_merge_block = 0;
+
+  for (unsigned int i = 0; i < num_merge_threads; i++)
+  {
+    pthread_t merge_thread;
+    char queue_name[MAX_QUEUE_NAME_SIZE];
+    int rv;
+
+    sprintf (queue_name, "merge-stream-%u", i);
+
+    if (0 != (rv = bsdlicQueueCreate(&merge_stream[i].merged_stream, queue_name, 
+                                queue_memory_size,
+                                0, 1, 1)))
+    {
+      printf ("ERROR: Can't create merge stream queue. rc:%d stream:%u queue_memory_size:%'u\n",
+                        rv, i, queue_memory_size);
+      exit (-1);
+    }
+
+    merge_stream[i].num_elements_in_message = 0;
+    merge_stream[i].element_index = 0;
+
+    merge_stream[i].element_size = (unsigned int) element_size; 
+    merge_stream[i].last_received_message = malloc (element_size * (MAX_ELEMENTS_IN_MESSAGE + 1));
+    assert (0 != merge_stream[i].last_received_message);
+
+    merge_stream[i].compar = compar;
+    merge_stream[i].trim_needed = trim_needed; 
+    merge_stream[i].read_sort_block_size = per_thread_file_buffer_size; 
+    strcpy (merge_stream[i].file_prefix, file_prefix); 
+    merge_stream[i].first_merge_block = first_merge_block; 
+    merge_stream[i].num_merge_blocks = num_blocks / num_merge_threads; 
+    if (i < (num_blocks % num_merge_threads))
+    {
+      merge_stream[i].num_merge_blocks += 1;
+    }
+    first_merge_block += merge_stream[i].num_merge_blocks;
+
+    int rc = pthread_create (&merge_thread, 0, parallel_merge, &merge_stream[i]);
+    if (rc)
+    {
+      perror ("pthread_create: merge_thread");
+      exit (-1);
+    }
+    merge_stream[i].merge_thread = merge_thread;
+  }
+
+  /* Mark unused streams as "finished".
+  */
+  for (unsigned int i = num_merge_threads; i < MAX_MERGE_THREADS; i++)
+  {
+    merge_stream[i].finished_stream = 1;
+  }
+
+  return num_merge_threads;
+}
+/******************************************************************************
+** Free all resources associated with the parallel merge block.
+******************************************************************************/
+static void parallelMergeBlockTerminate (parallelMergeBlock_t *const merge_stream)
+{
+#if 1 // HACK
+  bsdlicDebugQueueControlShow (0, 1);
+#endif
+
+  for (unsigned int i = 0; i < MAX_MERGE_THREADS; i++)
+  {
+    if (0 == merge_stream[i].merge_thread)
+    {
+      continue;
+    }
+
+    int rc = pthread_join (merge_stream[i].merge_thread, 0);
+    if (0 != rc)
+    {
+      perror ("pthread_join: ");
+      exit (-1);
+    }
+    if (0 != bsdlicQueueDestroy(&merge_stream[i].merged_stream))
+    {
+      printf ("ERROR: Can't destroy merge stream queue.\n");
+      exit (-1);
+    }
+
+    free (merge_stream[i].last_received_message);
+  }
+}
+
+/******************************************************************************
+** Find the next entry in the specified sorted positions stream.
+** If the third parameter is 0 then the entry remains in the stream. 
+** If the third parameter is not zero then the entry is removed.
+** 
+** Return Values:
+** 0 - No entries in the specified sort stream.
+**   - Pointer to the next entry. The pointer is valid until next call to 
+**     this function for the specified stream.
+******************************************************************************/
+static void *parallelMergeBlockNextGet (parallelMergeBlock_t *const merge_stream,
+                                            const unsigned int stream_number,
+                                            const unsigned int remove_entry)
+{
+  parallelMergeBlock_t *const merge_entry = &merge_stream[stream_number];
+
+  if (0 != merge_entry->finished_stream)
+  {
+    return 0;
+  }
+
+  /* If we are not holding any messages in the last_received_message buffer then
+  ** wait for the next message.
+  */
+  if (0 == merge_entry->last_received_message_present)
+  {
+    unsigned int msg_size = merge_entry->element_size * (MAX_ELEMENTS_IN_MESSAGE + 1);
+    int rc;
+
+    if (0 != (rc = bsdlicQueueReceive (&merge_entry->merged_stream, merge_entry->last_received_message, msg_size,
+                                &msg_size, QUEUE_WAIT_FOREVER)))
+    {
+      printf ("ERROR: Merge Stream Queue Receive. rc:%d stream_number:%u sizeof(msg):%u\n", 
+                            rc, stream_number, msg_size);
+      bsdlicQueueInfo_t queue_info;
+      if (0 != bsdlicQueueInfoGet (&merge_entry->merged_stream, &queue_info, 0))
+      {
+        printf ("ERROR: Can't get queue info.\n");
+      } else
+      {
+        printf ("queue_size:%'u  current_queue_size:%'u  send_blocks:%'llu  receive_blocks:%'llu\n",
+                queue_info.queue_size,
+                queue_info.current_queue_size,
+                queue_info.total_queue_full_send_blocks,
+                queue_info.total_queue_empty_receive_blocks);
+      }
+      exit (-1);
+    }
+
+    merge_entry->num_elements_in_message = merge_entry->last_received_message[0];
+    merge_entry->element_index = 0;
+
+    /* The first byte of the message is a flag indicating whether the input stream 
+    ** is empty. 
+    */
+    if (0 == merge_entry->num_elements_in_message)
+    {
+      merge_entry->finished_stream = 1;
+      return 0;
+    }
+
+    /* The rest of the message contains the received element.
+    */
+    merge_entry->last_received_message_present = 1;
+  }
+
+  /* Point the message that needs to be returned to caller.
+  */
+  unsigned char *msg = &merge_entry->last_received_message[merge_entry->element_size * (merge_entry->element_index + 1)];
+
+  /* If this entry is to be removed then clear the last_received_message_present flag.
+  */
+  if (0 != remove_entry)
+  {
+    merge_entry->element_index++;
+    if (merge_entry->element_index == merge_entry->num_elements_in_message)
+    {
+      merge_entry->last_received_message_present = 0;
+    }
+  }
+
+  return msg; 
+}
+
+/******************************************************************************
 ** Generate the board database from the given position.
 **
 ** Return Values:
@@ -1482,18 +1807,16 @@ static void * brd_db_generate (void *arg)
   ** The move database is generated as part of this merge. 
   **
   ** The code opens all block files at the same time. 
-  ** For each block file allocate a buffer so that we don't 
-  ** need to do a read() call for each entry. 
   */
-  mergeBlock_t *const sort_table = malloc (gen_status->sort_blocks_created * sizeof(mergeBlock_t));
-  assert (sort_table);
+  parallelMergeBlock_t parallel_sort_table[MAX_MERGE_THREADS] = {};
 
-  mergeBlockReadInit (sort_table, 
+  unsigned int num_merge_threads = parallelMergeBlockReadInit (parallel_sort_table, 
                       board_db->read_sort_block_size,
                       gen_status->sort_blocks_created,
                       sizeof (sortBlockEntry_t),
                       SORT_BLOCK_PREFIX,
-                      1);
+                      1,
+                      positionCompare);
 
   /* Read until all positions from all blocks are read.
   */
@@ -1512,14 +1835,14 @@ static void * brd_db_generate (void *arg)
 
     more_positions = 0;
 
-    for (unsigned int i = 0; i < gen_status->sort_blocks_created; i++)
+    for (unsigned int i = 0; i < num_merge_threads; i++)
     {
       /* Get pointer to next position from specified block without removing
       ** the position from the block.
       ** Note that some of the blocks may become empty before other blocks,
       ** so we need to handle that.
       */
-      const sortBlockEntry_t *const next_block = mergeBlockNextGet (sort_table, i, 0);
+      const sortBlockEntry_t *const next_block = parallelMergeBlockNextGet (parallel_sort_table, i, 0);
 
       if (0 != next_block)
       {
@@ -1542,7 +1865,7 @@ static void * brd_db_generate (void *arg)
 
     /* Remove the smallest entry from the sorted block where it was found.
     */
-    if (0 == mergeBlockNextGet (sort_table, min_position_stream, 1))
+    if (0 == parallelMergeBlockNextGet (parallel_sort_table, min_position_stream, 1))
     {
       printf ("ERROR: Unexpected end of temp file data stream.\n");
       exit (-1);
@@ -1584,7 +1907,7 @@ static void * brd_db_generate (void *arg)
     ** positions to point to the first unique position we found.
     */
 
-    for (unsigned int i = 0; i < gen_status->sort_blocks_created; i++)
+    for (unsigned int i = 0; i < num_merge_threads; i++)
     {
       /* Get pointer to next position from specified block without removing
       ** the position from the block.
@@ -1593,7 +1916,7 @@ static void * brd_db_generate (void *arg)
       */
       sortBlockEntry_t *next_block;
 
-      while ((0 != (next_block = mergeBlockNextGet(sort_table, i, 0))) &&
+      while ((0 != (next_block = parallelMergeBlockNextGet(parallel_sort_table, i, 0))) &&
              (0 == positionCompare(&min_position, next_block)))
       {
         /* Create move entry for this position.
@@ -1617,7 +1940,7 @@ static void * brd_db_generate (void *arg)
 
         /* Remove this position. 
         */
-        (void) mergeBlockNextGet (sort_table, i, 1);
+        (void) parallelMergeBlockNextGet (parallel_sort_table, i, 1);
         gen_status->processed_new_ply_positions++;
       }
     }
@@ -1632,7 +1955,7 @@ static void * brd_db_generate (void *arg)
                                   move_sort_blocks_created, sort_block_index);
     move_sort_blocks_created++;
   }
-  free (sort_table);
+  parallelMergeBlockTerminate (parallel_sort_table); 
 
   /* Close the ply position file.
   */
@@ -1650,21 +1973,16 @@ static void * brd_db_generate (void *arg)
                                                     sizeof (moveEntry_t));
 
   /* Merge all sorted move blocks into a single move database.
-  **
-  ** The code opens all block files at the same time. 
-  ** For each block file allocate a buffer so that we don't 
-  ** need to do a read() call for each entry. 
   */
-  mergeBlock_t *const move_sort_table = malloc (move_sort_blocks_created * sizeof(mergeBlock_t));
-  assert (move_sort_table);
+  parallelMergeBlock_t parallel_move_sort_table[MAX_MERGE_THREADS] = {};
 
-  mergeBlockReadInit (move_sort_table, 
+  num_merge_threads = parallelMergeBlockReadInit (parallel_move_sort_table, 
                       board_db->read_sort_block_size,
                       move_sort_blocks_created,
                       sizeof (sortBlockMoveEntry_t),
                       SORT_MOVE_BLOCK_PREFIX,
-                      1);
-
+                      1,
+                      moveCompare);
 
   for (unsigned long long move_count = 0; 
             move_count < board_db->ply_table[ply_number].stats.total_moves_added;
@@ -1674,14 +1992,14 @@ static void * brd_db_generate (void *arg)
     memset (&min_move, 0xff, sizeof (sortBlockMoveEntry_t));
     unsigned int min_move_stream = 0;
 
-    for (unsigned int i = 0; i < move_sort_blocks_created; i++)
+    for (unsigned int i = 0; i < num_merge_threads; i++)
     {
       /* Get pointer to next move from specified block without removing
       ** the move from the block.
       ** Note that some of the blocks may become empty before other blocks,
       ** so we need to handle that.
       */
-      const sortBlockMoveEntry_t *const next_block = mergeBlockNextGet (move_sort_table, i, 0);
+      const sortBlockMoveEntry_t *const next_block = parallelMergeBlockNextGet (parallel_move_sort_table, i, 0);
 
       if (0 != next_block)
       {
@@ -1696,7 +2014,7 @@ static void * brd_db_generate (void *arg)
 
     /* Remove the smallest entry from the sorted block where it was found.
     */
-    if (0 == mergeBlockNextGet (move_sort_table, min_move_stream, 1))
+    if (0 == parallelMergeBlockNextGet (parallel_move_sort_table, min_move_stream, 1))
     {
       printf ("ERROR: Unexpected end of move temp file data stream.\n");
       exit (-1);
@@ -1713,7 +2031,7 @@ static void * brd_db_generate (void *arg)
     */
     if (move_count == (board_db->ply_table[ply_number].stats.total_moves_added - 1))
     {
-      (void) mergeBlockNextGet (move_sort_table, min_move_stream, 1);
+      (void) parallelMergeBlockNextGet (parallel_move_sort_table, min_move_stream, 1);
     }
 
     gen_status->processed_new_moves++;
@@ -1724,7 +2042,7 @@ static void * brd_db_generate (void *arg)
   */
   bufferedFileFinish  (&move_file);
 
-  free (move_sort_table);
+  parallelMergeBlockTerminate (parallel_move_sort_table); 
 
 
 
@@ -1809,6 +2127,7 @@ void brdDbGenerate(
   }
 
   const unsigned long long total_ram = (unsigned long long) mem_info.totalram * mem_info.mem_unit;
+//  const unsigned long long total_ram = 16LLU * 1024LLU * 1024LLU * 1024LLU; // HACK
 
   /* Use one third of physical memory for the sort block. Make sure that the sort block size 
   ** is in whole megabytes.

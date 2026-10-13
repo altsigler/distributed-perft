@@ -8,6 +8,7 @@
 #define MCPERFT_DEFS_H_INCLUDED
 
 #include "mcperft_api.h"
+#include "queue-lib.h"
 
 /* Maximum number of plies in the board database.
 ** This just needs to be some large value that we will never reach. 
@@ -140,6 +141,11 @@ typedef unsigned long long deepSearchCounter_t;
 */
 #define MAX_DEEP_SEARCH_PER_CORE_CHUNK_SIZE 1'000'000LLU
 
+/* The maximum number of merge threads.
+*/
+#define MAX_MERGE_THREADS 16
+
+
 typedef union
 {
   brdCtrlInfo_t brd_info;
@@ -232,7 +238,7 @@ typedef struct
 
 
 /* Structure for holding information about sorted blocks while
-** merging these blocks into the ply position file.
+** merging these blocks into the ply position file or move file.
 */
 typedef struct
 {
@@ -274,6 +280,68 @@ typedef struct
 
     char file_name[1024];
 } mergeBlock_t;
+
+/* In order to improve the file merge performance, the merge operation is done by 
+** multiple threads. Each thread combines multiple merge blocks into a single 
+** sorted merge stream. The multiple merged streams are then used by the main 
+** merge thread to generate the final database.
+** Each message in the stream contains up to MAX_ELEMENTS_IN_MESSAGE elements.
+*/
+#define MAX_ELEMENTS_IN_MESSAGE 100
+typedef struct
+{
+    /* The message queue on which merged sorted blocks are sent and received.
+    */
+    bsdlicQueue_t merged_stream;
+
+    /* Last elements received on the merge stream.
+    */
+    unsigned char *last_received_message;
+
+    /* The nuber of elements received in the last message.
+    */
+    unsigned char num_elements_in_message;
+
+    /* The element number which is being processed in the last_received_message.
+    */
+    unsigned char element_index;
+
+    /* Flag indicating that there is data available in the last_received_message buffer.
+    */
+    unsigned int last_received_message_present;
+
+    /* Flag indicating that all underlying files for this merge stream have been emptied 
+    ** and there is no more messages to be received from this stream.
+    */
+    unsigned int finished_stream;
+
+    /* The merge block element size.
+    */
+    unsigned int element_size;
+
+    /* Function used to compare elements.
+    */
+    int (*compar)(const void *, const void *);
+
+
+    unsigned int trim_needed;
+    char file_prefix[1024];
+    unsigned long long read_sort_block_size;
+
+    /* The starting merge block number for this stream.
+    */
+    unsigned int first_merge_block;
+
+    /* The  number of merge blocks feeding into this merge stream.
+    */
+    unsigned int num_merge_blocks;
+
+    /* The thread handling this merge stream.
+    */
+    pthread_t merge_thread;
+
+} parallelMergeBlock_t;
+
 
 /* This structure is used for ply position files.
 */
