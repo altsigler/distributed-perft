@@ -1141,7 +1141,7 @@ static void mergeBlockReadInit (mergeBlock_t *const merge_block,
       /* Although we are only reading from this file, we are also reducing the 
       ** file size as the data is read, so the file needs to be opened in RDWR mode.
       */
-      merge_entry->fd = open (merge_entry->file_name, O_RDWR);
+      merge_entry->fd = open (merge_entry->file_name, O_RDWR | O_DIRECT);
       if (merge_entry->fd < 0)
       {
         perror ("open merge file (O_RDWR)");
@@ -1151,7 +1151,7 @@ static void mergeBlockReadInit (mergeBlock_t *const merge_block,
       }
     } else
     {
-      merge_entry->fd = open (merge_entry->file_name, O_RDONLY);
+      merge_entry->fd = open (merge_entry->file_name, O_RDONLY | O_DIRECT);
       if (merge_entry->fd < 0)
       {
         perror ("open merge file (O_RDONLY)");
@@ -1188,7 +1188,9 @@ static void mergeBlockReadInit (mergeBlock_t *const merge_block,
     }
     merge_entry->max_elements_in_block = aligned_size / element_size;
 
-    merge_entry->buffer = malloc (merge_entry->max_elements_in_block * merge_entry->element_size);
+    merge_entry->buffer = aligned_alloc (merge_entry->file_system_block_size, 
+                                merge_entry->max_elements_in_block * merge_entry->element_size);
+
     assert (merge_entry->buffer);
 
     /* Check whether the fallocate() function is supported, and which mode we can use.
@@ -1349,14 +1351,6 @@ static void *mergeBlockNextGet (mergeBlock_t *const merge_block,
           if (0 != lseek (merge_entry->fd, 0, SEEK_SET))
           {
             perror ("lseek - Reset file read pointer.");
-            exit (-1);
-          }
-
-          /* Tell the kernel to start reading the next block into cache.
-          */
-          if (0 != posix_fadvise (merge_entry->fd, 0, (off_t) total_bytes_read, POSIX_FADV_WILLNEED))
-          {
-            perror ("posix_fadvise - POSIX_FADV_WILLNEED");
             exit (-1);
           }
         } else

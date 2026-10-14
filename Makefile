@@ -4,7 +4,7 @@ CC=icx
 OPTFLAG=-O3
 CFLAG=-std=c23 -Wall -Wextra -Werror -Wshadow -Wconversion
 
-#DEBUG=-g
+DEBUG=-g
 #DEBUG=-g -Og
 #DEBUG=-g -Og -fsanitize=address -fsanitize=undefined
 #DEBUG= -fanalyzer

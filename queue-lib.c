@@ -141,7 +141,7 @@ int bsdlicQueueInit (unsigned int max_private_queues,
     {
       shared_supported = 1;
       queue_control_size = sizeof(controlQueue_t);
-      queue_control_size += sizeof(msgQueue_t) * max_shared_queues;
+      queue_control_size += (unsigned int) sizeof(msgQueue_t) * max_shared_queues;
 
       strcpy (file_name, queue_prefix);
       strcat (file_name, "control");
@@ -242,7 +242,7 @@ int bsdlicQueueInit (unsigned int max_private_queues,
     {
       shared_supported = 0;
       queue_control_size = sizeof(controlQueue_t);
-      queue_control_size += sizeof(msgQueue_t) * max_private_queues;
+      queue_control_size += (unsigned int) sizeof(msgQueue_t) * max_private_queues;
       rc = -1;
 
       /* If the Queue sharing mode is disabled then the Queue control structure is 
@@ -701,7 +701,7 @@ int bsdlicQueueSend (bsdlicQueue_t *queue,
             /* Adjust wait time to subtract the time we already waited.
             */
             expired_ms = (unsigned int) (current_time.tv_sec - start_time.tv_sec) * 1000;
-            expired_ms += (current_time.tv_nsec - start_time.tv_nsec) / 1000000;
+            expired_ms += (unsigned int) (current_time.tv_nsec - start_time.tv_nsec) / 1000000;
 
             if (expired_ms >= wait_ms)
             {
@@ -919,7 +919,7 @@ int bsdlicQueueReceive (bsdlicQueue_t *queue,
             /* Adjust wait time to subtract the time we already waited.
             */
             expired_ms = (unsigned int) (current_time.tv_sec - start_time.tv_sec) * 1000;
-            expired_ms += (current_time.tv_nsec - start_time.tv_nsec) / 1000000;
+            expired_ms += (unsigned int) (current_time.tv_nsec - start_time.tv_nsec) / 1000000;
   
             if (expired_ms >= wait_ms)
             {
@@ -997,7 +997,7 @@ int bsdlicQueueReceive (bsdlicQueue_t *queue,
                    ((segment_size) <= msg_buf_size)?segment_size:msg_buf_size);
      if (msg_buf_size > segment_size)
       {
-        msg_buf_size -= segment_size;
+        msg_buf_size -= (unsigned int) segment_size;
         segment_size = rx_msg_size -
                     (queue_size - msg_queue->tail);
         memcpy (&msg[queue_size - msg_queue->tail],
