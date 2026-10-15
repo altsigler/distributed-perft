@@ -340,6 +340,10 @@ typedef struct
     */
     unsigned int first_merge_block;
 
+    /* Total number of merge streams.
+    */
+    unsigned int num_merge_streams;
+
     /* The  number of merge blocks feeding into this merge stream.
     */
     unsigned int num_merge_blocks;

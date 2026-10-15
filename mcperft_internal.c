@@ -1150,6 +1150,7 @@ static void nextPositionsCreate (const brd_t *const brd,
 ******************************************************************************/
 static void mergeBlockReadInit (mergeBlock_t *const merge_block,
                                 const unsigned long long read_sort_block_size,
+                                const unsigned int num_merge_streams,
                                 const unsigned int first_block_file_number,
                                 const unsigned int num_blocks,
                                 const unsigned long long element_size,
@@ -1165,7 +1166,7 @@ static void mergeBlockReadInit (mergeBlock_t *const merge_block,
     merge_entry->element_size = element_size;
     merge_entry->buffer_index = 0;
 
-    sprintf (merge_entry->file_name, "%s%u", file_prefix, i + first_block_file_number);
+    sprintf (merge_entry->file_name, "%s%u", file_prefix, (i * num_merge_streams) + first_block_file_number);
 
     if (trim_needed)
     {
@@ -1420,14 +1421,16 @@ static void * parallel_merge (void *arg)
   assert (sort_table);
     
 #if 1 // HACK
-  printf ("num_merge_blocks:%u file_prefix:%s first_merge_block:%u\n", 
+  printf ("num_merge_blocks:%u file_prefix:%s first_merge_block:%u num_merge_streams:%u\n", 
                 merge_stream->num_merge_blocks, 
                 merge_stream->file_prefix,
-                merge_stream->first_merge_block);
+                merge_stream->first_merge_block,
+                merge_stream->num_merge_streams);
  #endif
 
   mergeBlockReadInit (sort_table, 
                       merge_stream->read_sort_block_size,
+                      merge_stream->num_merge_streams,
                       merge_stream->first_merge_block,
                       merge_stream->num_merge_blocks,
                       merge_stream->element_size,
@@ -1559,8 +1562,6 @@ static unsigned int parallelMergeBlockReadInit (parallelMergeBlock_t *const merg
 
   const unsigned long long per_thread_file_buffer_size = max_queue_memory_size;
 
-  unsigned int first_merge_block = 0;
-
   for (unsigned int i = 0; i < num_merge_threads; i++)
   {
     pthread_t merge_thread;
@@ -1581,6 +1582,7 @@ static unsigned int parallelMergeBlockReadInit (parallelMergeBlock_t *const merg
     merge_stream[i].num_elements_in_message = 0;
     merge_stream[i].element_index = 0;
 
+    merge_stream[i].num_merge_streams = num_merge_threads;
     merge_stream[i].element_size = (unsigned int) element_size; 
     merge_stream[i].last_received_message = malloc (element_size * (MAX_ELEMENTS_IN_MESSAGE + 1));
     assert (0 != merge_stream[i].last_received_message);
@@ -1589,13 +1591,12 @@ static unsigned int parallelMergeBlockReadInit (parallelMergeBlock_t *const merg
     merge_stream[i].trim_needed = trim_needed; 
     merge_stream[i].read_sort_block_size = per_thread_file_buffer_size; 
     strcpy (merge_stream[i].file_prefix, file_prefix); 
-    merge_stream[i].first_merge_block = first_merge_block; 
+    merge_stream[i].first_merge_block = i; 
     merge_stream[i].num_merge_blocks = num_blocks / num_merge_threads; 
     if (i < (num_blocks % num_merge_threads))
     {
       merge_stream[i].num_merge_blocks += 1;
     }
-    first_merge_block += merge_stream[i].num_merge_blocks;
 
     int rc = pthread_create (&merge_thread, 0, parallel_merge, &merge_stream[i]);
     if (rc)
