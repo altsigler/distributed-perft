@@ -7,6 +7,7 @@
 #ifndef MCPERFT_DEFS_H_INCLUDED
 #define MCPERFT_DEFS_H_INCLUDED
 
+#include "pthread.h"
 #include "mcperft_api.h"
 #include "queue-lib.h"
 
@@ -145,6 +146,13 @@ typedef unsigned long long deepSearchCounter_t;
 */
 #define MAX_MERGE_THREADS 16
 
+/* The number of sort threads for sorting a single block in DRAM.
+** The sort algorithm uses DRAM extensively, so ultimately the performance is
+** limited by the DRAM access speed as opposed to CPU speed. Therefore there is 
+** no point in starting the sort thread on every available core.
+** The below number of threads is optimized for "Intel(R) Core(TM) Ultra 7 265K"
+*/
+#define NUM_SORT_THREADS 10
 
 typedef union
 {
@@ -379,13 +387,35 @@ typedef struct
 } plyInfo_t;
 
 
+typedef struct
+{
+  unsigned char *block;
+  unsigned long long start_index;
+  unsigned long long num_entries;
+  size_t element_size;
+  int (*compar)(const void *, const void *);
+} sortParms_t;
+
+typedef struct
+{
+  sortParms_t sort_parms[NUM_SORT_THREADS];
+  char file_name[1024];
+  unsigned long long num_elements;
+  size_t element_size;
+  int (*compar)(const void *, const void *);
+  pthread_t block_write_thread;
+} sortBlockCtrl_t;
+
 /* Board Database Control Structure.
 ** This structure is used during board database creation to keep track 
 ** of creation statistics. 
 */
 typedef struct 
 {
-  void *sort_block;
+  sortBlockCtrl_t sort_block_ctrl;
+
+  unsigned int active_sort_block;
+  void *sort_block[2];
   sortBlockEntry_t *sort_block_position;
   unsigned long long max_sortblock_positions;
 

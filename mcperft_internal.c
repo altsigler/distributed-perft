@@ -860,31 +860,32 @@ static int moveCompare (const void *const p1,
 ** sort the data.
 **
 ******************************************************************************/
-typedef struct
-{
-  unsigned char *block;
-  unsigned long long start_index;
-  unsigned long long num_entries;
-  size_t element_size;
-  int (*compar)(const void *, const void *);
-} sortParms_t;
-
 static void * parallelSortThread (void *arg)
 {
  sortParms_t *sort_parms = arg;
 
- qsort (sort_parms->block, sort_parms->num_entries, 
+ if (0 != sort_parms->num_entries)
+ {
+   qsort (sort_parms->block, sort_parms->num_entries, 
         sort_parms->element_size, sort_parms->compar);
+ }
 
  return 0;
 }
 
-static void parallelSort (const char *const file_name,
-                          void *const block, 
-                          const unsigned long long num_elements,
-                          const size_t element_size,
-                          int (*compar)(const void *, const void *))
+/******************************************************************
+** This thread merges segments sorted with qsort into 
+** the block file.
+******************************************************************/
+static void * generateSortedBlockFile (void *arg)
 {
+  sortBlockCtrl_t *sort_block_ctrl = arg;
+  const char *const file_name = sort_block_ctrl->file_name;
+  sortParms_t *sort_parms = sort_block_ctrl->sort_parms;
+  const unsigned long long num_elements = sort_block_ctrl->num_elements;
+  const size_t element_size = sort_block_ctrl->element_size;
+  int (*compar)(const void *, const void *) = sort_block_ctrl->compar;
+
   const int fd = open (file_name, O_WRONLY | O_APPEND | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
   if (fd < 0)
   {
@@ -892,78 +893,9 @@ static void parallelSort (const char *const file_name,
     exit (-1);
   }
 
-  /* When the number of elements is relatively small, it is not worth the effort 
-  ** to create threads. Simply call the qsort() and write results to file.
-  */
-  if (num_elements < 100'000)
-  {
-    qsort (block, num_elements, element_size, compar);
-
-    const size_t write_size = num_elements * element_size;
-    size_t total_bytes_written = 0;
-    unsigned char *sort_block_buffer =  block;
-
-    do 
-    {
-      const ssize_t bytes_written = write (fd, &sort_block_buffer[total_bytes_written], 
-                                            write_size - total_bytes_written);
-      if (bytes_written < 0)
-      {
-        perror ("Writing sort block file");
-        exit (-1);
-      }
-      total_bytes_written += (size_t) bytes_written;
-    } while (total_bytes_written < write_size);
-    close (fd);
-
-    return;
-  }
-
-  /* The sort algorithm uses DRAM extensively, so ultimately the performance is
-  ** limited by the DRAM access speed as opposed to CPU speed. Therefore there is 
-  ** no point in starting the sort thread on every available core.
-  ** The below number of threads is optimized for "Intel(R) Core(TM) Ultra 7 265K"
-  */
-  constexpr unsigned int num_sort_threads = 10;
-  sortParms_t sort_parms[num_sort_threads];
-  unsigned long long start_index = 0;
-  pthread_t sort_thread[num_sort_threads];
-
-  for (unsigned int i = 0; i < num_sort_threads; i++)
-  {
-    sort_parms[i].start_index = start_index;
-    sort_parms[i].num_entries = num_elements / num_sort_threads;
-    if (i < (num_elements % num_sort_threads))
-    {
-      sort_parms[i].num_entries += 1;
-    }
-    sort_parms[i].element_size = element_size;
-    sort_parms[i].compar = compar;
-    sort_parms[i].block = ((unsigned char *) block) + (start_index * element_size);
-
-    start_index += sort_parms[i].num_entries;
-
-    if (0 != pthread_create (&sort_thread[i], 0, parallelSortThread, &sort_parms[i]))
-    {
-      perror ("pthread_create: - Sort Thread ");
-      exit (-1);
-    }
-  }
-
-  /* Wait for all sort threads to exit.
-  */
-  for (unsigned int i = 0; i < num_sort_threads; i++)
-  {
-    if (0 != pthread_join (sort_thread[i], 0))
-    {
-      perror ("pthread_join - Sort Thread");
-      exit (-1);
-    }
-  }
-
   /* Merge sll sort blocks into the output file.
   */
-  unsigned long long sort_block_index[num_sort_threads] = {};
+  unsigned long long sort_block_index[NUM_SORT_THREADS] = {};
 
   /* To reduce the number of I/O operations we store data in a buffer.
   ** When the buffer fills up then we write it to disk.
@@ -982,7 +914,7 @@ static void parallelSort (const char *const file_name,
     memset (smallest_element, 0xff, element_size);
     unsigned int min_position_stream = 0;
 
-    for (unsigned int j = 0; j < num_sort_threads; j++)
+    for (unsigned int j = 0; j < NUM_SORT_THREADS; j++)
     {
       if (sort_block_index[j] == sort_parms[j].num_entries)
       {
@@ -990,7 +922,7 @@ static void parallelSort (const char *const file_name,
         */
         continue;
       }
-      unsigned char *next_block = sort_parms[j].block + 
+      unsigned char *next_block = sort_parms[j].block +
                       (sort_block_index[j] * element_size);
 
       if (0 < compar(smallest_element, next_block))
@@ -1008,18 +940,18 @@ static void parallelSort (const char *const file_name,
              element_size);
     num_elements_in_buffer++;
     sort_block_index[min_position_stream]++;
-
+      
     /* If the output buffer is full or we are processing the last element then 
     ** write the output buffer to file.
     */
     if ((num_elements_in_buffer == max_elements_in_buffer) ||
         (i == (num_elements - 1)))
-    {
+    { 
       const unsigned long long output_buffer_size = (unsigned long long) (num_elements_in_buffer * element_size);
       unsigned long long total_bytes_written = 0;
       do 
       {
-        const ssize_t bytes_written = write (fd, &output_buffer[total_bytes_written], 
+        const ssize_t bytes_written = write (fd, &output_buffer[total_bytes_written],
                             (output_buffer_size - total_bytes_written));
         if (bytes_written < 0)
         {
@@ -1037,6 +969,107 @@ static void parallelSort (const char *const file_name,
 
   close (fd);
 
+  return 0;
+}
+
+static void parallelSort (const char *const file_name,
+                          brdDb_t *const brd_db, 
+                          const unsigned long long num_elements,
+                          const size_t element_size,
+                          int (*compar)(const void *, const void *),
+                          unsigned int last_block)
+{
+
+  void *const block = brd_db->sort_block[brd_db->active_sort_block];
+
+  sortParms_t sort_parms[NUM_SORT_THREADS];
+  unsigned long long start_index = 0;
+  pthread_t sort_thread[NUM_SORT_THREADS];
+
+  for (unsigned int i = 0; i < NUM_SORT_THREADS; i++)
+  {
+    sort_parms[i].start_index = start_index;
+    sort_parms[i].num_entries = num_elements / NUM_SORT_THREADS;
+    if (i < (num_elements % NUM_SORT_THREADS))
+    {
+      sort_parms[i].num_entries += 1;
+    }
+    sort_parms[i].element_size = element_size;
+    sort_parms[i].compar = compar;
+    sort_parms[i].block = ((unsigned char *) block) + (start_index * element_size);
+
+    start_index += sort_parms[i].num_entries;
+
+    if (0 != pthread_create (&sort_thread[i], 0, parallelSortThread, &sort_parms[i]))
+    {
+      perror ("pthread_create: - Sort Thread ");
+      exit (-1);
+    }
+  }
+
+  /* Wait for all sort threads to exit.
+  */
+  for (unsigned int i = 0; i < NUM_SORT_THREADS; i++)
+  {
+    if (0 != pthread_join (sort_thread[i], 0))
+    {
+      perror ("pthread_join - Sort Thread");
+      exit (-1);
+    }
+  }
+
+
+  /* If the asynchronous merge block write thread is still running then wait
+  ** until the thread is done.
+  */
+  if (0 != brd_db->sort_block_ctrl.block_write_thread)
+  {
+    if (0 != pthread_join (brd_db->sort_block_ctrl.block_write_thread, 0))
+    {
+      perror ("pthread_join - Block Write Thread");
+      exit (-1);
+    }
+    brd_db->sort_block_ctrl.block_write_thread = 0;
+  }
+
+  /* Swap the sort blocks. 
+  */
+  brd_db->active_sort_block ^= 1;
+  brd_db->sort_block_position = brd_db->sort_block[brd_db->active_sort_block];
+  brd_db->sort_block_move = brd_db->sort_block[brd_db->active_sort_block];
+
+  /* If there are elements in the file then write them to disk.
+  */
+  if (0 != num_elements)
+  {
+    strcpy (brd_db->sort_block_ctrl.file_name, file_name);
+    memcpy (brd_db->sort_block_ctrl.sort_parms, sort_parms, sizeof(sort_parms));
+    brd_db->sort_block_ctrl.num_elements = num_elements;
+    brd_db->sort_block_ctrl.element_size = element_size;
+    brd_db->sort_block_ctrl.compar = compar;
+
+    if (0 != pthread_create (&brd_db->sort_block_ctrl.block_write_thread, 0, 
+                                generateSortedBlockFile, &brd_db->sort_block_ctrl))
+    {
+      perror ("pthread_create: - Generate Sort Block File Thread ");
+      exit (-1);
+    }
+  }
+
+  /* If this is the last block then wait until all file writes are done.
+  ** If this is not the last block then allow the file writing to be done
+  ** in the background.
+  */
+  if ((0 != last_block) &&
+      (0 != brd_db->sort_block_ctrl.block_write_thread))
+  {
+    if (0 != pthread_join (brd_db->sort_block_ctrl.block_write_thread, 0))
+    {
+      perror ("pthread_join - Last Block Write Thread");
+      exit (-1);
+    }
+    brd_db->sort_block_ctrl.block_write_thread = 0;
+  }
 }
 
 /******************************************************************************
@@ -1044,16 +1077,17 @@ static void parallelSort (const char *const file_name,
 **
 **
 ******************************************************************************/
-static void positionsTempFileCreate (void *const sort_block,
+static void positionsTempFileCreate (brdDb_t *const brd_db,
                                      const unsigned int sort_block_number,
-                                     const unsigned long long sort_block_entries)
+                                     const unsigned long long sort_block_entries,
+                                     const unsigned int last_block)
 {
   char file_name[1024];
 
   sprintf (file_name, "%s%u", SORT_BLOCK_PREFIX, sort_block_number);
                 
-  parallelSort (file_name, sort_block, sort_block_entries, 
-                        sizeof (sortBlockEntry_t), positionCompare);
+  parallelSort (file_name, brd_db, sort_block_entries, 
+                        sizeof (sortBlockEntry_t), positionCompare, last_block);
 
 }
 
@@ -1062,16 +1096,17 @@ static void positionsTempFileCreate (void *const sort_block,
 **
 **
 ******************************************************************************/
-static void movesTempFileCreate (void *const sort_block,
+static void movesTempFileCreate (brdDb_t *const brd_db,
                                      const unsigned int sort_block_number,
-                                     const unsigned long long sort_block_entries)
+                                     const unsigned long long sort_block_entries,
+                                     const unsigned int last_block)
 {
   char file_name[1024];
 
   sprintf (file_name, "%s%u", SORT_MOVE_BLOCK_PREFIX, sort_block_number);
 
-  parallelSort (file_name, sort_block, sort_block_entries,
-                        sizeof (sortBlockMoveEntry_t), moveCompare);
+  parallelSort (file_name, brd_db, sort_block_entries,
+                        sizeof (sortBlockMoveEntry_t), moveCompare, last_block);
 
 }
 
@@ -1520,7 +1555,7 @@ static unsigned int parallelMergeBlockReadInit (parallelMergeBlock_t *const merg
   const unsigned long long max_queue_memory_size = ((read_sort_block_size / 2) / num_merge_threads) & ~3LLU;
   const unsigned int queue_memory_size = (max_queue_memory_size > MAX_QUEUE_SIZE)?MAX_QUEUE_SIZE:
                                                     (unsigned int) max_queue_memory_size;
-  assert (queue_memory_size > (2 * element_size));
+  assert (queue_memory_size > (MAX_ELEMENTS_IN_MESSAGE * 2 * element_size));
 
   const unsigned long long per_thread_file_buffer_size = max_queue_memory_size;
 
@@ -1763,8 +1798,8 @@ static void * brd_db_generate (void *arg)
     */
     if ((sort_block_index + MAX_BRD_MOVES) >= board_db->max_sortblock_positions)
     {
-      positionsTempFileCreate (board_db->sort_block, 
-                                    gen_status->sort_blocks_created, sort_block_index);
+      positionsTempFileCreate (board_db, 
+                                    gen_status->sort_blocks_created, sort_block_index, 0);
       sort_block_index = 0;
       gen_status->sort_blocks_created++;
     }
@@ -1777,10 +1812,11 @@ static void * brd_db_generate (void *arg)
   /* If there are any positions in the sort block then write these 
   ** positions to a temporary file.
   */
+  positionsTempFileCreate (board_db, 
+                           gen_status->sort_blocks_created, 
+                           sort_block_index, 1);
   if (0 != sort_block_index)
   {
-    positionsTempFileCreate (board_db->sort_block, 
-                                    gen_status->sort_blocks_created, sort_block_index);
     gen_status->sort_blocks_created++;
   }
 
@@ -1889,8 +1925,8 @@ static void * brd_db_generate (void *arg)
     */
     if (sort_block_index == board_db->max_sortblock_moves)
     {
-      movesTempFileCreate (board_db->sort_block, 
-                                    move_sort_blocks_created, sort_block_index);
+      movesTempFileCreate (board_db, 
+                                    move_sort_blocks_created, sort_block_index, 0);
       sort_block_index = 0;
       move_sort_blocks_created++;
     }
@@ -1923,8 +1959,8 @@ static void * brd_db_generate (void *arg)
         */
         if (sort_block_index == board_db->max_sortblock_moves)
         {
-          movesTempFileCreate (board_db->sort_block, 
-                                    move_sort_blocks_created, sort_block_index);
+          movesTempFileCreate (board_db, 
+                                    move_sort_blocks_created, sort_block_index, 0);
           sort_block_index = 0;
           move_sort_blocks_created++;
         }
@@ -1943,10 +1979,11 @@ static void * brd_db_generate (void *arg)
 
   /* Write the last sort block to file.
   */
+  movesTempFileCreate (board_db, 
+                       move_sort_blocks_created, 
+                       sort_block_index, 1);
   if (0 != sort_block_index)
   {
-    movesTempFileCreate (board_db->sort_block, 
-                                  move_sort_blocks_created, sort_block_index);
     move_sort_blocks_created++;
   }
   parallelMergeBlockTerminate (parallel_sort_table); 
@@ -2123,10 +2160,11 @@ void brdDbGenerate(
   const unsigned long long total_ram = (unsigned long long) mem_info.totalram * mem_info.mem_unit;
 //  const unsigned long long total_ram = 16LLU * 1024LLU * 1024LLU * 1024LLU; // HACK
 
-  /* Use one third of physical memory for the sort block. Make sure that the sort block size 
-  ** is in whole megabytes.
+  /* Use one third of physical memory for the sort block. 
+  ** We use two sort blocks. While one block is populated and sorted, 
+  ** the other block is written to file.
   */
-  const unsigned long long sort_block_size = (total_ram / 3) & ~0x3fff'ffffLLU;
+  const unsigned long long sort_block_size = (total_ram / 3) / 2;
 
   /* By default the Linux process can have only 1024 open files.
   ** The hard limit is usually 500K open files. 
@@ -2162,11 +2200,16 @@ void brdDbGenerate(
                                
   board_db.max_sortblock_positions = sort_block_size / sizeof(sortBlockEntry_t);
 
-  board_db.sort_block = aligned_alloc (0x4000'0000, sort_block_size);
-  board_db.sort_block_position = board_db.sort_block;
-  assert (board_db.sort_block);
+  board_db.active_sort_block = 0;
+  board_db.sort_block[0] = malloc (sort_block_size);
+  assert (board_db.sort_block[0]);
 
-  board_db.sort_block_move = board_db.sort_block;
+  board_db.sort_block[1] = malloc (sort_block_size);
+  assert (board_db.sort_block[1]);
+
+  board_db.sort_block_position = board_db.sort_block[board_db.active_sort_block];
+
+  board_db.sort_block_move = board_db.sort_block[board_db.active_sort_block];
   board_db.max_sortblock_moves = sort_block_size / sizeof(sortBlockMoveEntry_t);
 
   /* Use one third of memory when reading and merging sort block files.
@@ -2176,6 +2219,7 @@ void brdDbGenerate(
   ** read buffer.
   */
   board_db.read_sort_block_size = total_ram / 3;
+  printf (">>>board_db.read_sort_block_size:%'llu\n", board_db.read_sort_block_size); // HACK
 
   /* Start the board generator thread for each ply.
   ** The code exits when there are no more moves to be 
@@ -2286,7 +2330,8 @@ void brdDbGenerate(
 
   mcperftBoardInfoPrint(&board_db);
 
-  free (board_db.sort_block);
+  free (board_db.sort_block[0]);
+  free (board_db.sort_block[1]);
 
   printf ("SUCCESS! Created the position database with depth of %u plies.\n", ply_depth);
 }
