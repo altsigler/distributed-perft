@@ -886,12 +886,24 @@ static void * generateSortedBlockFile (void *arg)
   const size_t element_size = sort_block_ctrl->element_size;
   int (*compar)(const void *, const void *) = sort_block_ctrl->compar;
 
+// The O_DIRECT flag slows down "./mcperft create-db 9" by about 2 minutes (87min vs 85min)
+// Don't enable this flag unless there is a compelling reason.
+//
+//  const int fd = open (file_name, O_DIRECT | O_WRONLY | O_APPEND | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
   const int fd = open (file_name, O_WRONLY | O_APPEND | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
   if (fd < 0)
   {
     perror ("create sort block file");
     exit (-1);
   }
+
+  struct statvfs stat;
+  if (0 != fstatvfs (fd, &stat))
+  {
+    perror ("fstatvfs of buffer file");
+    exit (-1);
+  }
+  size_t file_block_size = stat.f_bsize;
 
   /* Merge sll sort blocks into the output file.
   */
@@ -900,9 +912,15 @@ static void * generateSortedBlockFile (void *arg)
   /* To reduce the number of I/O operations we store data in a buffer.
   ** When the buffer fills up then we write it to disk.
   */
-  constexpr unsigned int max_elements_in_buffer = 10'000'000;
-  unsigned char *const output_buffer = malloc (max_elements_in_buffer * element_size);
-  unsigned int num_elements_in_buffer = 0;
+  constexpr unsigned long long max_buffer_size_in_bytes = 40'000'000;
+  const unsigned long long alignment_block_size = element_size * file_block_size;
+  const unsigned long long buffer_size_in_bytes = (max_buffer_size_in_bytes / alignment_block_size) * 
+                                                                alignment_block_size;
+
+  unsigned char *const output_buffer = aligned_alloc (file_block_size, buffer_size_in_bytes);
+  unsigned long long num_elements_in_buffer = 0;
+  const unsigned long long max_elements_in_buffer = buffer_size_in_bytes / element_size;
+  unsigned long long total_file_size = 0;
 
   assert (output_buffer);
 
@@ -947,8 +965,19 @@ static void * generateSortedBlockFile (void *arg)
     if ((num_elements_in_buffer == max_elements_in_buffer) ||
         (i == (num_elements - 1)))
     { 
-      const unsigned long long output_buffer_size = (unsigned long long) (num_elements_in_buffer * element_size);
+      unsigned long long output_buffer_size = num_elements_in_buffer * element_size;
       unsigned long long total_bytes_written = 0;
+
+      total_file_size += output_buffer_size;
+
+      /* For O_DIRECT files the output buffer must be multiple of 
+      ** file block size.
+      */
+      if (0 != (output_buffer_size % file_block_size))
+      {
+        output_buffer_size = (((output_buffer_size / file_block_size) + 1) * file_block_size);
+      }
+
       do 
       {
         const ssize_t bytes_written = write (fd, &output_buffer[total_bytes_written],
@@ -966,6 +995,14 @@ static void * generateSortedBlockFile (void *arg)
   }
 
   free (output_buffer);
+
+  /* Set the file size to match the actual number of elements written to the file.
+  */
+  if (0 != ftruncate (fd, (__off_t) total_file_size))
+  {
+    perror ("ftruncate - Sorted Block.");
+    exit (-1);
+  }
 
   close (fd);
 
@@ -2202,10 +2239,13 @@ void brdDbGenerate(
   board_db.max_sortblock_positions = sort_block_size / sizeof(sortBlockEntry_t);
 
   board_db.active_sort_block = 0;
-  board_db.sort_block[0] = malloc (sort_block_size);
+  board_db.sort_block[0] = aligned_alloc ((size_t) sysconf(_SC_PAGESIZE), sort_block_size);
+  (void) madvise (board_db.sort_block[0], sort_block_size, MADV_HUGEPAGE);
   assert (board_db.sort_block[0]);
 
-  board_db.sort_block[1] = malloc (sort_block_size);
+  board_db.sort_block[1] = aligned_alloc ((size_t) sysconf(_SC_PAGESIZE), sort_block_size);
+  (void) madvise (board_db.sort_block[1], sort_block_size, MADV_HUGEPAGE);
+
   assert (board_db.sort_block[1]);
 
   board_db.sort_block_position = board_db.sort_block[board_db.active_sort_block];
