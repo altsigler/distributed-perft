@@ -761,8 +761,10 @@ static unsigned int brdDbPlyDepthGet(void)
 **
 ** Return Values:
 ******************************************************************************/
-static void brdPack (const brd_t* const brd, unsigned long long * const position)
+static void brdPack (const brd_t* const brd, unsigned char *const output_position)
 {
+  unsigned long long position[4];
+
   /* Convert the current board position into the cache format. 
   ** A piece uses only 4 bits in each byte of the brd_t structure, 
   ** so we fold the board on itself to generate a unique key.
@@ -771,6 +773,8 @@ static void brdPack (const brd_t* const brd, unsigned long long * const position
   position[1] = ((unsigned long *)brd)[1] | (((unsigned long *)brd)[5] << 4);
   position[2] = ((unsigned long *)brd)[2] | (((unsigned long *)brd)[6] << 4);
   position[3] = ((unsigned long *)brd)[3] | (((unsigned long *)brd)[7] << 4);
+
+  memcpy (output_position, position, sizeof(position));
 }
 
 /******************************************************************************
@@ -781,8 +785,11 @@ static void brdPack (const brd_t* const brd, unsigned long long * const position
 **
 ** Return Values:
 ******************************************************************************/
-static void brdUnpack (brd_t* const brd, const unsigned long long * const position)
+static void brdUnpack (brd_t* const brd, const unsigned char * const input_position)
 {
+  unsigned long long position[4];
+  memcpy (position, input_position, sizeof(position));
+
   ((unsigned long *)brd)[0] = position[0] & 0x0f0f0f0f0f0f0f0fLLU;
   ((unsigned long *)brd)[4] = (position[0] >> 4) & 0x0f0f0f0f0f0f0f0fLLU;
   ((unsigned long *)brd)[1] = position[1] & 0x0f0f0f0f0f0f0f0fLLU;
@@ -791,12 +798,6 @@ static void brdUnpack (brd_t* const brd, const unsigned long long * const positi
   ((unsigned long *)brd)[6] = (position[2] >> 4) & 0x0f0f0f0f0f0f0f0fLLU;
   ((unsigned long *)brd)[3] = position[3] & 0x0f0f0f0f0f0f0f0fLLU;
   ((unsigned long *)brd)[7] = (position[3] >> 4) & 0x0f0f0f0f0f0f0f0fLLU;
-}
-/* Externally callable version of brdUnpack()
-*/
-void brdUnpackBoard (brd_t* const brd, const unsigned long long * const position)
-{
-  brdUnpack(brd, position);
 }
 
 /******************************************************************************
@@ -809,23 +810,8 @@ static int positionCompare (const void *const p1,
   const sortBlockEntry_t *const pos1 = p1;
   const sortBlockEntry_t *const pos2 = p2;
 
-  const int comp = memcmp (pos1->position, pos2->position, sizeof(pos1->position));
-  if (comp)
-  {
-    return comp;
-  }
-       
-  if (pos1->brd_info.brd_info_mem < pos2->brd_info.brd_info_mem)
-  {
-    return -1;
-  }
-  if (pos1->brd_info.brd_info_mem > pos2->brd_info.brd_info_mem)
-  {
-    return 1;
-  }
-
-  return 0;
-
+  return  memcmp (pos1->position, pos2->position, 
+                    sizeof(pos1->position) + sizeof(pos1->brd_info.brd_info_mem));
 }
 
 /******************************************************************************
@@ -864,6 +850,11 @@ static void * parallelSortThread (void *arg)
 {
  sortParms_t *sort_parms = arg;
 
+ char sort_thread_name[16];
+
+ sprintf (sort_thread_name, "mcp-sort-%u", sort_parms->sort_thread_number);
+
+ (void) pthread_setname_np(pthread_self(), sort_thread_name);
  if (0 != sort_parms->num_entries)
  {
    qsort (sort_parms->block, sort_parms->num_entries, 
@@ -879,6 +870,8 @@ static void * parallelSortThread (void *arg)
 ******************************************************************/
 static void * generateSortedBlockFile (void *arg)
 {
+ (void) pthread_setname_np(pthread_self(), "mcp-block-write"); 
+
   sortBlockCtrl_t *sort_block_ctrl = arg;
   const char *const file_name = sort_block_ctrl->file_name;
   sortParms_t *sort_parms = sort_block_ctrl->sort_parms;
@@ -912,7 +905,7 @@ static void * generateSortedBlockFile (void *arg)
   /* To reduce the number of I/O operations we store data in a buffer.
   ** When the buffer fills up then we write it to disk.
   */
-  constexpr unsigned long long max_buffer_size_in_bytes = 40'000'000;
+  constexpr unsigned long long max_buffer_size_in_bytes = 10'000'000;
   const unsigned long long alignment_block_size = element_size * file_block_size;
   const unsigned long long buffer_size_in_bytes = (max_buffer_size_in_bytes / alignment_block_size) * 
                                                                 alignment_block_size;
@@ -1034,6 +1027,7 @@ static void parallelSort (const char *const file_name,
     sort_parms[i].element_size = element_size;
     sort_parms[i].compar = compar;
     sort_parms[i].block = ((unsigned char *) block) + (start_index * element_size);
+    sort_parms[i].sort_thread_number = i + 1;
 
     start_index += sort_parms[i].num_entries;
 
@@ -1170,12 +1164,13 @@ static void nextPositionsCreate (const brd_t *const brd,
 
     memset (&ndb_entry->move_entry, 0, sizeof(moveEntry_t));
 
+    const brdCtrlInfo_t position_info = position_entry->brd_info.brd_info;
+
     bytebrdUtilMoveMake (&next_brd, &dest[i], 
-                            &position_entry->brd_info.brd_info, &ndb_entry->brd_info.brd_info);
+                            &position_info, &ndb_entry->brd_info.brd_info);
 
     brdPack (&next_brd, ndb_entry->position);
 
-    ndb_entry->pad = 0;
   }
 }
 
@@ -1453,7 +1448,13 @@ static void *mergeBlockNextGet (mergeBlock_t *const merge_block,
 ******************************************************************************/
 static void * parallel_merge (void *arg)
 {
-  parallelMergeBlock_t *merge_stream = arg;
+ parallelMergeBlock_t *merge_stream = arg;
+
+ char thread_name[16];
+ sprintf (thread_name, "mcp-merge-%u", merge_stream->merge_thread_number);
+
+ (void) pthread_setname_np(pthread_self(), thread_name); 
+
   mergeBlock_t *const sort_table = malloc (merge_stream->num_merge_blocks * sizeof(mergeBlock_t));
   assert (sort_table);
     
@@ -1616,6 +1617,7 @@ static unsigned int parallelMergeBlockReadInit (parallelMergeBlock_t *const merg
       exit (-1);
     }
 
+    merge_stream[i].merge_thread_number = i + 1;
     merge_stream[i].num_elements_in_message = 0;
     merge_stream[i].element_index = 0;
 
@@ -1776,6 +1778,8 @@ static void *parallelMergeBlockNextGet (parallelMergeBlock_t *const merge_stream
 ******************************************************************************/
 static void * brd_db_generate (void *arg)
 {
+  (void) pthread_setname_np(pthread_self(), "mcp-db-create");
+
   void **ch_arg = (void **) arg;
   brdDb_t *const board_db = ch_arg[0];
   const unsigned int ply_number = *(unsigned int *) ch_arg[1]; 
@@ -1807,7 +1811,9 @@ static void * brd_db_generate (void *arg)
 
     /* Find all legal moves for this position.
     */
-    num_moves = bytebrdNextMoveGet (&brd, &position_entry->brd_info.brd_info, dest, &mover_lost);
+    const brdCtrlInfo_t position_info = position_entry->brd_info.brd_info;
+
+    num_moves = bytebrdNextMoveGet (&brd, &position_info, dest, &mover_lost);
 
     /* If there are no moves available for this position then the mover is 
     ** either in a checkmate or stalemate. 
@@ -2202,7 +2208,7 @@ void brdDbGenerate(
   ** We use two sort blocks. While one block is populated and sorted, 
   ** the other block is written to file.
   */
-  const unsigned long long sort_block_size = (total_ram / 3) / 2;
+  const unsigned long long sort_block_size = (total_ram / 2) / 2;
 
   /* By default the Linux process can have only 1024 open files.
   ** The hard limit is usually 500K open files. 
@@ -2259,7 +2265,7 @@ void brdDbGenerate(
   ** a lot of merge block files because each merge file requires at least 163,840 byte
   ** read buffer.
   */
-  board_db.read_sort_block_size = total_ram / 3;
+  board_db.read_sort_block_size = total_ram / 4;
   printf (">>>board_db.read_sort_block_size:%'llu\n", board_db.read_sort_block_size); // HACK
 
   /* Start the board generator thread for each ply.
@@ -2413,9 +2419,12 @@ static void * brd_db_deep_search (void *arg)
     (void) pthread_setaffinity_np(pthread_self(),sizeof(cpu_set),&cpu_set);
 
   }
-#else
-  (void) task_number;
 #endif
+
+ char thread_name[16];
+ sprintf (thread_name, "mcp-count-%u", task_number + 1);
+ (void) pthread_setname_np(pthread_self(), thread_name); 
+
 
   do 
   {
@@ -2977,7 +2986,9 @@ void brdDbFenGenerate (void)
 
       char fen[128];
       
-      brdutilBrdToFenConvert (&brd, &db_entry.brd_info.brd_info, fen);
+      const brdCtrlInfo_t position_info = db_entry.brd_info.brd_info;
+
+      brdutilBrdToFenConvert (&brd, &position_info, fen);
 
       const unsigned int size = (unsigned int) strlen (fen);
 
@@ -3015,6 +3026,8 @@ void brdDbFenGenerate (void)
 static void * brd_db_count_setup (void *arg)
 
 {
+ (void) pthread_setname_np(pthread_self(), "mcp-count-setup"); 
+
   countSetupThreadStatus_t *count_setup = arg;
   const unsigned int depth = count_setup->depth;
   const unsigned int split_factor = count_setup->split_factor;
@@ -3166,8 +3179,6 @@ static void * brd_db_count_setup (void *arg)
          memcpy (workload_record[k].position,
                db_entry[k].position, 32);
          workload_record[k].brd_info = db_entry[k].brd_info;
-         workload_record[k].pad1 = 0;
-         workload_record[k].pad2 = 0;
        }
 
        if ((j_inc * sizeof(workloadRecord_t)) !=
@@ -3515,6 +3526,8 @@ static void brdDbPositionTreeAggregate (const unsigned int search_depth,
 ********************************************************************/
 static void * brd_db_aggregate (void *arg)
 {
+ (void) pthread_setname_np(pthread_self(), "mcp-aggregate"); 
+
   aggregateThreadStatus_t *aggregate = arg;
   unsigned int *depth = aggregate->depth;
   unsigned _BitInt(128) *perft_result = aggregate->perft_result;

@@ -179,25 +179,23 @@ typedef struct
 ** The structure is padded to make sure that the size is divisible by 8.
 ** The structure size is 40 bytes.
 */
-typedef struct
+typedef struct __attribute__((packed))
 {
-  unsigned long long position[4]; /* 32-byte Board Position */
+  unsigned char position[32]; /* 32-byte Board Position */
   brdCtrl_u brd_info;  /* 2-byte board control information */
-  unsigned short pad1;
-  unsigned int pad2;
 } workloadRecord_t;
 
  
 typedef struct __attribute__((packed))
 { 
-  unsigned char high;
+  unsigned short high;
   unsigned int low;
 } moveEntry_t;
 
 __attribute__((always_inline))
 inline moveEntry_t moveIndexToEntry (const unsigned long long index)
 { 
-  const moveEntry_t move_entry = {(unsigned char) (index >> 32), (unsigned int) index};
+  const moveEntry_t move_entry = {(unsigned short) (index >> 32), (unsigned int) index};
   return move_entry; 
 }
   
@@ -219,10 +217,9 @@ typedef struct __attribute__((packed))
 */
 typedef struct 
 {
-  unsigned long long position[4]; /* 32-byte Board Position */
+  unsigned char position[32]; /* 32-byte Board Position */
   brdCtrl_u brd_info;  /* 2-byte board control information */
-  moveEntry_t move_entry; /* 5-byte move entry which points to this position */
-  unsigned char pad; /* Pad to align to 8-byte boundary */
+  moveEntry_t move_entry; /* 6-byte move entry which points to this position */
 } sortBlockEntry_t __attribute__ ((aligned (8)));
 
 /* Buffered file context.
@@ -352,18 +349,20 @@ typedef struct
     */
     pthread_t merge_thread;
 
+    unsigned int merge_thread_number;
 } parallelMergeBlock_t;
 
 
 /* This structure is used for ply position files.
 */
-typedef struct
+typedef struct __attribute__((packed))
 {
-  unsigned long long position[4]; /* 32-byte Board Position */
+//  unsigned long long position[4]; /* 32-byte Board Position */
+  unsigned char position[32]; /* 32-byte Board Position */
   brdCtrl_u brd_info;  /* 2-byte board control information */
   unsigned char num_moves; /* Number of moves from this position (1 byte) */
   moveEntry_t first_move_index; /* First move for this position in ply moves file (5 bytes) */  
-} plyPositionEntry_t __attribute__ ((aligned (8)));
+} plyPositionEntry_t;
 
 /* Ply and Database Statistics.
 ** All counters in this structure must be defined as "unsigned long long".
@@ -393,6 +392,7 @@ typedef struct
 
 typedef struct
 {
+  unsigned int sort_thread_number;
   unsigned char *block;
   unsigned long long start_index;
   unsigned long long num_entries;
@@ -541,16 +541,6 @@ void brdDbGenerate(
                    const unsigned int ply_depth,
                    const brd_t *const brd,
                    const brdCtrlInfo_t *const info);
-
-/******************************************************************************
-** Convert 32-byte array for storing in the board database into 8x8 board.
-**
-** brd - (output) 8x8 Board
-** position - (input) 32-byte position data block.
-**
-** Return Values:
-******************************************************************************/
-void brdUnpackBoard (brd_t* const brd, const unsigned long long * const position);
 
 /********************************************************************
 ** Create files containing fen positions for each ply in the database.
