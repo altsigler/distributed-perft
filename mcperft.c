@@ -32,9 +32,9 @@ int main (int argc, char *argv[])
       {
         ply_depth = (unsigned int) atoi (argv[2]);
       }
-      if ((ply_depth < 7) || (ply_depth > 10))
+      if ((ply_depth < 7) || (ply_depth > 11))
       {
-        printf ("ERROR: The database ply %u is invalid. Valid values are 7, 8, 9, or 10.\n", ply_depth);
+        printf ("ERROR: The database ply %u is invalid. Valid values are 7, 8, 9, 10 or 11.\n", ply_depth);
         exit (-1);
       }
       printf ("Creating Database of Unique Positions to ply %u...\n\n", ply_depth);

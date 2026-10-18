@@ -804,7 +804,7 @@ static void brdUnpack (brd_t* const brd, const unsigned char * const input_posit
 ** Compare two positions.
 ** We use a simple byte compare for the two positions. 
 ******************************************************************************/
-static int positionCompare (const void *const p1, 
+static inline int positionCompare (const void *const p1, 
                             const void *const p2)
 {
   const sortBlockEntry_t *const pos1 = p1;
@@ -818,7 +818,7 @@ static int positionCompare (const void *const p1,
 ** Compare two moves.
 ** We are guaranteed that move entries don't have duplicates.
 ******************************************************************************/
-static int moveCompare (const void *const p1,
+static inline int moveCompare (const void *const p1,
                             const void *const p2)
 {
   const sortBlockMoveEntry_t *const move1 = p1;
@@ -865,154 +865,19 @@ static void * parallelSortThread (void *arg)
 }
 
 /******************************************************************
-** This thread merges segments sorted with qsort into 
-** the block file.
+** Create sort threads.
 ******************************************************************/
-static void * generateSortedBlockFile (void *arg)
-{
- (void) pthread_setname_np(pthread_self(), "mcp-block-write"); 
-
-  sortBlockCtrl_t *sort_block_ctrl = arg;
-  const char *const file_name = sort_block_ctrl->file_name;
-  sortParms_t *sort_parms = sort_block_ctrl->sort_parms;
-  const unsigned long long num_elements = sort_block_ctrl->num_elements;
-  const size_t element_size = sort_block_ctrl->element_size;
-  int (*compar)(const void *, const void *) = sort_block_ctrl->compar;
-
-// The O_DIRECT flag slows down "./mcperft create-db 9" by about 2 minutes (87min vs 85min)
-// Don't enable this flag unless there is a compelling reason.
-//
-//  const int fd = open (file_name, O_DIRECT | O_WRONLY | O_APPEND | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
-  const int fd = open (file_name, O_WRONLY | O_APPEND | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
-  if (fd < 0)
-  {
-    perror ("create sort block file");
-    exit (-1);
-  }
-
-  struct statvfs stat;
-  if (0 != fstatvfs (fd, &stat))
-  {
-    perror ("fstatvfs of buffer file");
-    exit (-1);
-  }
-  size_t file_block_size = stat.f_bsize;
-
-  /* Merge sll sort blocks into the output file.
-  */
-  unsigned long long sort_block_index[NUM_SORT_THREADS] = {};
-
-  /* To reduce the number of I/O operations we store data in a buffer.
-  ** When the buffer fills up then we write it to disk.
-  */
-  constexpr unsigned long long max_buffer_size_in_bytes = 10'000'000;
-  const unsigned long long alignment_block_size = element_size * file_block_size;
-  const unsigned long long buffer_size_in_bytes = (max_buffer_size_in_bytes / alignment_block_size) * 
-                                                                alignment_block_size;
-
-  unsigned char *const output_buffer = aligned_alloc (file_block_size, buffer_size_in_bytes);
-  unsigned long long num_elements_in_buffer = 0;
-  const unsigned long long max_elements_in_buffer = buffer_size_in_bytes / element_size;
-  unsigned long long total_file_size = 0;
-
-  assert (output_buffer);
-
-  for (unsigned long long i = 0; i < num_elements; i++)
-  {
-    /* Find smallest element in sll sort buffers.
-    */
-    unsigned char smallest_element[element_size];
-    memset (smallest_element, 0xff, element_size);
-    unsigned int min_position_stream = 0;
-
-    for (unsigned int j = 0; j < NUM_SORT_THREADS; j++)
-    {
-      if (sort_block_index[j] == sort_parms[j].num_entries)
-      {
-        /* This sort block is already empty, so skip it.
-        */
-        continue;
-      }
-      unsigned char *next_block = sort_parms[j].block +
-                      (sort_block_index[j] * element_size);
-
-      if (0 < compar(smallest_element, next_block))
-      {
-        memcpy (smallest_element, next_block,element_size);
-        min_position_stream = j;
-      }
-    }
-
-    /* Extract the smallest element from the sort buffer and put it into
-    ** the output buffer.
-    */
-    memcpy (&output_buffer[num_elements_in_buffer * element_size],
-             sort_parms[min_position_stream].block + (sort_block_index[min_position_stream] * element_size),
-             element_size);
-    num_elements_in_buffer++;
-    sort_block_index[min_position_stream]++;
-      
-    /* If the output buffer is full or we are processing the last element then 
-    ** write the output buffer to file.
-    */
-    if ((num_elements_in_buffer == max_elements_in_buffer) ||
-        (i == (num_elements - 1)))
-    { 
-      unsigned long long output_buffer_size = num_elements_in_buffer * element_size;
-      unsigned long long total_bytes_written = 0;
-
-      total_file_size += output_buffer_size;
-
-      /* For O_DIRECT files the output buffer must be multiple of 
-      ** file block size.
-      */
-      if (0 != (output_buffer_size % file_block_size))
-      {
-        output_buffer_size = (((output_buffer_size / file_block_size) + 1) * file_block_size);
-      }
-
-      do 
-      {
-        const ssize_t bytes_written = write (fd, &output_buffer[total_bytes_written],
-                            (output_buffer_size - total_bytes_written));
-        if (bytes_written < 0)
-        {
-          perror ("writing sort block");
-          exit (-1);
-        }
-        total_bytes_written += (unsigned long long) bytes_written;
-      } while (total_bytes_written < output_buffer_size);
-
-      num_elements_in_buffer = 0;
-    }
-  }
-
-  free (output_buffer);
-
-  /* Set the file size to match the actual number of elements written to the file.
-  */
-  if (0 != ftruncate (fd, (__off_t) total_file_size))
-  {
-    perror ("ftruncate - Sorted Block.");
-    exit (-1);
-  }
-
-  close (fd);
-
-  return 0;
-}
-
-static void parallelSort (const char *const file_name,
+static void sortThreadsCreate (sortParms_t *sort_parms,
                           brdDb_t *const brd_db, 
                           const unsigned long long num_elements,
                           const size_t element_size,
-                          int (*compar)(const void *, const void *),
-                          unsigned int last_block)
+                          const unsigned int entry_type)
 {
-
+  int (*compar)(const void *, const void *) = (0 == entry_type)?
+                                                    positionCompare:
+                                                    moveCompare;
   void *const block = brd_db->sort_block[brd_db->active_sort_block];
 
-  sortParms_t sort_parms[NUM_SORT_THREADS];
   unsigned long long start_index = 0;
   pthread_t sort_thread[NUM_SORT_THREADS];
 
@@ -1048,6 +913,228 @@ static void parallelSort (const char *const file_name,
       exit (-1);
     }
   }
+}
+
+
+/******************************************************************
+** This thread merges segments sorted with qsort into 
+** the block file.
+******************************************************************/
+static void * generateSortedBlockFile (void *arg)
+{
+ (void) pthread_setname_np(pthread_self(), "mcp-block-write"); 
+
+  sortBlockCtrl_t *sort_block_ctrl = arg;
+  const char *const file_name = sort_block_ctrl->file_name;
+  sortParms_t *sort_parms = sort_block_ctrl->sort_parms;
+  const unsigned long long num_elements = sort_block_ctrl->num_elements;
+  const size_t element_size = sort_block_ctrl->element_size;
+  const unsigned int entry_type = sort_block_ctrl->entry_type;
+  brdDb_t *const brd_db = sort_block_ctrl->brd_db;
+
+  /* If we are sorting move entries then the sort is done on the generate sorted block
+  ** file thread. This is because we have plenty of time to perfor the sorting in 
+  ** parallel while the position database is being merged.
+  */
+  if (0 != entry_type)
+  {
+    sortThreadsCreate (sort_parms, brd_db,
+                     num_elements, element_size, entry_type);
+  }
+
+//  const int fd = open (file_name, O_DIRECT | O_WRONLY | O_APPEND | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+  const int fd = open (file_name, O_WRONLY | O_APPEND | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+  if (fd < 0)
+  {
+    perror ("create sort block file");
+    exit (-1);
+  }
+
+  struct statvfs stat;
+  if (0 != fstatvfs (fd, &stat))
+  {
+    perror ("fstatvfs of buffer file");
+    exit (-1);
+  }
+  size_t file_block_size = stat.f_bsize;
+
+  /* Merge all sort blocks into the output file.
+  */
+  unsigned long long sort_block_index[NUM_SORT_THREADS] = {};
+
+  /* To reduce the number of I/O operations we store data in a buffer.
+  ** When the buffer fills up then we write it to disk.
+  */
+  constexpr unsigned long long max_buffer_size_in_bytes = 10'000'000;
+  const unsigned long long alignment_block_size = element_size * file_block_size;
+  const unsigned long long buffer_size_in_bytes = (max_buffer_size_in_bytes / alignment_block_size) * 
+                                                                alignment_block_size;
+
+  unsigned char *const output_buffer = aligned_alloc (file_block_size, buffer_size_in_bytes);
+  unsigned long long num_elements_in_buffer = 0;
+  const unsigned long long max_elements_in_buffer = buffer_size_in_bytes / element_size;
+  unsigned long long total_file_size = 0;
+
+  assert (output_buffer);
+
+  unsigned long long i = 0;
+  do
+  {
+    /* Find smallest element in sll sort buffers.
+    */
+    unsigned char smallest_element[element_size];
+    memset (smallest_element, 0xff, element_size);
+    unsigned int min_position_stream = 0;
+    unsigned int no_elements_found = 1;
+    unsigned char *smallest_block = 0;
+
+    for (unsigned int j = 0; j < NUM_SORT_THREADS; j++)
+    {
+      if (sort_block_index[j] == sort_parms[j].num_entries)
+      {
+        /* This sort block is already empty, so skip it.
+        */
+        continue;
+      }
+      unsigned char *next_block = sort_parms[j].block +
+                      (sort_block_index[j] * element_size);
+
+      const int compar_value = (0 == entry_type)?
+                                            positionCompare (smallest_element, next_block):
+                                            moveCompare (smallest_element, next_block);
+      if (0 < compar_value)
+      {
+        smallest_block = next_block;
+        memcpy (smallest_element, next_block,element_size);
+        min_position_stream = j;
+        no_elements_found = 0;
+      }
+    }
+    if (0 != no_elements_found)
+    {
+      break;
+    }
+
+    do  // Duplicate Detection Loop
+    {
+      /* Extract the smallest element from the sort buffer and put it into
+      ** the output buffer.
+      */
+      memcpy (&output_buffer[num_elements_in_buffer * element_size], smallest_block,
+               element_size);
+      num_elements_in_buffer++;
+      sort_block_index[min_position_stream]++;
+      
+      /* If the output buffer is full or we are processing the last element then 
+      ** write the output buffer to file.
+      */
+      if ((num_elements_in_buffer == max_elements_in_buffer) ||
+          (i == (num_elements - 1)))
+      { 
+        unsigned long long output_buffer_size = num_elements_in_buffer * element_size;
+        unsigned long long total_bytes_written = 0;
+
+        total_file_size += output_buffer_size;
+
+        /* For O_DIRECT files the output buffer must be multiple of 
+        ** file block size.
+        */
+        if (0 != (output_buffer_size % file_block_size))
+        {
+          output_buffer_size = (((output_buffer_size / file_block_size) + 1) * file_block_size);
+        }
+
+        do 
+        {
+          const ssize_t bytes_written = write (fd, &output_buffer[total_bytes_written],
+                              (output_buffer_size - total_bytes_written));
+          if (bytes_written < 0)
+          {
+            perror ("writing sort block");
+            exit (-1);
+          }
+          total_bytes_written += (unsigned long long) bytes_written;
+        } while (total_bytes_written < output_buffer_size);
+
+        num_elements_in_buffer = 0;
+      }
+
+      /* Move entries are guaranteed not to have duplicates, so exit
+      ** the duplicate detection loop.
+      */
+      if (0 != entry_type)
+      {
+        break;
+      }
+
+      /* If sort block is empty then exit the duplicate detection loop.
+      */
+      if (sort_block_index[min_position_stream] == sort_parms[min_position_stream].num_entries)
+      {
+        /* This sort block is already empty, so skip it.
+        */
+        break;
+      }
+
+      /* If the next position in the block is not the same as current position then 
+      ** exit the duplicate detection loop.
+      */
+      unsigned char *next_block = sort_parms[min_position_stream].block +
+                      (sort_block_index[min_position_stream] * element_size);
+
+      if (0 != positionCompare (smallest_block, next_block))
+      {
+        break;
+      }
+
+      /* We detected a duplicate. Prepare to extract it.
+      */
+      smallest_block = next_block;
+      i++;
+
+    } while (1);  // Duplicate Detection Loop
+  
+    i++;
+  } while (1);
+
+  assert (i == num_elements);
+
+  free (output_buffer);
+
+  /* Set the file size to match the actual number of elements written to the file.
+  */
+  if (0 != ftruncate (fd, (__off_t) total_file_size))
+  {
+    perror ("ftruncate - Sorted Block.");
+    exit (-1);
+  }
+
+  close (fd);
+
+  return 0;
+}
+
+/******************************************************************
+** Search sort block in DRAM using parallel threads.
+******************************************************************/
+static void parallelSort (const char *const file_name,
+                          brdDb_t *const brd_db, 
+                          const unsigned long long num_elements,
+                          const size_t element_size,
+                          const unsigned int entry_type,
+                          unsigned int last_block)
+{
+
+  sortParms_t sort_parms[NUM_SORT_THREADS];
+
+  /* When we are sorting positions then the sort must be done on the board
+  ** database creation thread. 
+  */
+  if (0 == entry_type)
+  {
+    sortThreadsCreate (sort_parms, brd_db,
+                     num_elements, element_size, entry_type);
+  }
 
 
   /* If the asynchronous merge block write thread is still running then wait
@@ -1064,10 +1151,15 @@ static void parallelSort (const char *const file_name,
   }
 
   /* Swap the sort blocks. 
+  ** Note than when we are sorting move blocks then we don't swap memory areas
+  ** because the moves are sorted and written to file sequentially.
   */
-  brd_db->active_sort_block ^= 1;
-  brd_db->sort_block_position = brd_db->sort_block[brd_db->active_sort_block];
-  brd_db->sort_block_move = brd_db->sort_block[brd_db->active_sort_block];
+  if (0 == entry_type)
+  {
+    brd_db->active_sort_block ^= 1;
+    brd_db->sort_block_position = brd_db->sort_block[brd_db->active_sort_block];
+    brd_db->sort_block_move = brd_db->sort_block[brd_db->active_sort_block];
+  }
 
   /* If there are elements in the file then write them to disk.
   */
@@ -1077,7 +1169,8 @@ static void parallelSort (const char *const file_name,
     memcpy (brd_db->sort_block_ctrl.sort_parms, sort_parms, sizeof(sort_parms));
     brd_db->sort_block_ctrl.num_elements = num_elements;
     brd_db->sort_block_ctrl.element_size = element_size;
-    brd_db->sort_block_ctrl.compar = compar;
+    brd_db->sort_block_ctrl.entry_type = entry_type;
+    brd_db->sort_block_ctrl.brd_db = brd_db;
 
     if (0 != pthread_create (&brd_db->sort_block_ctrl.block_write_thread, 0, 
                                 generateSortedBlockFile, &brd_db->sort_block_ctrl))
@@ -1118,7 +1211,7 @@ static void positionsTempFileCreate (brdDb_t *const brd_db,
   sprintf (file_name, "%s%u", SORT_BLOCK_PREFIX, sort_block_number);
                 
   parallelSort (file_name, brd_db, sort_block_entries, 
-                        sizeof (sortBlockEntry_t), positionCompare, last_block);
+                        sizeof (sortBlockEntry_t), 0, last_block);
 
 }
 
@@ -1137,7 +1230,7 @@ static void movesTempFileCreate (brdDb_t *const brd_db,
   sprintf (file_name, "%s%u", SORT_MOVE_BLOCK_PREFIX, sort_block_number);
 
   parallelSort (file_name, brd_db, sort_block_entries,
-                        sizeof (sortBlockMoveEntry_t), moveCompare, last_block);
+                        sizeof (sortBlockMoveEntry_t), 1, last_block);
 
 }
 
@@ -1313,6 +1406,106 @@ static void mergeBlockReadInit (mergeBlock_t *const merge_block,
 }
 
 /******************************************************************************
+** This function is called by mergeBlockNextGet() when entries must be 
+** retrieved from file.
+** 
+** The function returns 0 if the file is empty and 1 if data is read.
+**
+******************************************************************************/
+__attribute__((noinline)) 
+static unsigned int  mergeBlockFromFileRead (mergeBlock_t *const merge_entry)
+{
+  merge_entry->buffer_index = 0;
+
+  const unsigned long long read_request_size = merge_entry->max_elements_in_block * merge_entry->element_size;
+  unsigned char *buffer = merge_entry->buffer;
+
+  const ssize_t bytes_read = read (merge_entry->fd, buffer, read_request_size);
+  if (bytes_read < 0)
+  {
+    perror ("Read merge buffer");
+    exit (-1);
+  }
+  const unsigned long long total_bytes_read = (unsigned long long) bytes_read;
+
+  if (0 != (total_bytes_read % merge_entry->element_size))
+  {
+    printf ("ERROR: Read unexpected number of bytes:%'llu from %s\n",
+                  total_bytes_read,
+                  merge_entry->file_name);
+    exit (-1);
+  }
+
+  if (0 == total_bytes_read)
+  {
+    merge_entry->file_is_empty = 1;
+    close (merge_entry->fd);
+    unlink (merge_entry->file_name);
+    free (merge_entry->buffer);
+    return 0;
+  }
+
+  /* We don't trim the file on every read because that can cause 
+  ** performance issues. The constant below defines how many bytes
+  ** must be read from the file before trimming.
+  */
+  constexpr unsigned long long max_trim_bytes = 128LLU*1024LLU*1024LLU;
+
+  merge_entry->num_trim_bytes += total_bytes_read;
+  merge_entry->num_elements_in_block = total_bytes_read / merge_entry->element_size;
+
+  /* To conserve disk space we need to reduce the file size to remove all the 
+  ** elements that we have already read.
+  ** Make sure that the trim size is a multiple of the file system block size.
+  ** Otherwise fallocate() will not work.
+  */
+  if ((0 != merge_entry->trim_needed) &&
+      (merge_entry->num_trim_bytes > max_trim_bytes) &&
+      (0 == (merge_entry->num_trim_bytes % merge_entry->file_system_block_size)) &&
+      (0 != merge_entry->num_trim_bytes))
+  {
+    const __off_t trim_size = (__off_t) merge_entry->num_trim_bytes;
+    merge_entry->num_trim_bytes = 0;
+
+    if (0 == merge_entry->trim_collapse_range_supported)
+    {
+      if (0 != fallocate (merge_entry->fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 
+                                (__off_t) merge_entry->last_trim_location,  trim_size))
+      {
+        perror ("fallocate - FALLOC_FL_PUNCH_HOLE - Reduce file size.");
+        exit (-1);
+      }
+
+      merge_entry->last_trim_location += (unsigned long long) trim_size;
+    } else
+    {
+      /* We already tested and verified that COLLAPSE_RANGE should work on this file
+      ** system. 
+      ** The fallocate will fail when we try to pass the last remaining block 
+      ** of the file, so we can just ignore that error.
+      */
+      if (0 == fallocate (merge_entry->fd, FALLOC_FL_COLLAPSE_RANGE, 0,  trim_size))
+      {
+        /* Reset the read pointer to the start of file.
+        */
+        if (0 != lseek (merge_entry->fd, 0, SEEK_SET))
+        {
+          perror ("lseek - Reset file read pointer.");
+          exit (-1);
+        }
+      } else
+      {
+//          perror ("fallocate failed, continuing without trimming.");
+//          printf ("   fd:%d trim_size:%'llu\n", merge_entry->fd, (unsigned long long) trim_size);
+      }
+
+    }
+  }
+
+  return 1;
+}
+
+/******************************************************************************
 ** Find the next entry in the specified sorted positions file.
 ** If the third parameter is 0 then the entry remains in the file. 
 ** If the third parameter is not zero then the entry is removed.
@@ -1325,6 +1518,7 @@ static void mergeBlockReadInit (mergeBlock_t *const merge_block,
 **   - Pointer to the next entry. The pointer is valid until next call to 
 **     this function for the specified block.
 ******************************************************************************/
+__attribute__((always_inline)) inline
 static void *mergeBlockNextGet (mergeBlock_t *const merge_block,
                                             const unsigned int block_number,
                                             const unsigned int remove_entry)
@@ -1343,91 +1537,9 @@ static void *mergeBlockNextGet (mergeBlock_t *const merge_block,
   */
   if (merge_entry->buffer_index == merge_entry->num_elements_in_block)
   {
-    merge_entry->buffer_index = 0;
-
-    const unsigned long long read_request_size = merge_entry->max_elements_in_block * merge_entry->element_size;
-    unsigned char *buffer = merge_entry->buffer;
-
-    const ssize_t bytes_read = read (merge_entry->fd, buffer, read_request_size);
-    if (bytes_read < 0)
+    if (0 == mergeBlockFromFileRead (merge_entry))
     {
-      perror ("Read merge buffer");
-      exit (-1);
-    }
-    const unsigned long long total_bytes_read = (unsigned long long) bytes_read;
-
-    if (0 != (total_bytes_read % merge_entry->element_size))
-    {
-      printf ("ERROR: Read unexpected number of bytes:%'llu from %s\n",
-                    total_bytes_read,
-                    merge_entry->file_name);
-      exit (-1);
-    }
-
-    if (0 == total_bytes_read)
-    {
-      merge_entry->file_is_empty = 1;
-      close (merge_entry->fd);
-      unlink (merge_entry->file_name);
-      free (merge_entry->buffer);
       return 0;
-    }
-
-    /* We don't trim the file on every read because that can cause 
-    ** performance issues. The constant below defines how many bytes
-    ** must be read from the file before trimming.
-    */
-    constexpr unsigned long long max_trim_bytes = 128LLU*1024LLU*1024LLU;
-
-    merge_entry->num_trim_bytes += total_bytes_read;
-    merge_entry->num_elements_in_block = total_bytes_read / merge_entry->element_size;
-
-    /* To conserve disk space we need to reduce the file size to remove all the 
-    ** elements that we have already read.
-    ** Make sure that the trim size is a multiple of the file system block size.
-    ** Otherwise fallocate() will not work.
-    */
-    if ((0 != merge_entry->trim_needed) &&
-        (merge_entry->num_trim_bytes > max_trim_bytes) &&
-        (0 == (merge_entry->num_trim_bytes % merge_entry->file_system_block_size)) &&
-        (0 != merge_entry->num_trim_bytes))
-    {
-      const __off_t trim_size = (__off_t) merge_entry->num_trim_bytes;
-      merge_entry->num_trim_bytes = 0;
-
-      if (0 == merge_entry->trim_collapse_range_supported)
-      {
-        if (0 != fallocate (merge_entry->fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 
-                                  (__off_t) merge_entry->last_trim_location,  trim_size))
-        {
-          perror ("fallocate - FALLOC_FL_PUNCH_HOLE - Reduce file size.");
-          exit (-1);
-        }
-
-        merge_entry->last_trim_location += (unsigned long long) trim_size;
-      } else
-      {
-        /* We already tested and verified that COLLAPSE_RANGE should work on this file
-        ** system. 
-        ** The fallocate will fail when we try to pass the last remaining block 
-        ** of the file, so we can just ignore that error.
-        */
-        if (0 == fallocate (merge_entry->fd, FALLOC_FL_COLLAPSE_RANGE, 0,  trim_size))
-        {
-          /* Reset the read pointer to the start of file.
-          */
-          if (0 != lseek (merge_entry->fd, 0, SEEK_SET))
-          {
-            perror ("lseek - Reset file read pointer.");
-            exit (-1);
-          }
-        } else
-        {
-//          perror ("fallocate failed, continuing without trimming.");
-//          printf ("   fd:%d trim_size:%'llu\n", merge_entry->fd, (unsigned long long) trim_size);
-        }
-
-      }
     }
   }
 
@@ -1503,7 +1615,10 @@ static void * parallel_merge (void *arg)
       }
       all_blocks_empty = 0;
 
-      if (0 < merge_stream->compar(min_element, next_element))
+      const int compar_value = (0 == merge_stream->entry_type)?
+                                    positionCompare (min_element, next_element):
+                                    moveCompare (min_element, next_element);
+      if (0 < compar_value)
       {
         memcpy (min_element, next_element, merge_stream->element_size);
         min_stream_number = i;
@@ -1533,7 +1648,57 @@ static void * parallel_merge (void *arg)
 
     /* Remove the smallest entry from the sort block.
     */
-    (void) mergeBlockNextGet (sort_table, min_stream_number, 1);
+    if (0 != merge_stream->entry_type)
+    {
+      /*
+      ** If we are sorting move entries then there are no duplicates, so 
+      ** we can re-start the search on the first block.
+      */
+      (void) mergeBlockNextGet (sort_table, min_stream_number, 1);
+      continue;
+    } 
+
+    /* When we are sorting positions then we expect two thirds of the 
+    ** entries to be duplicates. The duplicates can be located in any 
+    ** file block, but before we move on to searching other blocks
+    ** extract all the duplicate entries from the current block.
+    */
+    const unsigned char *const last_entry_ptr = 
+                        mergeBlockNextGet (sort_table, min_stream_number, 1);
+    unsigned char last_entry[merge_stream->element_size];
+    memcpy (last_entry, last_entry_ptr, sizeof(last_entry));
+
+    do 
+    {
+      const unsigned char *const next_potential_dup = 
+                        mergeBlockNextGet (sort_table, min_stream_number, 0);
+      if ((0 == next_potential_dup) ||
+          (0 != positionCompare (last_entry, next_potential_dup)))
+      {
+        /* No more duplicates in this block.
+        */
+        break;
+      }
+      unsigned char *dup_element = &msg[merge_stream->element_size * (element_index + 1)];
+      memcpy (dup_element, next_potential_dup, sizeof(last_entry));
+      element_index++;
+      if (element_index == MAX_ELEMENTS_IN_MESSAGE)
+      {
+        /* Send the sorted entries to the merge stream.
+        */
+        msg[0] = element_index; // Indicate the number of elements.
+        if (0 != bsdlicQueueSend (&merge_stream->merged_stream, msg, 
+                    (unsigned int) sizeof(msg), QUEUE_WAIT_FOREVER))
+        {
+          printf ("ERROR: Sending full message to merge stream. (Duplicate Message Handler)\n");
+          exit (-1);
+        }
+        element_index = 0;
+      }
+      (void) mergeBlockNextGet (sort_table, min_stream_number, 1);
+
+    } while (1);
+    
 
   } while (1);
 
@@ -1580,6 +1745,9 @@ static void * parallel_merge (void *arg)
 ** reading and pre-merging can continue while the main merge task is performing
 ** other work.
 **
+** The last parameter "entry_type" indicates whether we are merging positions (0)
+** or moves (1).
+**
 ******************************************************************************/
 static unsigned int parallelMergeBlockReadInit (parallelMergeBlock_t *const merge_stream,
                                 const unsigned long long read_sort_block_size,
@@ -1587,7 +1755,7 @@ static unsigned int parallelMergeBlockReadInit (parallelMergeBlock_t *const merg
                                 const unsigned long long element_size,
                                 const char *const file_prefix,
                                 const unsigned int trim_needed,
-                                int (*compar)(const void *, const void *))
+                                unsigned int entry_type) 
 {
   const unsigned int num_merge_threads = ((num_blocks / 2) >= MAX_MERGE_THREADS)?MAX_MERGE_THREADS:
                                      (0 == (num_blocks / 2))?1:
@@ -1626,7 +1794,7 @@ static unsigned int parallelMergeBlockReadInit (parallelMergeBlock_t *const merg
     merge_stream[i].last_received_message = malloc (element_size * (MAX_ELEMENTS_IN_MESSAGE + 1));
     assert (0 != merge_stream[i].last_received_message);
 
-    merge_stream[i].compar = compar;
+    merge_stream[i].entry_type = entry_type;
     merge_stream[i].trim_needed = trim_needed; 
     merge_stream[i].read_sort_block_size = per_thread_file_buffer_size; 
     strcpy (merge_stream[i].file_prefix, file_prefix); 
@@ -1890,7 +2058,7 @@ static void * brd_db_generate (void *arg)
                       sizeof (sortBlockEntry_t),
                       SORT_BLOCK_PREFIX,
                       1,
-                      positionCompare);
+                      0);
 
   /* Read until all positions from all blocks are read.
   */
@@ -2057,7 +2225,7 @@ static void * brd_db_generate (void *arg)
                       sizeof (sortBlockMoveEntry_t),
                       SORT_MOVE_BLOCK_PREFIX,
                       1,
-                      moveCompare);
+                      1);
 
   for (unsigned long long move_count = 0; 
             move_count < board_db->ply_table[ply_number].stats.total_moves_added;

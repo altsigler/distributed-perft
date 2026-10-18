@@ -144,7 +144,7 @@ typedef unsigned long long deepSearchCounter_t;
 
 /* The maximum number of merge threads.
 */
-#define MAX_MERGE_THREADS 16
+#define MAX_MERGE_THREADS 32
 
 /* The number of sort threads for sorting a single block in DRAM.
 ** The sort algorithm uses DRAM extensively, so ultimately the performance is
@@ -326,7 +326,7 @@ typedef struct
 
     /* Function used to compare elements.
     */
-    int (*compar)(const void *, const void *);
+    unsigned int entry_type; // 0-Positions, 1-Moves
 
 
     unsigned int trim_needed;
@@ -406,8 +406,9 @@ typedef struct
   char file_name[1024];
   unsigned long long num_elements;
   size_t element_size;
-  int (*compar)(const void *, const void *);
+  unsigned int entry_type; // 0 - Position, 1 - Move
   pthread_t block_write_thread;
+  void * brd_db;
 } sortBlockCtrl_t;
 
 /* Board Database Control Structure.
