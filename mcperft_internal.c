@@ -21,6 +21,7 @@
 #include <sys/sysinfo.h>
 #include <sys/statvfs.h>
 #include <sys/resource.h>
+#include <linux/magic.h>
 
 #include "bytebrd_api.h"
 #include "onecore_api.h"
@@ -164,6 +165,40 @@ static int positionFd = -1;
 
 /******************************************************************************
 ** Open buffered file for writing.
+** The buffered files utility enables the caller to write small elements to a 
+** file without blocking using the bufferedFileWrite() function. 
+**
+** The buffered files utility maintains two big bufferes with the minimum size
+** of buffer_size_in_bytes. 
+**
+** The small elements are copied into a big memory buffer, and once that 
+** memory buffer is full, the buffer is written to disk using an asynchronous  
+** thread. 
+**
+** While one buffer is being written to disk, the bufferedFileWrite() adds 
+** new elements to the second buffer. When the second buffer fills up the 
+** buffered files utility checks to see if the first buffer is done writing,
+** and swaps the buffers. If the first buffer is not done writing then 
+** the bufferedFileWrite() blocks the caller until the file write 
+** operation for the first big buffer is finished.
+**
+** The application must invoke the bufferedFileFinish() function to 
+** tell the buffered files utility that the file write operations are
+** done. The bufferedFileFinish() blocks the caller until all data is 
+** written to disk and the memory allocated for the bug buffer is freed.
+**
+** The intended use of the buffered files utility is for writing very big 
+** files. The buffer_size_in_bytes should be set to at least 10MB. With such
+** big buffers the overhead of creating a thread for every file write is 
+** negligible.
+**
+** The buffered file write utility writes files using O_DIRECT mode, which 
+** means that there is no extra data copy from user space to kernel 
+** space on every write() function call.
+**
+** Note that the the buffered files utility is NOT thread safe,
+** so if the functions for the same buffer are used in different threads 
+** then the caller must handle mutual exclusion.
 **
 ******************************************************************************/
 static bufferedFile_t bufferedFileWriteStart (const char *file_name, 
@@ -172,19 +207,26 @@ static bufferedFile_t bufferedFileWriteStart (const char *file_name,
 {
   bufferedFile_t bf = {};
 
-  /* In the future we may want to enable direct IO to avoid
-  ** double buffering files. The rest of the code is enabled for that.
-  ** On systems with plenty of DRAM and idle cores using O_DIRECT actually slows down 
-  ** the program because waiting for disk takes longer than simply allowing an idle core 
-  ** to asynchronously update the file on disk.
-  */
-  //  bf.fd = open (file_name, O_DIRECT | O_WRONLY | O_APPEND | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+  bf.fd = open (file_name, O_DIRECT | O_WRONLY | O_APPEND | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
 
-  bf.fd = open (file_name, O_WRONLY | O_APPEND | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
   if (bf.fd < 0)
   {
-    perror ("create buffered file");
-    exit (-1);
+    if (errno == EINVAL)
+    {
+      /* The NFS file system may not support the O_DIRECT flag, so try to open the file 
+      ** without it.
+      */
+      bf.fd = open (file_name, O_WRONLY | O_APPEND | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+      if (bf.fd < 0)
+      {
+        perror ("create buffered file (second attempt)");
+        exit (-1);
+      }
+    } else
+    {
+      perror ("create buffered file");
+      exit (-1);
+    }
   }
 
   struct statvfs stat;
@@ -193,7 +235,16 @@ static bufferedFile_t bufferedFileWriteStart (const char *file_name,
     perror ("fstatvfs of buffer file");
     exit (-1);
   }
-  bf.file_block_size = stat.f_bsize;
+  if (stat.f_type == NFS_SUPER_MAGIC)
+  {
+    /* Blocks on FS are 1MB, which is too big for us. 
+    ** The block alignment is not needed anyway on the NFS file system.
+    */
+    bf.file_block_size = 4096;
+  } else
+  {
+    bf.file_block_size = stat.f_bsize;
+  }
 
   /* Make sure that the buffer size is aligned on block size and element size.
   */
@@ -205,8 +256,11 @@ static bufferedFile_t bufferedFileWriteStart (const char *file_name,
     bf.buffer_size_in_bytes = ((bf.buffer_size_in_bytes / align_size) + 1) * align_size;
   }
 
-  bf.buffer = aligned_alloc (bf.file_block_size, bf.buffer_size_in_bytes);
-  assert (bf.buffer);
+  bf.buffer[0] = aligned_alloc (bf.file_block_size, bf.buffer_size_in_bytes);
+  assert (bf.buffer[0]);
+
+  bf.buffer[1] = aligned_alloc (bf.file_block_size, bf.buffer_size_in_bytes);
+  assert (bf.buffer[1]);
 
   bf.entry_size_in_bytes = element_size_in_bytes;
   bf.max_entries_in_buffer = bf.buffer_size_in_bytes / bf.entry_size_in_bytes;
@@ -215,6 +269,40 @@ static bufferedFile_t bufferedFileWriteStart (const char *file_name,
   return bf;
 }
 /******************************************************************************
+** Asynchronous file write thread.
+**
+******************************************************************************/
+static void * asyncWriteThread (void *arg)
+{
+ bufferedFile_t *bf = arg;
+
+ ssize_t bytes_written;
+ unsigned long long total_bytes_written = 0;
+ size_t write_request_size = bf->async_buffer_size;
+ const unsigned char *write_buffer = bf->async_buffer;
+ char thread_name[16];
+
+ sprintf (thread_name, "mcp-async-write");
+
+ (void) pthread_setname_np(pthread_self(), thread_name);
+
+ do
+ {
+   bytes_written = write (bf->fd, &write_buffer[total_bytes_written], write_request_size);
+   if (bytes_written < 0)
+   {
+     perror ("Write to buffered file");
+     printf ("fd:%d\n", bf->fd);
+     exit (-1);
+   }
+   total_bytes_written += (unsigned long long) bytes_written;
+   write_request_size -= (size_t) bytes_written;
+ } while (write_request_size);
+
+ return 0;
+}
+
+/******************************************************************************
 ** Write one element to the file. 
 ** The file is accessed only when the buffer is full.
 **
@@ -222,31 +310,36 @@ static bufferedFile_t bufferedFileWriteStart (const char *file_name,
 static void bufferedFileWrite  (bufferedFile_t *const bf,
                                 const void *const entry)
 {
-  memcpy (&bf->buffer[bf->num_entries_in_buffer * bf->entry_size_in_bytes],
+  memcpy (&bf->buffer[bf->in_use_buffer][bf->num_entries_in_buffer * bf->entry_size_in_bytes],
             entry, bf->entry_size_in_bytes);
   bf->num_entries_in_buffer++;
 
   if (bf->num_entries_in_buffer == bf->max_entries_in_buffer)
   {
-    ssize_t bytes_written;
-    unsigned long long total_bytes_written = 0;
-    size_t write_request_size = bf->num_entries_in_buffer * bf->entry_size_in_bytes;
-    const unsigned char *write_buffer = bf->buffer;
-
-    do 
+    /* If the async thread is already running then we have to 
+    ** wait until it is done.
+    */
+    if (bf->async_writer_thread)
     {
-      bytes_written = write (bf->fd, &write_buffer[total_bytes_written], write_request_size);
-      if (bytes_written < 0)
+      if (0 != pthread_join (bf->async_writer_thread, 0))
       {
-        perror ("Write to buffered file");
+        perror ("pthread_join - Async Writer Thread");
         exit (-1);
       }
-      total_bytes_written += (unsigned long long) bytes_written;
-      write_request_size -= (size_t) bytes_written;
-    } while (write_request_size);
+    }
 
-    bf->total_bytes_written_in_file += total_bytes_written;
+    bf->async_buffer = bf->buffer[bf->in_use_buffer];
+    bf->async_buffer_size = bf->num_entries_in_buffer * bf->entry_size_in_bytes;
+
+    bf->in_use_buffer ^= 1;
+    bf->total_bytes_written_in_file += bf->async_buffer_size;
     bf->num_entries_in_buffer = 0;
+
+    if (0 != pthread_create (&bf->async_writer_thread, 0, asyncWriteThread, bf))
+    {
+      perror ("pthread_create: - Async Writer Thread ");
+      exit (-1);
+    }
   }
 
 }
@@ -256,12 +349,21 @@ static void bufferedFileWrite  (bufferedFile_t *const bf,
 ******************************************************************************/
 static void bufferedFileFinish  (bufferedFile_t *const bf)
 {
+  /* If the async thread is already running then we have to 
+  ** wait until it is done.
+  */
+  if (bf->async_writer_thread)
+  {
+    if (0 != pthread_join (bf->async_writer_thread, 0))
+    {
+      perror ("pthread_join - Async Writer Thread (File Finish)");
+      exit (-1);
+    }
+  }
+
   if (0 != bf->num_entries_in_buffer)
   {
-    ssize_t bytes_written;
-    ssize_t total_bytes_written = 0;
     size_t write_request_size = bf->num_entries_in_buffer * bf->entry_size_in_bytes;
-    const unsigned char *const write_buffer = bf->buffer;
 
     /* The last write may not be aligned on block boundary, so we may need to 
     ** truncate the file.
@@ -276,24 +378,31 @@ static void bufferedFileFinish  (bufferedFile_t *const bf)
       /* Make sure that the tail end of the buffer is initialized.
       ** This avoids accesses to uninitialized memory.
       */
-      memset (&bf->buffer[real_write_size], 0, (write_request_size - real_write_size));
+      memset (&bf->buffer[bf->in_use_buffer][real_write_size], 0, (write_request_size - real_write_size));
     }
 
-    do
+    bf->async_buffer = bf->buffer[bf->in_use_buffer];
+    bf->async_buffer_size = write_request_size;
+
+    bf->total_bytes_written_in_file += real_write_size;
+
+    if (0 != pthread_create (&bf->async_writer_thread, 0, asyncWriteThread, bf))
     {
-      bytes_written = write (bf->fd, &write_buffer[total_bytes_written], write_request_size);
-      if (bytes_written < 0)
-      {
-        perror ("Write to buffered file");
-        exit (-1);
-      }
-      total_bytes_written += bytes_written;
-      write_request_size -= (size_t) bytes_written;
-    } while (write_request_size);
+      perror ("pthread_create: - Async Writer Thread (File Finish)");
+      exit (-1);
+    }
+
+    /* Wait until write is done.
+    */
+    if (0 != pthread_join (bf->async_writer_thread, 0))
+    {
+      perror ("pthread_join - Async Writer Thread (File Finish 2)");
+      exit (-1);
+    }
 
     if (truncate_needed)
     {
-      if (0 != ftruncate (bf->fd, (__off_t) (bf->total_bytes_written_in_file + real_write_size)))
+      if (0 != ftruncate (bf->fd, (__off_t) bf->total_bytes_written_in_file))
       {
         perror ("ftruncate - buffered file");
         exit (-1);
@@ -301,38 +410,10 @@ static void bufferedFileFinish  (bufferedFile_t *const bf)
     }
   }
   close (bf->fd);
+  free (bf->buffer[0]);
+  free (bf->buffer[1]);
 }
 
-
-/******************************************************************************
-** Start new position file for the specified ply.
-** The ply numbers start with 0 and go up.
-**
-** The function opens the ply position file. If file already exists then 
-** it is deleted. The file is opened in write-only mode.
-** The function also sets up the position file context parameters.
-** These parameters are in global variables, so only one ply 
-** position file can be opened at any one time.
-******************************************************************************/
-static void plyPositionFileWriteStart (const unsigned int ply)
-{
-  char pos_file_name[1024];
-
-  if (positionFd != -1)
-  {
-    printf ("ERROR: Ply Position File is already open.\n");
-    exit (-1);
-  }
-  sprintf (pos_file_name, "%s%u_positions", PLY_FILE_PREFIX, ply); 
-  positionFd = open (pos_file_name, O_WRONLY | O_APPEND | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
-  if (positionFd < 0)
-  {
-    perror ("create ply positions file");
-    exit (-1);
-  }
-
-  numEntriesInPositionFileBuffer = 0;
-}
 
 /******************************************************************************
 ** Start new position file for the specified ply.
@@ -595,79 +676,6 @@ static plyPositionEntry_t * plyPositionFileNextGet (void)
 }
 
 /******************************************************************************
-** Add new entry to the ply positions file. 
-** The new entries are buffered until the buffer is full. Once the buffer
-** is full the entries are written to file. 
-**
-******************************************************************************/
-static void plyPositionFileWrite (plyPositionEntry_t *position)
-{
-  memcpy (&positionBuffer[numEntriesInPositionFileBuffer++],
-            position, sizeof(plyPositionEntry_t));
-  if (positionBufferMaxEntries == numEntriesInPositionFileBuffer)
-  {
-    ssize_t bytes_written;
-    ssize_t total_bytes_written = 0;
-    size_t write_request_size = sizeof(positionBuffer);
-    const unsigned char *write_buffer = (unsigned char *) positionBuffer;
-
-    do 
-    {
-      bytes_written = write (positionFd, &write_buffer[total_bytes_written], write_request_size);
-      if (bytes_written < 0)
-      {
-        perror ("Write to ply position file");
-        exit (-1);
-      }
-      total_bytes_written += bytes_written;
-      write_request_size -= (size_t) bytes_written;
-    } while (write_request_size);
-    
-    numEntriesInPositionFileBuffer = 0;
-  }
-
-}
-
-/******************************************************************************
-** Write any buffered position to the ply positions file, and close the file.
-**
-******************************************************************************/
-static void plyPositionFileFinish (void)
-{
-  if (positionFd < 0)
-  {
-    printf ("ERROR: Attempting to close position file when it is already closed.\n");
-    exit (-1);
-  }
-
-  if (0 != numEntriesInPositionFileBuffer)
-  {
-    ssize_t bytes_written;
-    ssize_t total_bytes_written = 0;
-    size_t write_request_size = sizeof(plyPositionEntry_t) * numEntriesInPositionFileBuffer;
-    const unsigned char *write_buffer = (unsigned char *) positionBuffer;
-
-    do
-    {
-      bytes_written = write (positionFd, &write_buffer[total_bytes_written], write_request_size);
-      if (bytes_written < 0)
-      {
-        perror ("Write to ply position file");
-        exit (-1);
-      }
-      total_bytes_written += bytes_written;
-      write_request_size -= (size_t) bytes_written;
-    } while (write_request_size);
-
-  }
-
-  numEntriesInPositionFileBuffer = 0;
-
-  close (positionFd);
-  positionFd = -1;
-}
-
-/******************************************************************************
 ** Create the new position database directory. 
 **
 ** Return Values:
@@ -753,6 +761,7 @@ static unsigned int brdDbPlyDepthGet(void)
   return highest_ply;
 }
 
+typedef unsigned long long __attribute__((aligned(1))) unaligned_unsigned_long_long_t;
 /******************************************************************************
 ** Convert 8x8 board into 32-byte array for storing in the board database.
 **
@@ -761,9 +770,11 @@ static unsigned int brdDbPlyDepthGet(void)
 **
 ** Return Values:
 ******************************************************************************/
-static void brdPack (const brd_t* const brd, unsigned char *const output_position)
+static void brdPack (const brd_t* const brd, 
+                     unsigned char *const output_position)
 {
-  unsigned long long position[4];
+  unaligned_unsigned_long_long_t *const position = 
+                (unaligned_unsigned_long_long_t *) output_position;
 
   /* Convert the current board position into the cache format. 
   ** A piece uses only 4 bits in each byte of the brd_t structure, 
@@ -774,7 +785,6 @@ static void brdPack (const brd_t* const brd, unsigned char *const output_positio
   position[2] = ((unsigned long *)brd)[2] | (((unsigned long *)brd)[6] << 4);
   position[3] = ((unsigned long *)brd)[3] | (((unsigned long *)brd)[7] << 4);
 
-  memcpy (output_position, position, sizeof(position));
 }
 
 /******************************************************************************
@@ -785,10 +795,11 @@ static void brdPack (const brd_t* const brd, unsigned char *const output_positio
 **
 ** Return Values:
 ******************************************************************************/
-static void brdUnpack (brd_t* const brd, const unsigned char * const input_position)
+static void brdUnpack (brd_t* const brd, 
+                       const unsigned char * const input_position)
 {
-  unsigned long long position[4];
-  memcpy (position, input_position, sizeof(position));
+  const unaligned_unsigned_long_long_t  *const position = 
+                            (unaligned_unsigned_long_long_t *) input_position;
 
   ((unsigned long *)brd)[0] = position[0] & 0x0f0f0f0f0f0f0f0fLLU;
   ((unsigned long *)brd)[4] = (position[0] >> 4) & 0x0f0f0f0f0f0f0f0fLLU;
@@ -828,6 +839,24 @@ static inline int moveCompare (const void *const p1,
                                         return -1;
 
   return 1;
+}
+
+/******************************************************************************
+** Check whether the second move is exactly equal to first move plus 1.
+** We are guaranteed that move entries don't have duplicates and we 
+** also expect at least one third of entries to be sequential.
+******************************************************************************/
+static inline int moveSequential (const void *const p1,
+                            const void *const p2)
+{
+  const sortBlockMoveEntry_t *const move1 = p1;
+  const sortBlockMoveEntry_t *const move2 = p2;
+
+  if ((1 + moveEntryToIndex(move1->move_index)) == 
+                        moveEntryToIndex(move2->move_index))
+                                        return 1;
+
+  return 0;
 }
 
 
@@ -876,7 +905,7 @@ static void sortThreadsCreate (sortParms_t *sort_parms,
   int (*compar)(const void *, const void *) = (0 == entry_type)?
                                                     positionCompare:
                                                     moveCompare;
-  void *const block = brd_db->sort_block[brd_db->active_sort_block];
+  void *const block = brd_db->sort_block[brd_db->background_sort_block];
 
   unsigned long long start_index = 0;
   pthread_t sort_thread[NUM_SORT_THREADS];
@@ -933,7 +962,7 @@ static void * generateSortedBlockFile (void *arg)
   brdDb_t *const brd_db = sort_block_ctrl->brd_db;
 
   /* If we are sorting move entries then the sort is done on the generate sorted block
-  ** file thread. This is because we have plenty of time to perfor the sorting in 
+  ** file thread. This is because we have plenty of time to perform the sorting in 
   ** parallel while the position database is being merged.
   */
   if (0 != entry_type)
@@ -942,40 +971,13 @@ static void * generateSortedBlockFile (void *arg)
                      num_elements, element_size, entry_type);
   }
 
-//  const int fd = open (file_name, O_DIRECT | O_WRONLY | O_APPEND | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
-  const int fd = open (file_name, O_WRONLY | O_APPEND | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
-  if (fd < 0)
-  {
-    perror ("create sort block file");
-    exit (-1);
-  }
-
-  struct statvfs stat;
-  if (0 != fstatvfs (fd, &stat))
-  {
-    perror ("fstatvfs of buffer file");
-    exit (-1);
-  }
-  size_t file_block_size = stat.f_bsize;
+  bufferedFile_t block_file = bufferedFileWriteStart (file_name,
+                                                    10'000'000,
+                                                    element_size);
 
   /* Merge all sort blocks into the output file.
   */
   unsigned long long sort_block_index[NUM_SORT_THREADS] = {};
-
-  /* To reduce the number of I/O operations we store data in a buffer.
-  ** When the buffer fills up then we write it to disk.
-  */
-  constexpr unsigned long long max_buffer_size_in_bytes = 10'000'000;
-  const unsigned long long alignment_block_size = element_size * file_block_size;
-  const unsigned long long buffer_size_in_bytes = (max_buffer_size_in_bytes / alignment_block_size) * 
-                                                                alignment_block_size;
-
-  unsigned char *const output_buffer = aligned_alloc (file_block_size, buffer_size_in_bytes);
-  unsigned long long num_elements_in_buffer = 0;
-  const unsigned long long max_elements_in_buffer = buffer_size_in_bytes / element_size;
-  unsigned long long total_file_size = 0;
-
-  assert (output_buffer);
 
   unsigned long long i = 0;
   do
@@ -1017,56 +1019,19 @@ static void * generateSortedBlockFile (void *arg)
 
     do  // Duplicate Detection Loop
     {
-      /* Extract the smallest element from the sort buffer and put it into
-      ** the output buffer.
+      /* Write the smallest element to the output file.
       */
-      memcpy (&output_buffer[num_elements_in_buffer * element_size], smallest_block,
-               element_size);
-      num_elements_in_buffer++;
+      bufferedFileWrite  (&block_file, smallest_block);
       sort_block_index[min_position_stream]++;
-      
-      /* If the output buffer is full or we are processing the last element then 
-      ** write the output buffer to file.
+
+      /* If we are processing the last element in the sort table then 
+      ** push any pending writes to disk and close the output file.
       */
-      if ((num_elements_in_buffer == max_elements_in_buffer) ||
-          (i == (num_elements - 1)))
-      { 
-        unsigned long long output_buffer_size = num_elements_in_buffer * element_size;
-        unsigned long long total_bytes_written = 0;
-
-        total_file_size += output_buffer_size;
-
-        /* For O_DIRECT files the output buffer must be multiple of 
-        ** file block size.
-        */
-        if (0 != (output_buffer_size % file_block_size))
-        {
-          output_buffer_size = (((output_buffer_size / file_block_size) + 1) * file_block_size);
-        }
-
-        do 
-        {
-          const ssize_t bytes_written = write (fd, &output_buffer[total_bytes_written],
-                              (output_buffer_size - total_bytes_written));
-          if (bytes_written < 0)
-          {
-            perror ("writing sort block");
-            exit (-1);
-          }
-          total_bytes_written += (unsigned long long) bytes_written;
-        } while (total_bytes_written < output_buffer_size);
-
-        num_elements_in_buffer = 0;
-      }
-
-      /* Move entries are guaranteed not to have duplicates, so exit
-      ** the duplicate detection loop.
-      */
-      if (0 != entry_type)
+      if (i == (num_elements - 1))
       {
-        break;
+        bufferedFileFinish  (&block_file);
       }
-
+      
       /* If sort block is empty then exit the duplicate detection loop.
       */
       if (sort_block_index[min_position_stream] == sort_parms[min_position_stream].num_entries)
@@ -1078,11 +1043,18 @@ static void * generateSortedBlockFile (void *arg)
 
       /* If the next position in the block is not the same as current position then 
       ** exit the duplicate detection loop.
+      **
+      ** For move redocrds instead of looking for duplicates, which don't exist, we 
+      ** look for sequential records.
       */
       unsigned char *next_block = sort_parms[min_position_stream].block +
                       (sort_block_index[min_position_stream] * element_size);
 
-      if (0 != positionCompare (smallest_block, next_block))
+      const int dup_val = (0 == entry_type)?
+                            (0 == positionCompare (smallest_block, next_block)):
+                            moveSequential (smallest_block, next_block);
+
+      if (0 == dup_val)
       {
         break;
       }
@@ -1098,18 +1070,6 @@ static void * generateSortedBlockFile (void *arg)
   } while (1);
 
   assert (i == num_elements);
-
-  free (output_buffer);
-
-  /* Set the file size to match the actual number of elements written to the file.
-  */
-  if (0 != ftruncate (fd, (__off_t) total_file_size))
-  {
-    perror ("ftruncate - Sorted Block.");
-    exit (-1);
-  }
-
-  close (fd);
 
   return 0;
 }
@@ -1132,6 +1092,7 @@ static void parallelSort (const char *const file_name,
   */
   if (0 == entry_type)
   {
+    brd_db->background_sort_block = brd_db->active_sort_block;
     sortThreadsCreate (sort_parms, brd_db,
                      num_elements, element_size, entry_type);
   }
@@ -1151,15 +1112,11 @@ static void parallelSort (const char *const file_name,
   }
 
   /* Swap the sort blocks. 
-  ** Note than when we are sorting move blocks then we don't swap memory areas
-  ** because the moves are sorted and written to file sequentially.
   */
-  if (0 == entry_type)
-  {
-    brd_db->active_sort_block ^= 1;
-    brd_db->sort_block_position = brd_db->sort_block[brd_db->active_sort_block];
-    brd_db->sort_block_move = brd_db->sort_block[brd_db->active_sort_block];
-  }
+  brd_db->background_sort_block = brd_db->active_sort_block;
+  brd_db->active_sort_block ^= 1;
+  brd_db->sort_block_position = brd_db->sort_block[brd_db->active_sort_block];
+  brd_db->sort_block_move = brd_db->sort_block[brd_db->active_sort_block];
 
   /* If there are elements in the file then write them to disk.
   */
@@ -1244,7 +1201,8 @@ static void nextPositionsCreate (const brd_t *const brd,
                                  const bytebrdMove_t *const dest,
                                  const unsigned int num_moves,
                                  const plyPositionEntry_t *const position_entry,
-                                 sortBlockEntry_t *const next_position)
+                                 sortBlockEntry_t *const next_position,
+                                 unsigned long long num_boards_in_ply)
 {
   /* Create next database entry for every move.
   */
@@ -1255,7 +1213,7 @@ static void nextPositionsCreate (const brd_t *const brd,
 
     ndb_entry->brd_info.brd_info = position_entry->brd_info.brd_info;
 
-    memset (&ndb_entry->move_entry, 0, sizeof(moveEntry_t));
+    ndb_entry->move_entry = moveIndexToEntry(num_boards_in_ply++);
 
     const brdCtrlInfo_t position_info = position_entry->brd_info.brd_info;
 
@@ -1326,7 +1284,16 @@ static void mergeBlockReadInit (mergeBlock_t *const merge_block,
       perror ("fstatvfs of position merge file");
       exit (-1);
     }
-    merge_entry->file_system_block_size = stat.f_bsize;
+    if (stat.f_type == NFS_SUPER_MAGIC)
+    {
+      /* Blocks on FS are 1MB, which is too big for us. 
+      ** The block alignment is not needed anyway on the NFS file system.
+      */
+      merge_entry->file_system_block_size = 4096;
+    } else
+    {
+      merge_entry->file_system_block_size = stat.f_bsize;
+    }
 
     unsigned long long buffer_size_in_bytes = read_sort_block_size / num_blocks;
     /* Limit the size of the read block to 80MB.
@@ -1646,22 +1613,13 @@ static void * parallel_merge (void *arg)
       element_index = 0;
     }
 
-    /* Remove the smallest entry from the sort block.
-    */
-    if (0 != merge_stream->entry_type)
-    {
-      /*
-      ** If we are sorting move entries then there are no duplicates, so 
-      ** we can re-start the search on the first block.
-      */
-      (void) mergeBlockNextGet (sort_table, min_stream_number, 1);
-      continue;
-    } 
-
     /* When we are sorting positions then we expect two thirds of the 
     ** entries to be duplicates. The duplicates can be located in any 
     ** file block, but before we move on to searching other blocks
     ** extract all the duplicate entries from the current block.
+    **
+    ** For move entries we are searching and removing sequential 
+    ** entries.
     */
     const unsigned char *const last_entry_ptr = 
                         mergeBlockNextGet (sort_table, min_stream_number, 1);
@@ -1672,8 +1630,17 @@ static void * parallel_merge (void *arg)
     {
       const unsigned char *const next_potential_dup = 
                         mergeBlockNextGet (sort_table, min_stream_number, 0);
-      if ((0 == next_potential_dup) ||
-          (0 != positionCompare (last_entry, next_potential_dup)))
+
+      if (0 == next_potential_dup)
+      {
+        break;
+      }
+
+      const int dup_val = (0 == merge_stream->entry_type)?
+                            (0 == positionCompare (last_entry, next_potential_dup)):
+                            moveSequential (last_entry, next_potential_dup);
+      if (0 == dup_val)
+          
       {
         /* No more duplicates in this block.
         */
@@ -1957,7 +1924,6 @@ static void * brd_db_generate (void *arg)
   bytebrdMove_t dest[MAX_BRD_MOVES];
 
   plyPositionEntry_t *position_entry;
-  sortBlockEntry_t next_position[MAX_BRD_MOVES];
   unsigned int num_moves;
   unsigned int mover_lost;
 
@@ -1970,9 +1936,9 @@ static void * brd_db_generate (void *arg)
 
   gen_status->total_ply_positions = plyPositionFileReadUpdateStart (ply_number);
 
+  gen_status->ply_processing_phase = 1;  
   while (0 != (position_entry = plyPositionFileNextGet ()))
   {
-    gen_status->ply_processing_phase = 1;  
     position_entry->first_move_index = moveIndexToEntry(ply->num_boards_in_ply);
 
     brdUnpack (&brd, position_entry->position);
@@ -1994,17 +1960,11 @@ static void * brd_db_generate (void *arg)
 
 
     nextPositionsCreate (&brd, dest, num_moves, position_entry,
-                            next_position);
+                            &board_db->sort_block_position[sort_block_index],
+                            ply->num_boards_in_ply);
 
-    /* Copy discovered moves into the sort block.
-    */
-    for (unsigned int i = 0; i < num_moves; i++)
-    {
-     next_position[i].move_entry = moveIndexToEntry (ply->num_boards_in_ply);
-     memcpy (&board_db->sort_block_position[sort_block_index], &next_position[i], sizeof(sortBlockEntry_t)); 
-     ply->num_boards_in_ply++;
-     sort_block_index++;
-    }
+    sort_block_index += num_moves;
+    ply->num_boards_in_ply += num_moves;
 
     /* If the sort block is almost full then sort it and write it to a temporaty file.
     */
@@ -2043,7 +2003,12 @@ static void * brd_db_generate (void *arg)
 
   /* Open position file for the next ply.
   */
-  plyPositionFileWriteStart (ply_number + 1);
+  char pos_file_name[1024];
+  sprintf (pos_file_name, "%s%u_positions", PLY_FILE_PREFIX, ply_number + 1); 
+
+  bufferedFile_t position_file = bufferedFileWriteStart (pos_file_name,
+                                                    10'000'000,
+                                                    sizeof(plyPositionEntry_t));
 
   /* Merge all sorted blocks into a single position database.
   ** The move database is generated as part of this merge. 
@@ -2122,7 +2087,7 @@ static void * brd_db_generate (void *arg)
     ply_position.num_moves = 0;
     ply_position.first_move_index = moveIndexToEntry(0);
 
-    plyPositionFileWrite (&ply_position);
+    bufferedFileWrite  (&position_file, &ply_position);
     ply->stats.unique_positions_added++;
 
     /* Update the move file for the current ply to point to the 
@@ -2202,7 +2167,7 @@ static void * brd_db_generate (void *arg)
 
   /* Close the ply position file.
   */
-  plyPositionFileFinish ();
+  bufferedFileFinish  (&position_file);
 
   gen_status->total_new_moves = board_db->ply_table[ply_number].stats.total_moves_added;
   gen_status->processed_new_moves = 0;
@@ -2227,13 +2192,13 @@ static void * brd_db_generate (void *arg)
                       1,
                       1);
 
-  for (unsigned long long move_count = 0; 
-            move_count < board_db->ply_table[ply_number].stats.total_moves_added;
-            move_count++)
+  unsigned long long move_count = 0;
+  do
   {
     sortBlockMoveEntry_t min_move;
     memset (&min_move, 0xff, sizeof (sortBlockMoveEntry_t));
     unsigned int min_move_stream = 0;
+    unsigned int no_move_found = 1;
 
     for (unsigned int i = 0; i < num_merge_threads; i++)
     {
@@ -2251,8 +2216,14 @@ static void * brd_db_generate (void *arg)
           memcpy (&min_move, next_block,
                                     sizeof (sortBlockMoveEntry_t));
           min_move_stream = i;
+          no_move_found = 0;
         }
       }
+    }
+
+    if (no_move_found)
+    {
+      break;
     }
 
     /* Remove the smallest entry from the sorted block where it was found.
@@ -2269,16 +2240,37 @@ static void * brd_db_generate (void *arg)
 
     bufferedFileWrite  (&move_file, &move_entry);
 
-    /* When we are processing the last move, call the mergeMobeBlockNextGet() one last time 
-    ** to delete the move sort block.
-    */
-    if (move_count == (board_db->ply_table[ply_number].stats.total_moves_added - 1))
-    {
-      (void) parallelMergeBlockNextGet (parallel_move_sort_table, min_move_stream, 1);
-    }
-
     gen_status->processed_new_moves++;
-  }
+    move_count++;
+
+    /* Search for sequential move entries in the same stream.
+    */
+    do
+    {
+      const sortBlockMoveEntry_t *const possible_seq = 
+                    parallelMergeBlockNextGet (parallel_move_sort_table, min_move_stream, 0);
+      if (0 == possible_seq)
+      {
+        break; // No more moves in this stream.
+      }
+
+      if (0 == moveSequential (&min_move, possible_seq))
+      {
+        break; // Move is not sequential.
+      }
+      min_move = *possible_seq;
+
+      bufferedFileWrite  (&move_file, &min_move.position_index);
+
+      (void) parallelMergeBlockNextGet (parallel_move_sort_table, min_move_stream, 1);
+
+      gen_status->processed_new_moves++;
+      move_count++;
+
+    } while (1);
+  } while (1);
+
+  assert (move_count == board_db->ply_table[ply_number].stats.total_moves_added);
 
 
   /* Close the ply move file.
@@ -2353,9 +2345,14 @@ void brdDbGenerate(
   memcpy (&position_entry.brd_info.brd_info, info, sizeof(brdCtrlInfo_t));
   brdPack (brd, position_entry.position);
 
-  plyPositionFileWriteStart (0);
-  plyPositionFileWrite (&position_entry);
-  plyPositionFileFinish ();
+  char pos_file_name[1024];
+  sprintf (pos_file_name, "%s%u_positions", PLY_FILE_PREFIX, 0); 
+
+  bufferedFile_t position_file = bufferedFileWriteStart (pos_file_name,
+                                                    1000,
+                                                    sizeof(plyPositionEntry_t));
+  bufferedFileWrite (&position_file, &position_entry);
+  bufferedFileFinish (&position_file);
 
   board_db.ply_depth = ply_depth;
   board_db.ply_table[0].whose_move = whose_move;

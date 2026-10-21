@@ -226,7 +226,9 @@ typedef struct
 */
 typedef struct
 {
-    unsigned char *buffer;
+    unsigned char *buffer[2];
+    unsigned int in_use_buffer;
+
     unsigned long long buffer_size_in_bytes;
     unsigned long long entry_size_in_bytes;
     unsigned long long max_entries_in_buffer;
@@ -238,6 +240,10 @@ typedef struct
     int fd;
     unsigned long file_block_size;
     unsigned long long total_bytes_written_in_file;
+
+    pthread_t async_writer_thread;
+    unsigned char *async_buffer;
+    unsigned long long async_buffer_size;
 
 } bufferedFile_t;
 
@@ -420,6 +426,7 @@ typedef struct
   sortBlockCtrl_t sort_block_ctrl;
 
   unsigned int active_sort_block;
+  unsigned int background_sort_block;
   void *sort_block[2];
   sortBlockEntry_t *sort_block_position;
   unsigned long long max_sortblock_positions;
