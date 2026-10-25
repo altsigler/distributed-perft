@@ -436,7 +436,7 @@ static kingAttackHelper_t pinCompute (
                                       const unsigned long long mover_king_mask,
                                       const unsigned int en_passant_eligible_pawn,
                                       const unsigned long long mover_pieces_mask,
-                                      unsigned long long any_color_pieces_mask,
+                                      const unsigned long long any_color_pieces_mask,
                                       unsigned long long king_attack_mask,
                                       const castleEligibility_t castle_eligibility)
 {
@@ -526,7 +526,7 @@ static kingAttackHelper_t pinCompute (
   }
 
   // Bishop/Queen Attack
-  any_color_pieces_mask ^= mover_king_mask;
+  FORCE_TOUCH (any_color_pieces_mask);
 
   unsigned long long opponent_bishop_mask = attack_bishop_or_queen & 
                                             danger_map.diagonal_danger_mask;
@@ -569,6 +569,8 @@ static kingAttackHelper_t pinCompute (
     }
     opponent_bishop_mask = _blsr_u64(opponent_bishop_mask);
   }
+
+  FORCE_TOUCH (any_color_pieces_mask);
 
   // Rook/Queen Attack
   unsigned long long opponent_rook_mask = attack_rook_or_queen &
@@ -641,27 +643,23 @@ static kingAttackHelper_t pinCompute (
 
   
 
-    if (!castle_eligibility.white_short_ineligible)
+    if ((0 == (any_color_pieces_mask & white_short_castle_mask)) &&
+        (!castle_eligibility.white_short_ineligible) &&
+        (0 == (attack_mask & white_short_move_mask)))
     {
-      if ((0 == (any_color_pieces_mask & white_short_castle_mask)) &&
-          (0 == (attack_mask & white_short_move_mask)))
-      {
-        FORCE_TOUCH (any_color_pieces_mask);
-        attack_helper.move_candidate_mask |= POSITION_TO_BITMASK_LOOKUP(0, 6);
-      }
+      FORCE_TOUCH (any_color_pieces_mask);
+      attack_helper.move_candidate_mask |= POSITION_TO_BITMASK_LOOKUP(0, 6);
     }
   
   
     /* Check Queen Side Castle.
     */
-    if (!castle_eligibility.white_long_ineligible)
+    if ((0 == (any_color_pieces_mask & white_long_castle_mask)) &&
+        (!castle_eligibility.white_long_ineligible) &&
+        (0 == (attack_mask & white_long_move_mask)))
     {
-      if ((0 == (any_color_pieces_mask & white_long_castle_mask)) &&
-          (0 == (attack_mask & white_long_move_mask)))
-      {
-        FORCE_TOUCH (any_color_pieces_mask);
-        attack_helper.move_candidate_mask |= POSITION_TO_BITMASK_LOOKUP(0, 2);
-      }
+      FORCE_TOUCH (any_color_pieces_mask);
+      attack_helper.move_candidate_mask |= POSITION_TO_BITMASK_LOOKUP(0, 2);
     }
   } else
   {
@@ -684,27 +682,23 @@ static kingAttackHelper_t pinCompute (
                                           POSITION_TO_BITMASK_LOOKUP(7, 3) |
                                           POSITION_TO_BITMASK_LOOKUP(7, 2);
   
-    if (!castle_eligibility.black_short_ineligible)
+    if ((0 == (any_color_pieces_mask & black_short_castle_mask)) &&
+        (!castle_eligibility.black_short_ineligible) &&
+        (0 == (attack_mask & black_short_move_mask)))
     {
-      if ((0 == (any_color_pieces_mask & black_short_castle_mask)) &&
-          (0 == (attack_mask & black_short_move_mask)))
-      {
-        FORCE_TOUCH (any_color_pieces_mask);
-        attack_helper.move_candidate_mask |= POSITION_TO_BITMASK_LOOKUP(7, 6);
-      }
+      FORCE_TOUCH (any_color_pieces_mask);
+      attack_helper.move_candidate_mask |= POSITION_TO_BITMASK_LOOKUP(7, 6);
     }
   
   
     /* Check Queen Side Castle.
     */
-    if (!castle_eligibility.black_long_ineligible)
+    if ((0 == (any_color_pieces_mask & black_long_castle_mask)) &&
+        (!castle_eligibility.black_long_ineligible) &&
+        (0 == (attack_mask & black_long_move_mask)))
     {
-      if ((0 == (any_color_pieces_mask & black_long_castle_mask)) &&
-          (0 == (attack_mask & black_long_move_mask)))
-      {
-        FORCE_TOUCH (any_color_pieces_mask);
-        attack_helper.move_candidate_mask |= POSITION_TO_BITMASK_LOOKUP(7, 2);
-      }
+      FORCE_TOUCH (any_color_pieces_mask);
+      attack_helper.move_candidate_mask |= POSITION_TO_BITMASK_LOOKUP(7, 2);
     }
   
   }
