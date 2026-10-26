@@ -774,7 +774,7 @@ static unsigned long long allBRQNPSquaresLastPlyFindNoTest (
       const unsigned long long lookup_index_1 = 
                    lookupKeyCompute (any_color_pieces_mask, diagonalBlocker[piece_index_1]);
 
-      unsigned long long open_and_visible_mask_1 = diagonalVisibilityMap[piece_index_1][lookup_index_1] &
+      const unsigned long long open_and_visible_mask_1 = diagonalVisibilityMap[piece_index_1][lookup_index_1] &
                                                       ~mover_pieces_mask;
 
       /* Add all open and visible opponent squares to the move count.
@@ -787,7 +787,7 @@ static unsigned long long allBRQNPSquaresLastPlyFindNoTest (
       const unsigned long long lookup_index_2 = 
                    lookupKeyCompute (any_color_pieces_mask, diagonalBlocker[piece_index_2]);
 
-      unsigned long long open_and_visible_mask_2 = diagonalVisibilityMap[piece_index_2][lookup_index_2] &
+      const unsigned long long open_and_visible_mask_2 = diagonalVisibilityMap[piece_index_2][lookup_index_2] &
                                                       ~mover_pieces_mask;
 
       /* Add all open and visible opponent squares to the move count.
@@ -801,7 +801,7 @@ static unsigned long long allBRQNPSquaresLastPlyFindNoTest (
       const unsigned long long lookup_index_3 = 
                    lookupKeyCompute (any_color_pieces_mask, udlrBlocker[piece_index_3]);
 
-      unsigned long long open_and_visible_mask_3 = udlrVisibilityMap[piece_index_3][lookup_index_3] &
+      const unsigned long long open_and_visible_mask_3 = udlrVisibilityMap[piece_index_3][lookup_index_3] &
                                                       ~mover_pieces_mask;
 
       /* Add all open and visible opponent squares to the move count.
@@ -814,7 +814,7 @@ static unsigned long long allBRQNPSquaresLastPlyFindNoTest (
       const unsigned long long lookup_index_4 = 
                    lookupKeyCompute (any_color_pieces_mask, udlrBlocker[piece_index_4]);
 
-      unsigned long long open_and_visible_mask_4 = udlrVisibilityMap[piece_index_4][lookup_index_4] &
+      const unsigned long long open_and_visible_mask_4 = udlrVisibilityMap[piece_index_4][lookup_index_4] &
                                                       ~mover_pieces_mask;
 
       /* Add all open and visible opponent squares to the move count.
@@ -852,7 +852,7 @@ static unsigned long long allBRQNPSquaresLastPlyFindNoTest (
       const unsigned long long udlr_lookup_index_7 = 
                    lookupKeyCompute (any_color_pieces_mask, aggregateAttackVal->udlrBlocker);
 
-      unsigned long long open_and_visible_mask_7 = (udlrVisibilityMap[piece_index_7][udlr_lookup_index_7] |
+      const unsigned long long open_and_visible_mask_7 = (udlrVisibilityMap[piece_index_7][udlr_lookup_index_7] |
                                                 diagonalVisibilityMap[piece_index_7][lookup_index_7]) &
                                                         ~mover_pieces_mask;
 
@@ -6121,9 +6121,49 @@ static void dangerMapCreate (void)
       /* Add knight/bishop/rook attack squares on the king.
       */
       occupancyDangerMap[i][j].knight_danger_mask |= knightAttack[i];
-      occupancyDangerMap[i][j].diagonal_danger_mask |= diagonalAttack[i];
-      occupancyDangerMap[i][j].udlr_danger_mask |= udlrAttack[i];
 
+      const unsigned int row = i >> 3;
+      if ((row > 0) && (row < 7))
+      {
+        occupancyDangerMap[i][j].diagonal_danger_mask |= diagonalAttack[i];
+        occupancyDangerMap[i][j].udlr_danger_mask |= udlrAttack[i];
+        continue;
+      }
+
+      /* For row 0 and 7 we are using 12 occupancy bits around the king, so 
+      ** in cases when two pieces are located between the attacker and the 
+      ** king, we know that a pin or check is not possible. Therefore such
+      ** squares don't need to be added to the danger mask.
+      */
+      unsigned long long diag_attack = diagonalAttack[i];
+      while (diag_attack)
+      {
+        const unsigned int index = bitbrdLowestIndexFromMaskGet(diag_attack);
+        diag_attack ^= 1LLU << index;
+
+        const unsigned long long attack_lane = attackLanes[index][i];
+        const unsigned int  num_pieces = (unsigned int) __builtin_popcountll (attack_lane & occupied_squares);
+
+        if (num_pieces < 2)
+        {
+          occupancyDangerMap[i][j].diagonal_danger_mask |= 1LLU << index;
+        }
+      }
+
+      unsigned long long udlr_attack = udlrAttack[i];
+      while (udlr_attack)
+      {
+        const unsigned int index = bitbrdLowestIndexFromMaskGet(udlr_attack);
+        udlr_attack ^= 1LLU << index;
+
+        const unsigned long long attack_lane = attackLanes[index][i];
+        const unsigned int  num_pieces = (unsigned int) __builtin_popcountll (attack_lane & occupied_squares);
+
+        if (num_pieces < 2)
+        {
+          occupancyDangerMap[i][j].udlr_danger_mask |= 1LLU << index;
+        }
+      }
     }
 
   }
