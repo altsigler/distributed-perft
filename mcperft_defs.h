@@ -247,6 +247,40 @@ typedef struct
 
 } bufferedFile_t;
 
+/* Buffered Position File Context.
+** Used for reading-only and reading/updating the position database.
+*/
+typedef struct
+{
+    unsigned char *buffer[2];  // Buffer Pointer
+    unsigned long long bytes_in_buffer[2];  // How many bytes read from file and stored in this buffer.
+    unsigned long long buffer_position_in_file[2]; // Offset of buffer from start of file.
+
+    unsigned int in_use_buffer; // Which buffer is currently being read by application.
+
+    unsigned int ply;
+    unsigned int update_enable;
+
+    unsigned long long buffer_size_in_bytes;
+    unsigned long long max_entries_in_buffer;
+
+
+    unsigned long long num_entries_in_buffer;
+
+
+    int fd;
+    unsigned long file_block_size;
+    unsigned long long total_bytes_in_file;
+    unsigned long long total_positions_in_file;
+    unsigned long long total_bytes_read_from_file;
+
+    pthread_t async_thread;
+
+    unsigned long long current_position_index;
+    unsigned long long max_position_index;
+
+} bufferedPositionFile_t;
+
 
 /* Structure for holding information about sorted blocks while
 ** merging these blocks into the ply position file or move file.
@@ -268,13 +302,6 @@ typedef struct
     ** when needed to conserve disk space.
     */
     unsigned int trim_needed;
-
-    /* Flag indicating whether the FALLOC_FL_COLLAPSE_RANGE feature is supported
-    ** on the target file system. This is the preferred way to trim files 
-    ** because the file size reported by the "ls -l" command is reduced as the 
-    ** file is trimmed.
-    */
-    unsigned int trim_collapse_range_supported;
 
     /* The trim is not done on every write. This variable keeps track of
     ** how many bytes have been read since the last trim.
@@ -429,6 +456,7 @@ typedef struct
   unsigned int background_sort_block;
   void *sort_block[2];
   sortBlockEntry_t *sort_block_position;
+  unsigned long long sort_block_size;
   unsigned long long max_sortblock_positions;
 
   sortBlockMoveEntry_t *sort_block_move;

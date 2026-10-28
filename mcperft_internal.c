@@ -56,8 +56,16 @@ static void statsPrint(const chessStat_t *const stats)
 
 
   printf ("\n");
-  printf ("Unique Positions Added:%'llu\n", stats->unique_positions_added);
-  printf ("Duplicate Positions Detected:%'llu\n", stats->duplicate_positions_detected);
+  printf ("Unique Positions Added:%'llu (%llu%%)\n", 
+                stats->unique_positions_added,
+                (0 == stats->unique_positions_added)?0:
+                (stats->unique_positions_added * 100) / 
+                    (stats->unique_positions_added + stats->duplicate_positions_detected));
+  printf ("Duplicate Positions Detected:%'llu (%llu%%)\n", 
+                stats->duplicate_positions_detected,
+                (0 == stats->duplicate_positions_detected)?0:
+                (stats->duplicate_positions_detected * 100) / 
+                    (stats->unique_positions_added + stats->duplicate_positions_detected));
   printf ("Total Moves Added:%'llu\n", stats->total_moves_added);
   printf ("\n");
 
@@ -143,25 +151,358 @@ unsigned long long sysUpTimeMillisecondsGet(void)
 **
 ******************************************************************************/
 
-/* To reduce file I/O we buffer positions in memory.
-** When the buffer fills up, the postions are written to the file.
-*/
-//constexpr unsigned int positionBufferMaxEntries = 1'000'000;
-constexpr unsigned int positionBufferMaxEntries = 2'000'000;
-static plyPositionEntry_t positionBuffer[positionBufferMaxEntries];
+/******************************************************************************
+** Asynchronous position file read/write thread.
+**
+******************************************************************************/
+static void * asyncPositionReadWriteThread (void *arg)
+{
+ bufferedPositionFile_t *pf = arg;
 
-static unsigned long long numEntriesInPositionFileBuffer;
-static off_t positionFileBlockStart;
-static ssize_t positionFileBlockSize;
+ (void) pthread_setname_np(pthread_self(), "mcp-pos-update");
 
-static unsigned long long currentPositionReadIndex;
-static unsigned long long lastPositionReadIndex;
+ /* Determine on which buffer the async task is operating.
+ */
+ const unsigned int background_buffer = pf->in_use_buffer ^ 1;
+
+ /* If the file update is enabled then back up the file 
+ ** pointer to the start of the buffer and write the buffer.
+ ** If there is no data in this buffer then don't need to write anything.
+ */
+ if ((0 != pf->bytes_in_buffer[background_buffer]) &&
+     (0 != pf->update_enable))
+ {
+   unsigned char *write_buffer = pf->buffer[background_buffer];
+   ssize_t bytes_written;
+   unsigned long long total_bytes_written = 0;
+   size_t write_request_size = pf->bytes_in_buffer[background_buffer];
+   unsigned int truncate_needed = 0;
+
+   if (-1 == lseek (pf->fd, (off_t) pf->buffer_position_in_file[background_buffer], SEEK_SET))
+   {
+     perror ("lseek - Position File Update");
+     exit (-1);
+   }
+
+   /* If the write request size is not a multiple of file block size then 
+   ** round it up to the file block size. 
+   ** This can happen when updating the last buffer in the file.
+   */
+   if (0 != (write_request_size % pf->file_block_size))
+   {
+     unsigned long long new_write_request_size = 
+                ((write_request_size / pf->file_block_size) + 1) * pf->file_block_size;
+
+     /* Zero out unused part of the buffer. This makes sure we don't send any uninitilized
+     ** data to the write() function.
+     */
+     memset (&write_buffer[write_request_size], 0, new_write_request_size - write_request_size);
+     write_request_size = new_write_request_size;
+     truncate_needed = 1;
+   }
+
+   do
+   {
+     bytes_written = write (pf->fd, &write_buffer[total_bytes_written], write_request_size);
+     if (bytes_written < 0)
+     {
+       perror ("Write to buffered position file");
+       printf ("fd:%d\n", pf->fd);
+       exit (-1);
+     }
+     total_bytes_written += (unsigned long long) bytes_written;
+     write_request_size -= (size_t) bytes_written;
+   } while (write_request_size);
+
+   if (truncate_needed)
+   {
+     if (0 != ftruncate (pf->fd, (__off_t) pf->total_bytes_in_file))
+     {
+       perror ("ftruncate - buffered position file");
+       exit (-1);
+     }
+   }
+
+   /* Reset the file pointer to where we finished reading, so that we can 
+   ** read new data.
+   */
+   if (-1 == lseek (pf->fd, (off_t) pf->total_bytes_read_from_file, SEEK_SET))
+   {
+     perror ("lseek - Position File After Update");
+     exit (-1);
+   }
+ }
+
+ /* Read data until end of buffer or end of file.
+ */
+ unsigned char *read_buffer = pf->buffer[background_buffer];
+ ssize_t bytes_read;
+ unsigned long long total_bytes_read = 0;
+ size_t read_request_size = pf->buffer_size_in_bytes;
+ 
+ pf->buffer_position_in_file[background_buffer] = pf->total_bytes_read_from_file;
+
+ do
+ {
+   bytes_read = read (pf->fd, &read_buffer[total_bytes_read], read_request_size);
+   if (bytes_read < 0)
+   {
+     perror ("read - from buffered position file");
+     exit (-1);
+   }
+   if (bytes_read == 0)
+   {
+     break;
+   }
+   total_bytes_read += (unsigned long long) bytes_read;
+   read_request_size -= (unsigned long long) bytes_read;
+
+   /* If the last bytes_read is not aligned on file block size then 
+   ** we assume that the end of file is reached and exit 
+   ** the read loop.
+   */
+   if (0 != ((unsigned long long) bytes_read % pf->file_block_size))
+   {
+     break;
+   }
+ } while (total_bytes_read < pf->buffer_size_in_bytes);
+
+ pf->bytes_in_buffer[background_buffer] = total_bytes_read;
+ pf->total_bytes_read_from_file += total_bytes_read;
+
+ return 0;
+}
+
+/******************************************************************************
+** Open buffered position file for reading, and optionally for updating.
+** The buffered position utility enables the caller to read positions 
+** from the specified ply level without having to access the position file on 
+** every read. 
+**
+** The buffered positions utility maintains two big bufferes with the minimum size
+** of buffer_size_in_bytes. While one buffer is being accessed, the other
+** buffer updates the position database file and reloads the next set of 
+** positions.
+**
+** If update_enable is set to 0 then the position file is read-only. 
+**
+******************************************************************************/
+static bufferedPositionFile_t
+     bufferedPositionFileReadUpdateStart (const unsigned int ply,
+                                          const unsigned long long buffer_size_in_bytes,
+                                          const unsigned int update_enable)
+{
+  bufferedPositionFile_t pf = {};
+  char file_name[1024];
+
+  pf.ply = ply;
+  pf.update_enable = update_enable;
+
+  sprintf (file_name, "%s%u_positions", PLY_FILE_PREFIX, ply);
+
+  if (0 == update_enable)
+  {
+    pf.fd = open (file_name, O_DIRECT | O_RDONLY);
+    if (pf.fd < 0)
+    {
+      perror ("open position file (RDONLY)");
+      exit (-1);
+    }
+  } else
+  {
+    pf.fd = open (file_name, O_DIRECT | O_RDWR);
+    if (pf.fd < 0)
+    {
+      perror ("open position file (RDWR)");
+      exit (-1);
+    }
+  }
+
+  struct statvfs stat;
+  if (0 != fstatvfs (pf.fd, &stat))
+  {
+    perror ("fstatvfs of position file");
+    exit (-1);
+  }
+  if (stat.f_type == NFS_SUPER_MAGIC)
+  {
+    /* Blocks on FS are 1MB, which is too big for us. 
+    ** The block alignment is not needed anyway on the NFS file system.
+    */
+    pf.file_block_size = 4096;
+  } else
+  {
+    pf.file_block_size = stat.f_bsize;
+  }
+
+  /* Get total file size.
+  */
+  struct stat file_stat;
+  if (0 != fstat (pf.fd, &file_stat))
+  {
+    perror ("stat - Position File");
+    exit (-1);
+  }
+  pf.total_bytes_in_file = (unsigned long long) file_stat.st_size;
+
+  /* Make sure that the buffer size is aligned on block size and element size.
+  */
+  constexpr unsigned long long element_size_in_bytes = sizeof(plyPositionEntry_t);
+
+  pf.total_positions_in_file = pf.total_bytes_in_file / element_size_in_bytes;
+
+  const unsigned long long align_size = pf.file_block_size * element_size_in_bytes;
+
+  pf.buffer_size_in_bytes = buffer_size_in_bytes;
+  if (pf.buffer_size_in_bytes % align_size)
+  {
+    pf.buffer_size_in_bytes = ((pf.buffer_size_in_bytes / align_size) + 1) * align_size;
+  }
+
+  pf.buffer[0] = aligned_alloc (pf.file_block_size, pf.buffer_size_in_bytes);
+  assert (pf.buffer[0]);
+
+  pf.buffer[1] = aligned_alloc (pf.file_block_size, pf.buffer_size_in_bytes);
+  assert (pf.buffer[1]);
+
+  pf.max_entries_in_buffer = pf.buffer_size_in_bytes / element_size_in_bytes;
+
+  /* Read the first buffer from the file.
+  */
+  if (0 != pthread_create (&pf.async_thread, 0, asyncPositionReadWriteThread, &pf))
+  {
+    perror ("pthread_create: - Async Position Read/Update Thread - First Time ");
+    exit (-1);
+  }
+
+  /* Wait until the first read is done.
+  */
+  if (0 != pthread_join (pf.async_thread, 0))
+  {
+    perror ("pthread_join - Async Position Read/Update Thread - First Time");
+    exit (-1);
+  }
+
+  /* The application will read from the buffer that the async task 
+  ** just loaded from file.
+  */
+  pf.in_use_buffer ^= 1;
+
+  /* Initialize the counter indicating how many positions are in the 
+  ** buffer.
+  */
+  pf.max_position_index = pf.bytes_in_buffer[pf.in_use_buffer] / sizeof(plyPositionEntry_t);
+
+  /* Start the async task again to read the second buffer.
+  */
+  if (0 != pthread_create (&pf.async_thread, 0, asyncPositionReadWriteThread, &pf))
+  {
+    perror ("pthread_create: - Async Position Read/Update Thread - First Time ");
+    exit (-1);
+  }
+
+  return pf;  
+}
+
+/******************************************************************************
+** Read next position from the position file.
+**
+** The function returns a pointer to the position inside the buffer.
+** The pointer remains valid until the next call to this function. 
+** When the position is open in update mode then the caller can modify 
+** data directly via the pointer, and the new information is saved in 
+** the position file.
+**
+******************************************************************************/
+static plyPositionEntry_t *
+     bufferedPositionFileReadUpdate (bufferedPositionFile_t *pf)
+{
+ if (pf->current_position_index < pf->max_position_index)
+ {
+   const unsigned long long offset = sizeof(plyPositionEntry_t) * pf->current_position_index++;
+   return (plyPositionEntry_t *) &pf->buffer[pf->in_use_buffer][offset];
+ }
+
+ /* Wait for asyc task to finish.
+ */
+ if (0 != pthread_join (pf->async_thread, 0))
+ {
+   perror ("pthread_join - Async Position Read/Update Thread");
+   exit (-1);
+ }
+
+ /* Swap the active and the background buffers.
+ */
+ pf->in_use_buffer ^= 1;
+
+ pf->max_position_index = pf->bytes_in_buffer[pf->in_use_buffer] / sizeof(plyPositionEntry_t);
+ pf->current_position_index = 0;
 
 
-/* File descriptors for position file. 
-** The value of -1 means that the file is closed.
-*/
-static int positionFd = -1;
+ /* Start the async read/update task.
+ */
+ if (0 != pthread_create (&pf->async_thread, 0, asyncPositionReadWriteThread, pf))
+ {
+   perror ("pthread_create: - Async Position Read/Update Thread");
+   exit (-1);
+ }
+
+ /* If the buffer we just received is empty then return 0.
+ */
+ if (0 == pf->max_position_index)
+ {
+   return 0;
+ }
+
+ /* Return pointer to next position.
+ */
+ const unsigned long long offset = sizeof(plyPositionEntry_t) * pf->current_position_index++;
+ return (plyPositionEntry_t *) &pf->buffer[pf->in_use_buffer][offset];
+
+}
+
+/******************************************************************************
+** Finish updating the position file and free all resources.
+**
+******************************************************************************/
+__attribute__((unused))
+static void
+     bufferedPositionFileReadUpdateFinish (bufferedPositionFile_t *pf)
+{
+ /* Wait for asyc task to finish.
+ */
+ if (0 != pthread_join (pf->async_thread, 0))
+ {
+   perror ("pthread_join - Async Position Read/Update Thread Finish 1");
+   exit (-1);
+ }
+
+ /* Swap the active and the background buffers.
+ */
+ pf->in_use_buffer ^= 1;
+
+ /* Start the async read/update task to update the active buffer if needed.
+ */
+ if (0 != pthread_create (&pf->async_thread, 0, asyncPositionReadWriteThread, pf))
+ {
+   perror ("pthread_create: - Async Position Read/Update Thread Finish");
+   exit (-1);
+ }
+
+ /* Wait for asyc task to finish.
+ */
+ if (0 != pthread_join (pf->async_thread, 0))
+ {
+   perror ("pthread_join - Async Position Read/Update Thread Finish 2");
+   exit (-1);
+ }
+
+ /* Free buffer memory and close file.
+ */
+ close (pf->fd);
+ free (pf->buffer[0]);
+ free (pf->buffer[1]);
+}
 
 /******************************************************************************
 ** Open buffered file for writing.
@@ -414,266 +755,6 @@ static void bufferedFileFinish  (bufferedFile_t *const bf)
   free (bf->buffer[1]);
 }
 
-
-/******************************************************************************
-** Start new position file for the specified ply.
-** The ply numbers start with 0 and go up.
-**
-** The function opens the ply position file in read/only mode. 
-******************************************************************************/
-static void plyPositionFileReadOnlyStart (const unsigned int ply)
-{
-  char pos_file_name[1024];
-
-  if (positionFd != -1)
-  {
-    printf ("ERROR: Ply Position File is already open.\n");
-    exit (-1);
-  }
-  sprintf (pos_file_name, "%s%u_positions", PLY_FILE_PREFIX, ply);
-  positionFd = open (pos_file_name, O_RDONLY);
-  if (positionFd < 0)
-  {
-    perror ("open RDONLY ply positions file");
-    exit (-1);
-  }
-  if (0 != posix_fadvise (positionFd, 0, 0, POSIX_FADV_SEQUENTIAL))
-  {
-    perror ("posix_fadvise - position file - POSIX_FADV_SEQUENTIAL");
-    exit (-1);
-  }
-
-  numEntriesInPositionFileBuffer = 0;
-  currentPositionReadIndex = 0;
-  lastPositionReadIndex = 0;
-  positionFileBlockStart = 0;
-  positionFileBlockSize = 0;
-}
-
-
-/******************************************************************************
-** Open existing position file for the specified ply in preparation for 
-** reading and updating position entries.
-** The ply numbers start with 0 and go up.
-**
-** If the ply file doesn't exist then this is an error and the code exits.
-** The file is opened in read-write mode.
-** The function also sets up the position file context parameters.
-** These parameters are in global variables, so only one ply 
-** position file can be opened at any one time for reading/updating or writing.
-******************************************************************************/
-static unsigned long long plyPositionFileReadUpdateStart (const unsigned int ply)
-{
-  char pos_file_name[1024];
-
-  if (positionFd != -1)
-  {
-    printf ("ERROR: Ply Position File is already open.\n");
-    exit (-1);
-  }
-  sprintf (pos_file_name, "%s%u_positions", PLY_FILE_PREFIX, ply); 
-  positionFd = open (pos_file_name, O_RDWR);
-  if (positionFd < 0)
-  {
-    perror ("open ply positions file");
-    exit (-1);
-  }
-
-  struct stat statbuf;
-  if (0 > fstat (positionFd, &statbuf))
-  {
-    perror ("stat position file");
-    exit (-1);
-  }
-
-  const unsigned long long num_positions = (unsigned long long) statbuf.st_size / sizeof (plyPositionEntry_t);
-
-
-  numEntriesInPositionFileBuffer = 0;
-  currentPositionReadIndex = 0;
-  lastPositionReadIndex = 0;
-  positionFileBlockStart = 0;
-  positionFileBlockSize = 0;
-
-  return num_positions;
-}
-
-/******************************************************************************
-** Get next position from the open ply position file.
-** The function returns a pointer of type plyPositionEntry_t.
-** The pointer becomes invalid when the next call to plyPositionFileRead() 
-** is made.
-**
-** If the ply file is not open then this is an error and the code exits.
-** If the end of file is reached then the function returns 0 and the 
-** ply position file is closed. 
-**
-** In order to reduce disk I/O, the positions are read in blocks. When the 
-** end of block is reached then next block is read.
-**
-******************************************************************************/
-static plyPositionEntry_t * plyPositionFileRead (void)
-{
-  if (currentPositionReadIndex != lastPositionReadIndex)
-  {
-    return &positionBuffer[currentPositionReadIndex++];
-  }
-  
-  unsigned char *const buffer = (unsigned char *) positionBuffer;
-
-  /* Read the next block from file.
-  */
-  positionFileBlockStart += positionFileBlockSize;
-  size_t total_bytes_read = 0;
-  size_t read_request_size = sizeof(positionBuffer);
-  do 
-  {
-    const ssize_t bytes_read = read (positionFd, &buffer[total_bytes_read], 
-                                            read_request_size - total_bytes_read);
-    if (bytes_read < 0)
-    {
-      perror ("read from ply position file");
-      exit (-1);
-    }
-
-    if (bytes_read == 0)
-    {
-      /* We reached the end of file. If we failed to read anything from the 
-      ** file then close the file and return 0.
-      */
-      if (0 == total_bytes_read)
-      {
-        close (positionFd);
-        positionFd = -1;
-        return 0;
-      }
-
-      /* We assume that remaining entries in the file don't fill up the buffer.
-      */
-      break;
-    }
-    total_bytes_read += (size_t) bytes_read;
-  } while (total_bytes_read < read_request_size);
-
-  /* Make sure that we read a multiple of record size.
-  */
-  if (0 != (total_bytes_read % sizeof(plyPositionEntry_t)))
-  {
-    printf ("ERROR: The ply position file seems to be corrupted.\n");
-    exit (-1);
-  }
-
-  positionFileBlockSize = (ssize_t) total_bytes_read;
-  currentPositionReadIndex = 0;
-  lastPositionReadIndex = total_bytes_read / sizeof(plyPositionEntry_t);
-
-
-  return &positionBuffer[currentPositionReadIndex++];
-}
-
-
-/******************************************************************************
-** Get next position from the open ply position file.
-** The function returns a pointer of type plyPositionEntry_t.
-** The caller may modify the value of the position table record by writing 
-** directly into the data pointed to by the pointer. 
-** The pointer becomes invalid when the next call to plyPositionFileNextGet() 
-** is made.
-**
-** If the ply file is not open then this is an error and the code exits.
-** If the end of file is reached then the function returns 0 and the 
-** ply position file is closed. 
-**
-** In order to reduce disk I/O, the positions are read in blocks. When the 
-** end of block is reached then the block is written back to the disk and the
-** next block is read.
-**
-** This function is NOT intended to be used for simply reading the position
-** file, but is intended for reading and updating the position file. 
-******************************************************************************/
-static plyPositionEntry_t * plyPositionFileNextGet (void)
-{
-  if (currentPositionReadIndex != lastPositionReadIndex)
-  {
-    return &positionBuffer[currentPositionReadIndex++];
-  }
-  
-  unsigned char *const buffer = (unsigned char *) positionBuffer;
-
-  /* If we already read a block from the file then we need
-  ** to write this block back into the file.
-  */
-  if (0 != positionFileBlockSize)
-  {
-    if (positionFileBlockStart != lseek ( positionFd, positionFileBlockStart, SEEK_SET))
-    {
-      perror ("lseek on position file");
-      exit (-1);
-    }
-    ssize_t total_bytes_written = 0;
-
-    while (total_bytes_written < positionFileBlockSize)
-    {
-      ssize_t bytes_written = write (positionFd, &buffer[total_bytes_written],
-                                        (size_t) (positionFileBlockSize - total_bytes_written));
-      if (bytes_written < 0)
-      {
-        perror ("write to ply position file");
-        exit (-1);
-      }
-      total_bytes_written += bytes_written;
-    }
-  }
-
-  /* Read the next block from file.
-  */
-  positionFileBlockStart += positionFileBlockSize;
-  size_t total_bytes_read = 0;
-  size_t read_request_size = sizeof(positionBuffer);
-  do 
-  {
-    const ssize_t bytes_read = read (positionFd, &buffer[total_bytes_read], 
-                                            read_request_size - total_bytes_read);
-    if (bytes_read < 0)
-    {
-      perror ("read from ply position file");
-      exit (-1);
-    }
-
-    if (bytes_read == 0)
-    {
-      /* We reached the end of file. If we failed to read anything from the 
-      ** file then close the file and return 0.
-      */
-      if (0 == total_bytes_read)
-      {
-        close (positionFd);
-        positionFd = -1;
-        return 0;
-      }
-
-      /* We assume that remaining entries in the file don't fill up the buffer.
-      */
-      break;
-    }
-    total_bytes_read += (size_t) bytes_read;
-  } while (total_bytes_read < read_request_size);
-
-  /* Make sure that we read a multiple of record size.
-  */
-  if (0 != (total_bytes_read % sizeof(plyPositionEntry_t)))
-  {
-    printf ("ERROR: The ply position file seems to be corrupted.\n");
-    exit (-1);
-  }
-
-  positionFileBlockSize = (ssize_t) total_bytes_read;
-  currentPositionReadIndex = 0;
-  lastPositionReadIndex = total_bytes_read / sizeof(plyPositionEntry_t);
-
-
-  return &positionBuffer[currentPositionReadIndex++];
-}
 
 /******************************************************************************
 ** Create the new position database directory. 
@@ -972,7 +1053,7 @@ static void * generateSortedBlockFile (void *arg)
   }
 
   bufferedFile_t block_file = bufferedFileWriteStart (file_name,
-                                                    10'000'000,
+                                                    60'000'000,
                                                     element_size);
 
   /* Merge all sort blocks into the output file.
@@ -1254,8 +1335,6 @@ static void mergeBlockReadInit (mergeBlock_t *const merge_block,
     if (trim_needed)
     {
       merge_entry->trim_needed = 1;
-      merge_entry->trim_collapse_range_supported = 1;
-
 
       /* Although we are only reading from this file, we are also reducing the 
       ** file size as the data is read, so the file needs to be opened in RDWR mode.
@@ -1287,9 +1366,23 @@ static void mergeBlockReadInit (mergeBlock_t *const merge_block,
     if (stat.f_type == NFS_SUPER_MAGIC)
     {
       /* Blocks on FS are 1MB, which is too big for us. 
-      ** The block alignment is not needed anyway on the NFS file system.
       */
       merge_entry->file_system_block_size = 4096;
+
+      /* We don't support trimming on NFS. 
+      ** Close, and Re-Open the file in read-only mode.
+      */
+      if (trim_needed)
+      {
+        merge_entry->trim_needed = 0;
+        close (merge_entry->fd);
+        merge_entry->fd = open (merge_entry->file_name, O_RDONLY | O_DIRECT);
+        if (merge_entry->fd < 0)
+        {
+          perror ("open merge file (O_RDONLY on NFS)");
+          exit (-1);
+        }
+      }
     } else
     {
       merge_entry->file_system_block_size = stat.f_bsize;
@@ -1304,11 +1397,11 @@ static void mergeBlockReadInit (mergeBlock_t *const merge_block,
       buffer_size_in_bytes = max_buf_size;
     }
 
-    const unsigned long long align_boundary = stat.f_bsize * element_size;
+    const unsigned long long align_boundary = merge_entry->file_system_block_size * element_size;
     unsigned long long aligned_size = buffer_size_in_bytes;
     if (aligned_size % align_boundary)
     {
-      aligned_size = ((aligned_size / align_boundary) + 1) * align_boundary;
+      aligned_size = (aligned_size / align_boundary) * align_boundary;
     } 
     if (0 == aligned_size)
     {
@@ -1318,57 +1411,8 @@ static void mergeBlockReadInit (mergeBlock_t *const merge_block,
 
     merge_entry->buffer = aligned_alloc (merge_entry->file_system_block_size, 
                                 merge_entry->max_elements_in_block * merge_entry->element_size);
-
     assert (merge_entry->buffer);
 
-    /* Check whether the fallocate() function is supported, and which mode we can use.
-    */
-    if (merge_entry->trim_needed)
-    {
-      char test_file[1024];
-      strcpy (test_file, merge_entry->file_name);
-      strcat (test_file, "-test");
-      const int test_fd = open (test_file, O_RDWR | O_APPEND | O_CREAT, S_IRUSR | S_IWUSR);
-
-      if (0 != ftruncate (test_fd, (off_t) (align_boundary * 2)))
-      {
-        perror ("ftruncate test_fd");
-        exit (-1);
-      }
-
-      if (0 != fallocate (test_fd, FALLOC_FL_COLLAPSE_RANGE, 0,  (off_t) align_boundary))
-      {
-        if (errno == EOPNOTSUPP)
-        {
-          /* NFS file systems don't support COLLASE_RANGE, so check whether the 
-          ** PUNCH_HOLE option is supported. The PUNCH_HOLE can be used to reduce the 
-          ** space the file takes up on disk, but the "ls -l" command will not show
-          ** that the file size is going down.
-          */
-          merge_entry->trim_collapse_range_supported = 0;
-          if (0 != fallocate (test_fd, FALLOC_FL_PUNCH_HOLE, 0,  (off_t) align_boundary))
-          {
-            if (errno == EOPNOTSUPP)
-            {
-              /* Some file systems, including NFS prior to version 4.2, don't support 
-              ** fallocate() feature at all, so file trimming is disabled.
-              */
-              merge_entry->trim_needed = 0;
-            } else
-            {
-              perror ("fallocate test_fd - FALLOC_FL_PUNCH_HOLE");
-              exit (-1);
-            }
-          }
-        } else
-        {
-          perror ("fallocate test_fd - FALLOC_FL_COLLAPSE_RANGE");
-          exit (-1);
-        }
-      }
-      close (test_fd);
-      unlink (test_file);
-    }
   }
 }
 
@@ -1434,38 +1478,23 @@ static unsigned int  mergeBlockFromFileRead (mergeBlock_t *const merge_entry)
     const __off_t trim_size = (__off_t) merge_entry->num_trim_bytes;
     merge_entry->num_trim_bytes = 0;
 
-    if (0 == merge_entry->trim_collapse_range_supported)
+    /* 
+    ** The fallocate will fail when we try to pass the last remaining block 
+    ** of the file, so we can just ignore that error.
+    */
+    if (0 == fallocate (merge_entry->fd, FALLOC_FL_COLLAPSE_RANGE, 0,  trim_size))
     {
-      if (0 != fallocate (merge_entry->fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 
-                                (__off_t) merge_entry->last_trim_location,  trim_size))
+      /* Reset the read pointer to the start of file.
+      */
+      if (0 != lseek (merge_entry->fd, 0, SEEK_SET))
       {
-        perror ("fallocate - FALLOC_FL_PUNCH_HOLE - Reduce file size.");
+        perror ("lseek - Reset file read pointer.");
         exit (-1);
       }
-
-      merge_entry->last_trim_location += (unsigned long long) trim_size;
     } else
     {
-      /* We already tested and verified that COLLAPSE_RANGE should work on this file
-      ** system. 
-      ** The fallocate will fail when we try to pass the last remaining block 
-      ** of the file, so we can just ignore that error.
-      */
-      if (0 == fallocate (merge_entry->fd, FALLOC_FL_COLLAPSE_RANGE, 0,  trim_size))
-      {
-        /* Reset the read pointer to the start of file.
-        */
-        if (0 != lseek (merge_entry->fd, 0, SEEK_SET))
-        {
-          perror ("lseek - Reset file read pointer.");
-          exit (-1);
-        }
-      } else
-      {
 //          perror ("fallocate failed, continuing without trimming.");
 //          printf ("   fd:%d trim_size:%'llu\n", merge_entry->fd, (unsigned long long) trim_size);
-      }
-
     }
   }
 
@@ -1537,7 +1566,7 @@ static void * parallel_merge (void *arg)
   mergeBlock_t *const sort_table = malloc (merge_stream->num_merge_blocks * sizeof(mergeBlock_t));
   assert (sort_table);
     
-#if 1 // HACK
+#if 0 // HACK
   printf ("num_merge_blocks:%u file_prefix:%s first_merge_block:%u num_merge_streams:%u\n", 
                 merge_stream->num_merge_blocks, 
                 merge_stream->file_prefix,
@@ -1795,7 +1824,7 @@ static unsigned int parallelMergeBlockReadInit (parallelMergeBlock_t *const merg
 ******************************************************************************/
 static void parallelMergeBlockTerminate (parallelMergeBlock_t *const merge_stream)
 {
-#if 1 // HACK
+#if 0 // HACK
   bsdlicDebugQueueControlShow (0, 1);
 #endif
 
@@ -1933,11 +1962,14 @@ static void * brd_db_generate (void *arg)
   unsigned long long sort_block_index = 0;
   plyInfo_t *const ply = &board_db->ply_table[ply_number + 1];
 
-
-  gen_status->total_ply_positions = plyPositionFileReadUpdateStart (ply_number);
+  bufferedPositionFile_t pf = bufferedPositionFileReadUpdateStart(
+                                        ply_number,
+                                        board_db->sort_block_size / 40,
+                                        1);
+  gen_status->total_ply_positions = pf.total_positions_in_file;
 
   gen_status->ply_processing_phase = 1;  
-  while (0 != (position_entry = plyPositionFileNextGet ()))
+  while (0 != (position_entry = bufferedPositionFileReadUpdate(&pf)))
   {
     position_entry->first_move_index = moveIndexToEntry(ply->num_boards_in_ply);
 
@@ -1980,6 +2012,7 @@ static void * brd_db_generate (void *arg)
 
     gen_status->positions_processed += 1;
   }
+  bufferedPositionFileReadUpdateFinish(&pf);
 
   /* If there are any positions in the sort block then write these 
   ** positions to a temporary file.
@@ -2007,7 +2040,7 @@ static void * brd_db_generate (void *arg)
   sprintf (pos_file_name, "%s%u_positions", PLY_FILE_PREFIX, ply_number + 1); 
 
   bufferedFile_t position_file = bufferedFileWriteStart (pos_file_name,
-                                                    10'000'000,
+                                                    60'000'000,
                                                     sizeof(plyPositionEntry_t));
 
   /* Merge all sorted blocks into a single position database.
@@ -2177,7 +2210,7 @@ static void * brd_db_generate (void *arg)
   char move_file_name[1024];
   sprintf (move_file_name, "%s%u_moves", PLY_FILE_PREFIX, ply_number);
   bufferedFile_t move_file = bufferedFileWriteStart (move_file_name,
-                                                    16'000'000,
+                                                    96'000'000,
                                                     sizeof (moveEntry_t));
 
   /* Merge all sorted move blocks into a single move database.
@@ -2407,6 +2440,7 @@ void brdDbGenerate(
             (unsigned long long) rlim.rlim_max);
 #endif
                                
+  board_db.sort_block_size = sort_block_size;
   board_db.max_sortblock_positions = sort_block_size / sizeof(sortBlockEntry_t);
 
   board_db.active_sort_block = 0;
@@ -2431,7 +2465,7 @@ void brdDbGenerate(
   ** read buffer.
   */
   board_db.read_sort_block_size = total_ram / 4;
-  printf (">>>board_db.read_sort_block_size:%'llu\n", board_db.read_sort_block_size); // HACK
+//  printf (">>>board_db.read_sort_block_size:%'llu\n", board_db.read_sort_block_size); // HACK
 
   /* Start the board generator thread for each ply.
   ** The code exits when there are no more moves to be 
@@ -3461,14 +3495,19 @@ static void brdDbLastPlyMovesCount (const unsigned int search_depth,
                     num_boards_in_ply);
 #endif
 
-  plyPositionFileReadOnlyStart (search_depth - 1);
+
+  bufferedPositionFile_t pf = bufferedPositionFileReadUpdateStart(
+                                        search_depth - 1,
+                                        40'000'000,
+                                        0);
+
   for (unsigned long long i = 0; i < num_boards_in_ply; i++)
   {
-    plyPositionEntry_t *position = plyPositionFileRead ();
+    plyPositionEntry_t *position = bufferedPositionFileReadUpdate (&pf);
     position_count_space[i] = position->num_moves;
     aggregate->workloads_processed++;
   }
-  (void) plyPositionFileRead(); // Close the position database file.
+  bufferedPositionFileReadUpdateFinish(&pf); // Close the position database file.
 }
 
 /********************************************************************
@@ -3515,12 +3554,15 @@ static void brdDbDeepSearchAggregate (
                     num_boards_in_ply);
 #endif
 
-  plyPositionFileReadOnlyStart (position_db_depth - 1);
+  bufferedPositionFile_t pf = bufferedPositionFileReadUpdateStart(
+                                        position_db_depth - 1,
+                                        40'000'000,
+                                        0);
   for (unsigned long long i = 0; i < num_boards_in_ply; i++)
   {
     aggregate->workloads_processed++;
     position_count_space[i] = 0;
-    plyPositionEntry_t *position = plyPositionFileRead ();
+    plyPositionEntry_t *position = bufferedPositionFileReadUpdate (&pf);
 
     /* Skip positions that don't have any moves.
     */
@@ -3568,7 +3610,7 @@ static void brdDbDeepSearchAggregate (
       position_count_space[i] += deep_search_result[next_node_index];
     }
   }
-  (void) plyPositionFileRead(); // Close the position database file.
+  bufferedPositionFileReadUpdateFinish(&pf);
   close (fd); // Close Move File 
 }
 
@@ -3619,7 +3661,10 @@ static void brdDbPositionTreeAggregate (const unsigned int search_depth,
     unsigned long long move_element_index = 0;
     unsigned long long move_elements_in_buffer = 0;
 
-    plyPositionFileReadOnlyStart ((unsigned int) ply_number);
+    bufferedPositionFile_t pf = bufferedPositionFileReadUpdateStart(
+                                        (unsigned int) ply_number,
+                                        40'000'000,
+                                        0);
 #if 1 // HACK
     printf ("%s %d - search_depth:%u position_db_depth:%u ply_number:%d num_board_in_ply:%'llu\n",
                     __FUNCTION__, __LINE__,
@@ -3630,7 +3675,7 @@ static void brdDbPositionTreeAggregate (const unsigned int search_depth,
     for (unsigned long long i = 0; i < num_boards_in_ply; i++)
     {
       position_count_space[ply_number][i] = 0;
-      plyPositionEntry_t *position = plyPositionFileRead ();
+      plyPositionEntry_t *position = bufferedPositionFileReadUpdate(&pf);
 
       moveEntry_t move_entry[position->num_moves];
 
@@ -3676,7 +3721,7 @@ static void brdDbPositionTreeAggregate (const unsigned int search_depth,
       aggregate->workloads_processed++;
     }
 
-    (void) plyPositionFileRead(); // Close the position database file.
+    bufferedPositionFileReadUpdateFinish(&pf);
     close (fd);
   }
 }

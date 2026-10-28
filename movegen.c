@@ -381,11 +381,9 @@ static unsigned int pinUpdate (unsigned long long *restrict pin,
                         const unsigned int attacker_index,
                         const unsigned int en_passant_eligible_pawn,
                         const unsigned long long mover_pieces_mask,
-                        const unsigned long long any_color_pieces_mask,
+                        const unsigned long long detected_pieces,
                         const unsigned long long attack_lane)
 {
-  const unsigned long long detected_pieces = attack_lane & any_color_pieces_mask;
-
   /* The piece is pinned if it is the only piece between the king
   ** and the attacker and the piece is the same color as the king.
   */
@@ -542,7 +540,8 @@ static kingAttackHelper_t pinCompute (
     if (mover_king_mask & diagonal_attack)
     {
       const unsigned long long attack_lane = attackLanes[position_index][index];
-      if (0 == (attack_lane & any_color_pieces_mask))
+      const unsigned long long detected_pieces = attack_lane & any_color_pieces_mask;
+      if (0 == detected_pieces)
       {
         if (attack_helper.in_check)
         {
@@ -555,7 +554,7 @@ static kingAttackHelper_t pinCompute (
         if (0 == pinUpdate (&attack_helper.pin, &attack_helper.move_test_needed, 
                     whose_move, piece,  
                     index, en_passant_eligible_pawn,
-                    mover_pieces_mask, any_color_pieces_mask,
+                    mover_pieces_mask, detected_pieces,
                     attack_lane))
         {
           attack_mask |= diagonalVisibilityMap[index]
@@ -587,7 +586,8 @@ static kingAttackHelper_t pinCompute (
     if (mover_king_mask & udlr_attack)
     {
       const unsigned long long attack_lane = attackLanes[position_index][index];
-      if (0 == (attack_lane & any_color_pieces_mask))
+      const unsigned long long detected_pieces = attack_lane & any_color_pieces_mask;
+      if (0 == detected_pieces)
       {
         if (attack_helper.in_check)
         {
@@ -600,7 +600,7 @@ static kingAttackHelper_t pinCompute (
         if (0 == pinUpdate (&attack_helper.pin, &attack_helper.move_test_needed,
                     whose_move, piece,
                     index, en_passant_eligible_pawn,
-                    mover_pieces_mask, any_color_pieces_mask,
+                    mover_pieces_mask, detected_pieces,
                     attack_lane))
         {
           attack_mask |= udlrVisibilityMap[index]
