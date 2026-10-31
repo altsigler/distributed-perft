@@ -120,7 +120,8 @@ typedef unsigned long long deepSearchCounter_t;
 #define CRT_FILE_NAME "combined_result"
 #define COMBINED_RESULT_TEMP_FILE WORK_DIRECTORY_NAME CRT_FILE_NAME
 
-#define PLY_COUNTER_FILE_PREFIX WORK_DIRECTORY_NAME "counter_ply_"
+#define PLYCTR_FILE_NAME "counter_ply_"
+#define PLY_COUNTER_FILE_PREFIX WORK_DIRECTORY_NAME PLYCTR_FILE_NAME 
 
 /* The deep search algorithm reads work loads from a file
 ** using the number of entries specified below.

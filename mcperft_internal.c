@@ -4060,6 +4060,59 @@ static void * brd_db_aggregate (void *arg)
   /* We don't need the deep search results anymore.
   */
   (void) munmap (deep_search_result, position_count_size[position_db_depth]);
+  (void) unlink (combined_result_temp_file);
+
+  /* If the user specified a work directory then we move the deepest remaining ply counters
+  ** into the work directory. The other ply counters stay on the disk where they were 
+  ** creted. Since these other ply counter files are relatively small, we get the maximum
+  ** performace gain with minimum effort by moving only the deepest remaining ply countes
+  ** into the work directory.
+  */ 
+  if (0 != work_directory[0])
+  {
+    /* Unmap the deepest remaining ply counter file.
+    */
+    unsigned int i = max_db_plies - 2;
+    (void) munmap (position_count_space[i], position_count_size[i]);
+
+    char file_name[1024];
+    sprintf (file_name, "%s%u", PLY_COUNTER_FILE_PREFIX, i);
+
+    char work_file_name[2048];
+    sprintf (work_file_name, "%s/%s%u", work_directory, PLYCTR_FILE_NAME, i);
+
+    char cmd[4096];
+    sprintf (cmd, "mv %s %s", file_name, work_file_name);
+    if (-1 == system (cmd))
+    {
+      perror ("system - move file to work directory");
+      exit (-1);
+    }
+   
+    /* Re-map the counter to work directory.
+    */
+    const int fd_map = open (work_file_name, O_RDWR);
+    if (fd_map < 0)
+    {
+      perror ("open() deepest ply counter file");
+      exit (-1);
+    }
+
+    position_count_space[i] = mmap(0, position_count_size[i],
+                     PROT_READ,
+                     MAP_SHARED,
+                    fd_map,0);
+    if (position_count_space[i] == MAP_FAILED)
+    {
+      perror ("mmap() deepest ply counter file");
+      exit (-1);
+    }
+    close (fd_map);
+
+    /* When we are done using the mapping, the counter file can be deleted.
+    */
+    (void) unlink (work_file_name);
+  }
 
   if (search_depth > 1)
   {
@@ -4085,7 +4138,6 @@ static void * brd_db_aggregate (void *arg)
     ply1_perft_result[i] = position_count_space[1][i];
   }
 
-  (void) unlink (combined_result_temp_file);
 
   for (unsigned int i = 0; i < (max_db_plies - 1); i++)
   {
