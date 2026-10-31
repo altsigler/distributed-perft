@@ -125,7 +125,7 @@ void mcperftCountSetup (const unsigned int depth,
 **  None
 **
 ********************************************************************/
-void mcperftAggregate (void)
+void mcperftAggregate (const char *work_directory)
 {
   constexpr unsigned _BitInt(128) known_perft_results[16] = 
   {
@@ -151,7 +151,7 @@ void mcperftAggregate (void)
   unsigned int depth;
   char buf[256];
 
-  brdDbAggregate (&depth, &perft_result, ply1_perft_result);
+  brdDbAggregate (&depth, &perft_result, ply1_perft_result, work_directory);
 
   printf ("Perft Depth:%u\n", depth);
 

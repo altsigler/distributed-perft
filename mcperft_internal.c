@@ -833,9 +833,9 @@ static unsigned int brdDbPlyDepthGet(void)
   }
   closedir (dir);
 
-  if ((highest_ply < 7) || (highest_ply > 10))
+  if ((highest_ply < 7) || (highest_ply > 11))
   {
-    printf ("ERROR: Detected ply:%u. Expected ply values are between 7 and 10.\n", highest_ply);
+    printf ("ERROR: Detected ply:%u. Expected ply values are between 7 and 11.\n", highest_ply);
     exit (-1);
   }
 
@@ -3234,19 +3234,11 @@ static void * brd_db_count_setup (void *arg)
   int rc;
   const unsigned int ply_depth = brdDbPlyDepthGet();
 
-  sprintf (buf, "%s%u_positions",
-                    PLY_FILE_PREFIX,
-                    ply_depth);
-
-  const int position_db_fd = open (buf, O_RDONLY);
-  if (position_db_fd < 0)
-  {
-    perror ("open - position database");
-    printf ("Can't find file: %s\n", buf);
-    exit (-1);
-  }
-
-  const unsigned long long num_boards_in_ply = brdPlyNumPositionsGet (ply_depth);
+  bufferedPositionFile_t pf = bufferedPositionFileReadUpdateStart(
+                                        ply_depth,
+                                        1024*1024*1024,
+                                        0);
+  const unsigned long long num_boards_in_ply = pf.total_positions_in_file;
 
   count_setup->total_workloads = num_boards_in_ply;
 
@@ -3364,20 +3356,14 @@ static void * brd_db_count_setup (void *arg)
        const unsigned long long j_inc = ((j + block_size) < workload_header.num_workloads)?block_size:
                                         workload_header.num_workloads - j;
 
-       plyPositionEntry_t db_entry[j_inc];
-       const size_t read_size = j_inc * sizeof(plyPositionEntry_t);
-
-       if (read_size !=(size_t) read (position_db_fd, db_entry, read_size))
-       {
-         perror ("Error reading position file.");
-         exit (-1);
-       }
-
        for (unsigned long long k = 0; k < j_inc; k++)
        {
+         plyPositionEntry_t *const db_entry = bufferedPositionFileReadUpdate (&pf);
+         assert (0 != db_entry);
+
          memcpy (workload_record[k].position,
-               db_entry[k].position, 32);
-         workload_record[k].brd_info = db_entry[k].brd_info;
+               db_entry->position, 32);
+         workload_record[k].brd_info = db_entry->brd_info;
        }
 
        if ((j_inc * sizeof(workloadRecord_t)) !=
@@ -3394,8 +3380,7 @@ static void * brd_db_count_setup (void *arg)
   }
 
 
-  (void) close (position_db_fd);
-
+  bufferedPositionFileReadUpdateFinish (&pf);
 
   return 0;
 }
@@ -3424,7 +3409,7 @@ void brdDbCountSetup (const unsigned int depth,
     exit (-1);
   }
 
-  constexpr unsigned long long wait_message_interval_sec = 10;
+  constexpr unsigned long long wait_message_interval_sec = 60;
   unsigned long long last_event_time_sec = sysUpTimeMillisecondsGet() / 1000;
   unsigned long long wait_time_sec = 0;
   unsigned long long prev_workloads_processed = 0;
@@ -3742,6 +3727,7 @@ static void * brd_db_aggregate (void *arg)
   unsigned int *depth = aggregate->depth;
   unsigned _BitInt(128) *perft_result = aggregate->perft_result;
   unsigned _BitInt(128) *ply1_perft_result = aggregate->ply1_perft_result;
+  const char *work_directory = aggregate->work_directory;
 
 
   DIR *dir;
@@ -3803,18 +3789,7 @@ static void * brd_db_aggregate (void *arg)
       }
       close (fd_map);
 
-#if 0 // HACK - Using RANDOM access slows down performance.
-      if (0 != madvise (position_count_space[i], position_count_size[i], 
-                        MADV_RANDOM))
-      {
-        perror ("madvise position_count_space MADV_RANDOM");
-        exit (-1);
-      }
-#endif
     }
-#if 0 // HACK
-    printf ("position_count_size[%u] = %'llu\n", i, position_count_size[i]);
-#endif
   }
 
 
@@ -3841,11 +3816,24 @@ static void * brd_db_aggregate (void *arg)
   aggregate->counter_size = sizeof(deepSearchCounter_t);
 
   deepSearchCounter_t *deep_search_result;
+  char combined_result_temp_file[2048];
+
+  if (0 != work_directory[0])
   {
-    const int fd_map = open (COMBINED_RESULT_TEMP_FILE, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+    sprintf (combined_result_temp_file, "%s/%s", 
+                work_directory, CRT_FILE_NAME);
+  } else
+  {
+    sprintf (combined_result_temp_file, "%s", 
+                            COMBINED_RESULT_TEMP_FILE);
+  }
+
+  {
+    const int fd_map = open (combined_result_temp_file, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
     if (fd_map < 0)
     {
       perror ("open() combined result file");
+      printf ("Trying To Open:%s\n", combined_result_temp_file);
       exit (-1);
     }
     if (0 != ftruncate (fd_map, (__off_t) position_count_size[position_db_depth]))
@@ -4007,7 +3995,7 @@ static void * brd_db_aggregate (void *arg)
   */
   {
     (void) munmap (deep_search_result, position_count_size[position_db_depth]);
-    const int fd_map = open (COMBINED_RESULT_TEMP_FILE, O_RDONLY);
+    const int fd_map = open (combined_result_temp_file, O_RDONLY);
     if (fd_map < 0)
     {
       perror ("open() RDONLY combined result file");
@@ -4025,14 +4013,6 @@ static void * brd_db_aggregate (void *arg)
     }
     close (fd_map);
 
-#if 0 // HACK - Using RANDOM access slows down performance.
-    if (0 != madvise (deep_search_result, position_count_size[position_db_depth], 
-                        MADV_RANDOM))
-    {
-      perror ("madvise deep_search_result MADV_RANDOM");
-      exit (-1);
-    }
-#endif
   }
 
   if (search_depth > position_db_depth)
@@ -4105,7 +4085,7 @@ static void * brd_db_aggregate (void *arg)
     ply1_perft_result[i] = position_count_space[1][i];
   }
 
-  (void) unlink (COMBINED_RESULT_TEMP_FILE);
+  (void) unlink (combined_result_temp_file);
 
   for (unsigned int i = 0; i < (max_db_plies - 1); i++)
   {
@@ -4130,7 +4110,8 @@ static void * brd_db_aggregate (void *arg)
 ********************************************************************/
 void brdDbAggregate (unsigned int *depth,
                      unsigned _BitInt(128) *perft_result,
-                     unsigned _BitInt(128) *ply1_perft_result)
+                     unsigned _BitInt(128) *ply1_perft_result,
+                     const char *work_directory)
 {
   pthread_t aggregate_thread;
   aggregateThreadStatus_t aggregate = {};
@@ -4139,6 +4120,11 @@ void brdDbAggregate (unsigned int *depth,
   aggregate.perft_result = perft_result;
   aggregate.ply1_perft_result = ply1_perft_result;
 
+  if (0 != work_directory)
+  {
+    strncpy (aggregate.work_directory, work_directory, sizeof(aggregate.work_directory) - 1);
+  }
+
   int rc = pthread_create (&aggregate_thread, 0, brd_db_aggregate, &aggregate);
   if (rc)
   {
@@ -4146,8 +4132,7 @@ void brdDbAggregate (unsigned int *depth,
     exit (-1);
   }
 
-//  constexpr unsigned long long wait_message_interval_sec = 60;
-  constexpr unsigned long long wait_message_interval_sec = 10;
+  constexpr unsigned long long wait_message_interval_sec = 60;
   unsigned long long last_event_time_sec = sysUpTimeMillisecondsGet() / 1000;
   unsigned long long wait_time_sec = 0;
   unsigned long long prev_workloads_processed = 0;

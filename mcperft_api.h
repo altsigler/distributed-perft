@@ -64,7 +64,7 @@ void mcperftCount (const char *workload_file);
 **  None
 **
 ********************************************************************/
-void mcperftAggregate (void);
+void mcperftAggregate (const char *work_directory);
 
 
 

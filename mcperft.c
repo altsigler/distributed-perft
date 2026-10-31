@@ -74,14 +74,20 @@ int main (int argc, char *argv[])
     } else 
     if (0 == strncmp (argv[1], "aggregate", 10))
     {
-      mcperftAggregate ();
+      if (argc == 2)
+      {
+        mcperftAggregate (0);
+      } else if (argc == 3)
+      {
+        mcperftAggregate (argv[2]);
+      }
     } else
     {
       printf ("Unknown Command. Valid commands are:\n");
       printf ("%s create-db [ply]             - Create Position Database to specified ply. Default 7, valid values 7, 8, 9, or 10.\n", argv[0]);
       printf ("%s count-setup <depth> [split] - Set up \"perft <depth>\" and split the workload into specified number of files. Default 1 file.\n", argv[0]);
       printf ("%s count [workload-file]       - Count positions for each workload in specified file. Default file 'workload_1'.\n", argv[0]);
-      printf ("%s aggregate                   - Use computed move counts in board-db/results directory to calculate perft result.\n", argv[0]);
+      printf ("%s aggregate [work-directory]  - Use computed move counts in board-db/results directory to calculate perft result.\n", argv[0]);
       printf ("%s generate-fen                - Create unsorted lists of uique positions for each ply in FEN format.\n", argv[0]);
     }
   } else
@@ -95,7 +101,7 @@ int main (int argc, char *argv[])
     mcperftBoardDbGenerate (7);
     mcperftCountSetup (10, 1);
     mcperftCount ("workload_1");
-    mcperftAggregate ();
+    mcperftAggregate (0);
   }
 
   printf ("Finished %s.\n", argv[0]);

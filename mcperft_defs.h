@@ -117,7 +117,8 @@ typedef unsigned long long deepSearchCounter_t;
 
 #define DEEP_SEARCH_RESULT_TEMP_FILE "temp_result"
 
-#define COMBINED_RESULT_TEMP_FILE WORK_DIRECTORY_NAME "combined_result"
+#define CRT_FILE_NAME "combined_result"
+#define COMBINED_RESULT_TEMP_FILE WORK_DIRECTORY_NAME CRT_FILE_NAME
 
 #define PLY_COUNTER_FILE_PREFIX WORK_DIRECTORY_NAME "counter_ply_"
 
@@ -559,6 +560,7 @@ typedef struct
   unsigned int *depth;
   unsigned _BitInt(128) *perft_result;
   unsigned _BitInt(128) *ply1_perft_result;
+  char work_directory[1024];
 } aggregateThreadStatus_t;
 
 
@@ -619,7 +621,8 @@ void brdDbCount (const char *workload_file);
 ********************************************************************/
 void brdDbAggregate (unsigned int *depth,
                      unsigned _BitInt(128) *perft_result,
-                     unsigned _BitInt(128) *ply1_perft_result);
+                     unsigned _BitInt(128) *ply1_perft_result,
+                     const char *work_directory);
 
 /********************************************************************
 ** Get system up time in milliseconds.
