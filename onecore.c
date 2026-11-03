@@ -202,7 +202,7 @@ static unsigned long long positionSearch(const unsigned int depth,
                                         brd_entry->u.key.bit_brd.piece, 
                                         brd_entry->u.key.en_passant_eligible_pawn, 
                                         brd_entry->u.key.castle_eligibility, 
-                                        new_depth - 1, 0,
+                                        new_depth - 1,
                                         brd_entry->u.key.bit_brd.color[last_ply->whose_move ^ 1],
                                         brd_entry->u.key.bit_brd.color[last_ply->whose_move],
                                         pieceStandardComplement(brd_entry->u.key.bit_brd.piece));

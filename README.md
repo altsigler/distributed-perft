@@ -27,13 +27,7 @@ application. If the mcperft application is invoked without any arguments then
 it automatically generates a position tree of depth 7, creates one workload 
 file for "perft 10", computes the single-core "perft 3" for every workload, 
 and aggregates results into the final "perft 10" position count. In order 
-to run the complete test, the computer must have at least 16GB of DRAM in order 
-to have enough space to generate the depth 7 unique position tree.
-
-In order to run the mcperft position tree and move count aggregation code the 
-computer must have a solid state internal SSD. This is needed because some of
-the files are accessed in non-sequential locations during database creation 
-and the final move count aggregation. 
+to run the complete test, the computer must have at least 16GB of DRAM.
 
 ### Generate a tree of unique positions
 The first stage generates a tree of unique positions up to ply 7, 8, or 9.
@@ -107,11 +101,11 @@ The workload files are named "workload_1" to "workload_10" and reside in the boa
 of workload files is omitted then only one file "workload_1" is generated. The workload file names must not be
 modified. The mcperft relies on this file naming convention. 
 
-The workload files are binary files, so are not user readable. The file contains a header that describes things 
+The workload files are binary files, so are not user readable. The file contains a record that describes things 
 such as search depth, the number of workloads, and which part of the overall workload this particular file covers.
-After the file header, the workload file contains positions from the highest ply number for which the position 
-database was created, so if in the first stage the position database was created using the "./mcperft create-db 8" then
-the workload files contain 988,192,872 positions split approximately evenly between them.
+The workload file dosn't contain any positions. The move counting machine must have access to the position
+database in order to know which position to count. When using large position database the typical use case is 
+to mount the directory containing the database via NFS on the move counting machine.
 
 This project doesn't include any tools to distribute the workload files to different computers. 
 For testing distributed move counting, the workload_n files can be copied manually to other computers. 
@@ -120,8 +114,7 @@ in order for the ./mcperft application to use them.
 
 In a special case when the requested perft depth is less than or equal to the position database ply depth then only one workload file
 "workload_1" is generated. The workload cannot be split up for the small perft depths. In the above example 
-depths 1 through 8 cannot be split up into multiple workload files. In this scenario the workload file contains some control 
-information in the header and no positions.
+depths 1 through 8 cannot be split up into multiple workload files. 
 
 Please be aware that the "./mcperft count-setup" command automatically deletes and re-creates the "board-db/workload-files
 and "board-db/result-files" directories. The "result-files" is where the move counting results are kept. It is prudent to move result

@@ -126,7 +126,6 @@ static unsigned long long movesRapidFind(
                                                                one_move[i].en_passant_eligible_pawn, 
                                                                one_move[i].castle_eligibility,
                                                                depth - 2,
-                                                               0,
                                                                bit_brd->color[whose_move],
                                                                bit_brd->color[whose_move ^ 1],
                                                                pieceStandardComplement(bit_brd->piece));
@@ -216,7 +215,7 @@ static unsigned long long positionSearch(const unsigned int depth,
     return (depth == 1)?allMoveCandidatesLastPlyFindApi (whose_move, &input_bit_brd, 
                                             en_passant_eligible_pawn, castle_eligibility):
             allMovePerft (whose_move, input_bit_brd.piece, 
-                        en_passant_eligible_pawn, castle_eligibility, depth - 1, 0,
+                        en_passant_eligible_pawn, castle_eligibility, depth - 1,
                         input_bit_brd.color[whose_move ^ 1],   
                         input_bit_brd.color[whose_move],
                         pieceStandardComplement(input_bit_brd.piece));

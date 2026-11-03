@@ -2599,7 +2599,7 @@ static void * brd_db_deep_search (void *arg)
   void **ch_arg = (void **) arg;
   const unsigned int search_depth = *(unsigned int *) ch_arg[0]; 
   const unsigned long long num_entries = *(unsigned long long *) ch_arg[1];
-  const workloadRecord_t *const work_load_buffer = ch_arg[2];
+  const plyPositionEntry_t *const work_load_buffer = ch_arg[2];
   unsigned long long *const search_result_buffer = ch_arg[3];
   const unsigned int task_number = *(unsigned int *) ch_arg[4]; 
   unsigned long long *num_boards_processed = ch_arg[5];
@@ -2639,7 +2639,7 @@ static void * brd_db_deep_search (void *arg)
     if (next_board >= num_entries)
                                  break;
 
-    const workloadRecord_t *const work_load = &work_load_buffer [next_board];
+    const plyPositionEntry_t *const work_load = &work_load_buffer [next_board];
 
     brdUnpack (&brd, work_load->position);
 
@@ -2676,9 +2676,9 @@ static void * brd_db_deep_search (void *arg)
 static void  brdDbDeepSearch (const unsigned int num_cores, 
                               const unsigned int depth, 
                               const unsigned long long total_workloads,
-                              const int workload_fd, 
+                              const int position_fd, 
                               const int result_fd,
-                              workloadRecord_t *const work_load_buffer, 
+                              plyPositionEntry_t *const work_load_buffer, 
                               unsigned long long *const search_result_buffer,
                               const unsigned long long resolved_workloads,
                               const unsigned long long chunk_size)
@@ -2694,9 +2694,12 @@ static void  brdDbDeepSearch (const unsigned int num_cores,
   unsigned _BitInt(128) total_positions_per_thread[num_cores] = {};
   unsigned long long num_writes_to_file = 0;
 
+  unsigned int more_entries_needed = 1;
+  unsigned long long workloads_extracted = 0;
+
   do 
   {
-    const long long num_bytes = read (workload_fd, work_load_buffer, chunk_size);
+    const long long num_bytes = read (position_fd, work_load_buffer, chunk_size);
     if (num_bytes == 0)
     {
       // Detected End of File.
@@ -2710,12 +2713,30 @@ static void  brdDbDeepSearch (const unsigned int num_cores,
     /* If the number of read bytes is not an exact multiple of workload record
     ** size then we have a problem.
     */
-    if (0 != ((unsigned long long) num_bytes % sizeof(workloadRecord_t)))
+    if (0 != ((unsigned long long) num_bytes % sizeof(plyPositionEntry_t)))
     {
       printf ("ERROR: Workload Read detected corruped file.\n");
+      printf ("chunk_size:%'llu num_bytes:%'llu entry_size:%zu\n",
+                        chunk_size, num_bytes, sizeof(plyPositionEntry_t));
       exit (-1);
     }
-    unsigned long long num_entries = (unsigned long long) num_bytes / sizeof(workloadRecord_t);
+    unsigned long long num_entries = (unsigned long long) num_bytes / sizeof(plyPositionEntry_t);
+
+    /* Check if we read all positions for this workload file.
+    */
+    if ((workloads_extracted + num_entries) >= total_workloads)
+    {
+      num_entries = total_workloads - workloads_extracted; 
+      more_entries_needed = 0;
+
+      if (0 == num_entries)
+      {
+        break;
+      }
+    } else
+    {
+      workloads_extracted += num_entries;
+    }
                     
     /* Start search threads.
     */
@@ -2821,7 +2842,7 @@ static void  brdDbDeepSearch (const unsigned int num_cores,
       exit (-1);
     }
 
-  } while (1);
+  } while (more_entries_needed);
 
   const unsigned long long test_run_time_sec = (sysUpTimeMillisecondsGet() / 1000) - test_start_time_sec;
   const unsigned long long num_days = ((test_run_time_sec / 60) / 60) / 24;
@@ -2868,6 +2889,25 @@ void brdDbCount (const char *workload_file)
   if (sizeof(workloadHeader_t) != read (workload_fd, &workload_header, sizeof(workloadHeader_t)))
   {
     perror ("read - workload file");
+    exit (-1);
+  }
+
+  char position_file_name[1024];
+
+  sprintf (position_file_name, "%s%u_positions", 
+                PLY_FILE_PREFIX, workload_header.position_db_depth);
+  const int position_fd = open (position_file_name, O_RDONLY);
+  if (position_fd < 0)
+  {
+    perror ("open - position file");
+    exit (-1);
+  }
+
+  /* Set the file pointer to the first position for this workload.
+  */
+  if (0 > lseek (position_fd, (__off_t) (workload_header.start_workload_number * sizeof (plyPositionEntry_t)), SEEK_SET))
+  {
+    perror ("lseek position file");
     exit (-1);
   }
 
@@ -2985,9 +3025,9 @@ void brdDbCount (const char *workload_file)
     */
     if (num_entries)
     {
-      if (0 > lseek (workload_fd, (__off_t) (num_entries * sizeof (workloadRecord_t)), SEEK_CUR))
+      if (0 > lseek (position_fd, (__off_t) (num_entries * sizeof (plyPositionEntry_t)), SEEK_CUR))
       {
-        perror ("sleek workload file");
+        perror ("lseek workload file");
         exit (-1);
       }
 
@@ -3003,8 +3043,8 @@ void brdDbCount (const char *workload_file)
   /* Allocate memory for reading workloads from NVRAM and for the 
   ** search results.
   */
-  const unsigned long long max_chunk_size = num_cores * sizeof(workloadRecord_t) * MAX_DEEP_SEARCH_PER_CORE_CHUNK_SIZE;
-  const unsigned long long min_chunk_size = num_cores * sizeof(workloadRecord_t) * 2; 
+  const unsigned long long max_chunk_size = num_cores * sizeof(plyPositionEntry_t) * MAX_DEEP_SEARCH_PER_CORE_CHUNK_SIZE;
+  const unsigned long long min_chunk_size = num_cores * sizeof(plyPositionEntry_t) * 2; 
   
   unsigned long long chunk_size = max_chunk_size;
 
@@ -3013,16 +3053,16 @@ void brdDbCount (const char *workload_file)
     chunk_size = min_chunk_size;
   } else if (search_header.workload_depth == 7)
   {
-    chunk_size = num_cores * sizeof(workloadRecord_t) * 100LLU;
+    chunk_size = num_cores * sizeof(plyPositionEntry_t) * 100LLU;
   } else if (search_header.workload_depth == 6)
   {
-    chunk_size = num_cores * sizeof(workloadRecord_t) * 2'000LLU;
+    chunk_size = num_cores * sizeof(plyPositionEntry_t) * 2'000LLU;
   } else if (search_header.workload_depth == 5)
   {
-    chunk_size = num_cores * sizeof(workloadRecord_t) * 50'000LLU;
+    chunk_size = num_cores * sizeof(plyPositionEntry_t) * 50'000LLU;
   } else if (search_header.workload_depth == 4)
   {
-    chunk_size = num_cores * sizeof(workloadRecord_t) * 1'000'000LLU;
+    chunk_size = num_cores * sizeof(plyPositionEntry_t) * 1'000'000LLU;
   }
 
   if (chunk_size > max_chunk_size)
@@ -3030,9 +3070,10 @@ void brdDbCount (const char *workload_file)
     chunk_size = max_chunk_size;
   }
 
-  unsigned long long chunk_entries = chunk_size / sizeof(workloadRecord_t);
 
-  workloadRecord_t *const work_load_buffer = malloc (chunk_size);
+  unsigned long long chunk_entries = chunk_size / sizeof(plyPositionEntry_t);
+
+  plyPositionEntry_t *const work_load_buffer = malloc (chunk_size);
   unsigned long long *const search_result_buffer = 
                     malloc (sizeof(unsigned long long)  * chunk_entries);
   if (!work_load_buffer || !search_result_buffer)
@@ -3070,17 +3111,24 @@ void brdDbCount (const char *workload_file)
     onecoreScalingOverride (4, 1'600'000, 3'200'000, 1'600'000); // 144BP/s at 7
   }
 
-  brdDbDeepSearch (num_cores, search_header.workload_depth, 
+  if (0 == search_header.num_workloads)
+  {
+    printf ("Skip deep search.\n");
+  } else
+  {
+    brdDbDeepSearch (num_cores, search_header.workload_depth, 
                     search_header.num_workloads,
-                    workload_fd, result_fd,
+                    position_fd, result_fd,
                     work_load_buffer, search_result_buffer,
                     resolved_workloads,
                     chunk_size);
+  }
 
   free (work_load_buffer);
   free (search_result_buffer);
   (void) close (result_fd);
   (void) close (workload_fd);
+  (void) close (position_fd);
 
   /* Double check that the search results file has the expected number of entries.
   */
@@ -3219,28 +3267,21 @@ void brdDbFenGenerate (void)
 }
 
 /******************************************************************************
-** Generate Deep Search Workload Files Thread.
+** Generate Deep Search Workload Files.
 **
+** depth - Search Depth.
+** split_factor - Number of workload files.
+**
+** Return Values:
 ******************************************************************************/
-static void * brd_db_count_setup (void *arg)
-
+void brdDbCountSetup (const unsigned int depth,
+                      const unsigned int split_factor)
 {
- (void) pthread_setname_np(pthread_self(), "mcp-count-setup"); 
-
-  countSetupThreadStatus_t *count_setup = arg;
-  const unsigned int depth = count_setup->depth;
-  const unsigned int split_factor = count_setup->split_factor;
   char buf[1024];
   int rc;
   const unsigned int ply_depth = brdDbPlyDepthGet();
 
-  bufferedPositionFile_t pf = bufferedPositionFileReadUpdateStart(
-                                        ply_depth,
-                                        1024*1024*1024,
-                                        0);
-  const unsigned long long num_boards_in_ply = pf.total_positions_in_file;
-
-  count_setup->total_workloads = num_boards_in_ply;
+  const unsigned long long num_boards_in_ply = brdPlyNumPositionsGet (ply_depth);
 
   printf ("Found existing board database with ply depth %u.\n", ply_depth);
 
@@ -3349,114 +3390,13 @@ static void * brd_db_count_setup (void *arg)
        exit (-1);
      }
 
-     for (unsigned long long j = 0; j < workload_header.num_workloads; )
-     {
-       constexpr unsigned int block_size = 10000;
-       workloadRecord_t workload_record[block_size];
-       const unsigned long long j_inc = ((j + block_size) < workload_header.num_workloads)?block_size:
-                                        workload_header.num_workloads - j;
-
-       for (unsigned long long k = 0; k < j_inc; k++)
-       {
-         plyPositionEntry_t *const db_entry = bufferedPositionFileReadUpdate (&pf);
-         assert (0 != db_entry);
-
-         memcpy (workload_record[k].position,
-               db_entry->position, 32);
-         workload_record[k].brd_info = db_entry->brd_info;
-       }
-
-       if ((j_inc * sizeof(workloadRecord_t)) !=
-                 (unsigned long long) write (fd, &workload_record, j_inc * sizeof(workloadRecord_t)))
-       {
-         perror ("write workload file.");
-         exit (-1);
-       }
-
-       j += j_inc;
-       count_setup->workloads_processed += j_inc;
-     }
      (void) close (fd);
   }
 
-
-  bufferedPositionFileReadUpdateFinish (&pf);
-
-  return 0;
-}
-
-/******************************************************************************
-** Generate Deep Search Workload Files.
-**
-** depth - Search Depth.
-** split_factor - Number of workload files.
-**
-** Return Values:
-******************************************************************************/
-void brdDbCountSetup (const unsigned int depth,
-                      const unsigned int split_factor)
-
-{
-  pthread_t cs_thread;
-  countSetupThreadStatus_t count_setup = {};
-  count_setup.depth = depth;
-  count_setup.split_factor = split_factor;
-
-  int rc = pthread_create (&cs_thread, 0, brd_db_count_setup, &count_setup);
-  if (rc)
-  {
-    perror ("pthread_create: Count Setup");
-    exit (-1);
-  }
-
-  constexpr unsigned long long wait_message_interval_sec = 60;
-  unsigned long long last_event_time_sec = sysUpTimeMillisecondsGet() / 1000;
-  unsigned long long wait_time_sec = 0;
-  unsigned long long prev_workloads_processed = 0;
-  do
-  {
-    struct timespec ts;
-    unsigned long long current_time_sec = sysUpTimeMillisecondsGet() / 1000;
-
-    if (-1 == clock_gettime (CLOCK_REALTIME, &ts))
-    {
-      perror ("clock_gettime");
-      exit (-1);
-    }
-    if ((current_time_sec - last_event_time_sec) < wait_message_interval_sec)
-    {
-      ts.tv_sec += (__time_t) (wait_message_interval_sec - (current_time_sec - last_event_time_sec));
-    }
-
-    rc = pthread_timedjoin_np (cs_thread, 0, &ts);
-    if ((0 != rc) && (ETIMEDOUT != rc))
-    {
-      perror ("pthread_join workload create");
-      exit (-1);
-    }
-
-    current_time_sec = sysUpTimeMillisecondsGet() / 1000;
-    const unsigned long long actual_wait_time = current_time_sec - last_event_time_sec;
-
-    if (actual_wait_time >= wait_message_interval_sec)
-    {
-      wait_time_sec += actual_wait_time;
-
-      printf ("Generating Workloads... %'llu sec - Searched %'llu/%'llu (%llu%%, %'llu Wl/s)\n",
-                wait_time_sec,
-                count_setup.workloads_processed,
-                count_setup.total_workloads,
-                ((count_setup.total_workloads / 100) > 0)?count_setup.workloads_processed / (count_setup.total_workloads / 100):0,
-                 (((count_setup.workloads_processed - prev_workloads_processed) /
-                                                    actual_wait_time))
-                );
-      prev_workloads_processed = count_setup.workloads_processed;
-      last_event_time_sec = current_time_sec;
-    }
-  } while (rc == ETIMEDOUT);
-
   printf ("Workload files are ready!\n");
 }
+
+
 
 /********************************************************************
 ** Add all the deep search positions into the aggregation table

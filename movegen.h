@@ -282,7 +282,6 @@ unsigned long long allWhiteMovePerft (
                            const unsigned int en_passant_eligible_pawn,
                            const castleEligibility_t castle_eligibility,
                            const unsigned int depth,
-                           const unsigned int ply,
                            const unsigned long long mover_pieces_mask,
                            const unsigned long long opponent_pieces_mask,
                            const unsigned int def_piece_compliment);
@@ -302,7 +301,6 @@ unsigned long long allBlackMovePerft (
                            const unsigned int en_passant_eligible_pawn,
                            const castleEligibility_t castle_eligibility,
                            const unsigned int depth,
-                           const unsigned int ply,
                            const unsigned long long mover_pieces_mask,
                            const unsigned long long opponent_pieces_mask,
                            const unsigned int def_piece_compliment);
@@ -325,7 +323,6 @@ unsigned long long allMovePerft (
                            const unsigned int en_passant_eligible_pawn,
                            const castleEligibility_t castle_eligibility,
                            const unsigned int depth,
-                           const unsigned int ply,
                            const unsigned long long opponent_pieces_mask,
                            const unsigned long long mover_pieces_mask,
                            const unsigned int def_piece_compliment)
@@ -333,10 +330,10 @@ unsigned long long allMovePerft (
 {
   return (whose_move == MOVE_WHITE)?
                 allWhiteMovePerft (piece, en_passant_eligible_pawn,
-                                castle_eligibility, depth, ply,
+                                castle_eligibility, depth, 
                                 mover_pieces_mask, opponent_pieces_mask, def_piece_compliment):
                 allBlackMovePerft (piece, en_passant_eligible_pawn,
-                                castle_eligibility, depth, ply,
+                                castle_eligibility, depth, 
                                 mover_pieces_mask, opponent_pieces_mask, def_piece_compliment);
 }
 

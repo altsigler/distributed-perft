@@ -1435,7 +1435,6 @@ static unsigned long long whiteKingSquaresFind (
                             const castleEligibility_t castle_eligibility,
                             const unsigned int record_undo_info,
                             const unsigned int depth,
-                            const unsigned int ply,
                             const unsigned long long mover_pieces_mask,
                             const unsigned long long opponent_pieces_mask,
                             const unsigned int last_ply,
@@ -1478,7 +1477,7 @@ static unsigned long long whiteKingSquaresFind (
         mn += (last_ply)?
           allMoveCandidatesLastPlyFind(MOVE_BLACK,piece,0,template_castle_eligibility,
                                         mover_pieces_mask ^ mask1, opponent_pieces_mask, def_piece_complement):
-          allMovePerft(MOVE_BLACK,piece,0,template_castle_eligibility,depth,ply,
+          allMovePerft(MOVE_BLACK,piece,0,template_castle_eligibility,depth,
                                         mover_pieces_mask ^ mask1, opponent_pieces_mask, def_piece_complement);
       }
       MOVE_APPLY (piece, 1,
@@ -1523,7 +1522,7 @@ static unsigned long long whiteKingSquaresFind (
         mn += (last_ply)?
           allMoveCandidatesLastPlyFind(MOVE_BLACK,piece,0,next_castle_eligibility,
                                       mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2, new_piece_complement):
-          allMovePerft(MOVE_BLACK,piece,0,next_castle_eligibility,depth,ply,
+          allMovePerft(MOVE_BLACK,piece,0,next_castle_eligibility,depth,
                                       mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2, new_piece_complement);
       }
       MOVE_APPLY (piece, 2,
@@ -1599,7 +1598,6 @@ static unsigned long long whiteKingSquaresFind (
                           0,
                           template_castle_eligibility,
                           depth,
-                          ply,
                           mover_pieces_mask ^ (mask1 | mask2),
                           opponent_pieces_mask, def_piece_complement);
       MOVE_APPLY (piece, 2,
@@ -1651,7 +1649,6 @@ static unsigned long long whiteKingSquaresFind (
                           0,
                           template_castle_eligibility,
                           depth,
-                          ply,
                           mover_pieces_mask ^ (mask1 | mask2),
                           opponent_pieces_mask, def_piece_complement);
       MOVE_APPLY (piece, 2,
@@ -1682,7 +1679,6 @@ static unsigned long long blackKingSquaresFind (
                             const castleEligibility_t castle_eligibility,
                             const unsigned int record_undo_info,
                             const unsigned int depth,
-                            const unsigned int ply,
                             const unsigned long long mover_pieces_mask,
                             const unsigned long long opponent_pieces_mask,
                             const unsigned int last_ply,
@@ -1724,7 +1720,7 @@ static unsigned long long blackKingSquaresFind (
         mn += (last_ply)?
           allMoveCandidatesLastPlyFind(MOVE_WHITE,piece,0,template_castle_eligibility,
                             mover_pieces_mask ^ mask1, opponent_pieces_mask, def_piece_complement):
-          allMovePerft(MOVE_WHITE,piece,0,template_castle_eligibility,depth,ply,
+          allMovePerft(MOVE_WHITE,piece,0,template_castle_eligibility,depth,
                             mover_pieces_mask ^ mask1, opponent_pieces_mask, def_piece_complement);
       }
       MOVE_APPLY (piece, 1,
@@ -1769,7 +1765,7 @@ static unsigned long long blackKingSquaresFind (
         mn += (last_ply)?
           allMoveCandidatesLastPlyFind(MOVE_WHITE,piece,0,next_castle_eligibility,
                           mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2, new_piece_complement):
-          allMovePerft(MOVE_WHITE,piece,0,next_castle_eligibility,depth,ply,
+          allMovePerft(MOVE_WHITE,piece,0,next_castle_eligibility,depth,
                           mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2, new_piece_complement);
       }
       MOVE_APPLY (piece, 2,
@@ -1845,7 +1841,6 @@ static unsigned long long blackKingSquaresFind (
                           0,
                           template_castle_eligibility,
                           depth,
-                          ply,
                           mover_pieces_mask ^ (mask1 | mask2),
                           opponent_pieces_mask, def_piece_complement);
       MOVE_APPLY (piece, 2,
@@ -1898,7 +1893,6 @@ static unsigned long long blackKingSquaresFind (
                           0,
                           template_castle_eligibility,
                           depth,
-                          ply,
                           mover_pieces_mask ^ (mask1 | mask2),
                           opponent_pieces_mask, def_piece_complement);
       MOVE_APPLY (piece, 2,
@@ -1927,7 +1921,6 @@ static unsigned long long allBishopRookQueenSquaresFind (
                                    const unsigned long long move_test_needed,
                                    const castleEligibility_t castle_eligibility,
                                    const unsigned int depth,
-                                   const unsigned int ply,
                                    const unsigned long long mover_pieces_mask,
                                    const unsigned long long opponent_pieces_mask,
                                    const unsigned int last_ply,
@@ -2011,7 +2004,7 @@ static unsigned long long allBishopRookQueenSquaresFind (
             mn += (last_ply)?
              allMoveCandidatesLastPlyFind(whose_move ^ 1, piece, 0, next_castle_eligibility,
                                   mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2, new_piece_complement):
-             allMovePerft(whose_move ^ 1, piece, 0, next_castle_eligibility, depth, ply,
+             allMovePerft(whose_move ^ 1, piece, 0, next_castle_eligibility, depth, 
                                   mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2, new_piece_complement);
             MOVE_APPLY (piece, 2,
                       p1,p2,0,
@@ -2044,7 +2037,7 @@ static unsigned long long allBishopRookQueenSquaresFind (
             mn += (last_ply)?
              allMoveCandidatesLastPlyFind(whose_move ^ 1, piece, 0, castle_eligibility,
                                   mover_pieces_mask ^ mask1, opponent_pieces_mask, def_piece_complement): 
-             allMovePerft(whose_move ^ 1, piece, 0, castle_eligibility, depth, ply,
+             allMovePerft(whose_move ^ 1, piece, 0, castle_eligibility, depth, 
                                   mover_pieces_mask ^ mask1, opponent_pieces_mask, def_piece_complement); 
             MOVE_APPLY (piece, 1,
                       p1,0,0,
@@ -2161,7 +2154,7 @@ static unsigned long long allBishopRookQueenSquaresFind (
              allMoveCandidatesLastPlyFind(whose_move ^ 1, piece, 0, next_castle_eligibility,
                                              mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2,
                                              new_piece_complement):
-             allMovePerft(whose_move ^ 1, piece, 0, next_castle_eligibility, depth, ply,
+             allMovePerft(whose_move ^ 1, piece, 0, next_castle_eligibility, depth, 
                                              mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2, 
                                              new_piece_complement);
             MOVE_APPLY (piece, 2,
@@ -2195,7 +2188,7 @@ static unsigned long long allBishopRookQueenSquaresFind (
             mn += (last_ply)?
              allMoveCandidatesLastPlyFind(whose_move ^ 1, piece, 0, castle_eligibility_template,
                               mover_pieces_mask ^ mask1, opponent_pieces_mask, def_piece_complement): 
-             allMovePerft(whose_move ^ 1, piece, 0, castle_eligibility_template, depth, ply,
+             allMovePerft(whose_move ^ 1, piece, 0, castle_eligibility_template, depth, 
                               mover_pieces_mask ^ mask1, opponent_pieces_mask, def_piece_complement); 
             MOVE_APPLY (piece, 1,
                       p1,0,0,
@@ -2305,7 +2298,7 @@ static unsigned long long allBishopRookQueenSquaresFind (
             mn += (last_ply)?
              allMoveCandidatesLastPlyFind(whose_move ^ 1, piece, 0, next_castle_eligibility,
                                   mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2, new_piece_complement):
-             allMovePerft(whose_move ^ 1, piece, 0, next_castle_eligibility, depth, ply,
+             allMovePerft(whose_move ^ 1, piece, 0, next_castle_eligibility, depth, 
                                   mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2, new_piece_complement);
             MOVE_APPLY (piece, 2,
                       p1,p2,0,
@@ -2338,7 +2331,7 @@ static unsigned long long allBishopRookQueenSquaresFind (
             mn += (last_ply)?
              allMoveCandidatesLastPlyFind(whose_move ^ 1, piece, 0, castle_eligibility,
                           mover_pieces_mask ^ mask1, opponent_pieces_mask, def_piece_complement):
-             allMovePerft(whose_move ^ 1, piece, 0, castle_eligibility, depth, ply,
+             allMovePerft(whose_move ^ 1, piece, 0, castle_eligibility, depth, 
                           mover_pieces_mask ^ mask1, opponent_pieces_mask, def_piece_complement);
             MOVE_APPLY (piece, 1,
                       p1,0,0,
@@ -2548,7 +2541,6 @@ static unsigned long long allKnightSquaresFind (
                                     const unsigned long long move_test_needed,
                                     const castleEligibility_t castle_eligibility,
                                     const unsigned int depth,
-                                    const unsigned int ply,
                                     const unsigned long long mover_pieces_mask,
                                     const unsigned long long opponent_pieces_mask,
                                     const unsigned int last_ply,
@@ -2632,7 +2624,7 @@ static unsigned long long allKnightSquaresFind (
             mn += (last_ply)?
                allMoveCandidatesLastPlyFind(whose_move ^ 1, piece, 0, next_castle_eligibility,
                                     mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2, new_piece_complement):
-               allMovePerft(whose_move ^ 1, piece, 0, next_castle_eligibility, depth, ply,
+               allMovePerft(whose_move ^ 1, piece, 0, next_castle_eligibility, depth, 
                                     mover_pieces_mask ^ mask1, opponent_pieces_mask ^ mask2, new_piece_complement);
             MOVE_APPLY (piece, 2,
                           p1,p2,0,
@@ -2663,7 +2655,7 @@ static unsigned long long allKnightSquaresFind (
           mn += (last_ply)?
              allMoveCandidatesLastPlyFind(whose_move ^ 1, piece, 0, castle_eligibility,
                                 mover_pieces_mask ^ mask1, opponent_pieces_mask, def_piece_complement):
-             allMovePerft(whose_move ^ 1, piece, 0, castle_eligibility, depth, ply,
+             allMovePerft(whose_move ^ 1, piece, 0, castle_eligibility, depth, 
                                 mover_pieces_mask ^ mask1, opponent_pieces_mask, def_piece_complement);
           MOVE_APPLY (piece, 1,
                         p1,0,0,
@@ -2789,7 +2781,6 @@ static unsigned long long allWhitePawnSquaresFind (
                                     const unsigned long long pin,
                                     const castleEligibility_t castle_eligibility,
                                     const unsigned int depth,
-                                    const unsigned int ply,
                                     const unsigned long long mover_pieces_mask,
                                     const unsigned long long opponent_pieces_mask,
                                     const unsigned int last_ply,
@@ -2853,7 +2844,7 @@ static unsigned long long allWhitePawnSquaresFind (
              allMoveCandidatesLastPlyFind(MOVE_BLACK, piece, 0, castle_eligibility,
                                     mover_pieces_mask ^ (mask1 | p1_move_mask),
                                     opponent_pieces_mask, new_piece_complement):
-             allMovePerft(MOVE_BLACK, piece, 0, castle_eligibility, depth, ply,
+             allMovePerft(MOVE_BLACK, piece, 0, castle_eligibility, depth, 
                                     mover_pieces_mask ^ (mask1 | p1_move_mask),
                                     opponent_pieces_mask, new_piece_complement);
           MOVE_APPLY (piece, 2,
@@ -2896,7 +2887,7 @@ static unsigned long long allWhitePawnSquaresFind (
           mn += (last_ply)?
              allMoveCandidatesLastPlyFind(MOVE_BLACK, piece, 0, castle_eligibility,
                                     mover_pieces_mask ^ mask1, opponent_pieces_mask, def_piece_complement):
-             allMovePerft(MOVE_BLACK, piece, 0, castle_eligibility, depth, ply,
+             allMovePerft(MOVE_BLACK, piece, 0, castle_eligibility, depth, 
                                     mover_pieces_mask ^ mask1, opponent_pieces_mask, def_piece_complement);
           MOVE_APPLY (piece, 1,
                         S_PAWN | S_WHITE,0,0,
@@ -2954,7 +2945,6 @@ static unsigned long long allWhitePawnSquaresFind (
                                 0,
                                 castle_eligibility,
                                 depth,
-                                ply,
                                 mover_pieces_mask ^ (mask1 | p1_move_mask),
                                 opponent_pieces_mask, new_piece_complement);
               MOVE_APPLY (piece, num_masks,
@@ -3024,7 +3014,6 @@ static unsigned long long allWhitePawnSquaresFind (
                                   next_en_passant_eligible_pawn,
                                   castle_eligibility,
                                   depth,
-                                  ply,
                                   mover_pieces_mask ^ mask1, 
                                   opponent_pieces_mask, def_piece_complement);
             MOVE_APPLY (piece, 1,
@@ -3183,7 +3172,6 @@ static unsigned long long allWhitePawnSquaresFind (
                                 0,
                                 next_castle_eligibility,
                                 depth,
-                                ply,
                                 new_mover_pieces_mask,
                                 new_opponent_pieces_mask, new_piece_complement);
           MOVE_APPLY (piece, num_masks,
@@ -3223,7 +3211,6 @@ static unsigned long long allWhitePawnSquaresFind (
                                 0,
                                 next_castle_eligibility,
                                 depth,
-                                ply,
                                 new_mover_pieces_mask,
                                 new_opponent_pieces_mask, new_piece_complement);
               MOVE_APPLY (piece, num_masks,
@@ -3363,7 +3350,6 @@ static unsigned long long allWhitePawnSquaresFind (
                                 0,
                                 next_castle_eligibility,
                                 depth,
-                                ply,
                                 new_mover_pieces_mask,
                                 new_opponent_pieces_mask, new_piece_complement);
           MOVE_APPLY (piece, num_masks,
@@ -3404,7 +3390,6 @@ static unsigned long long allWhitePawnSquaresFind (
                                 0,
                                 next_castle_eligibility,
                                 depth,
-                                ply,
                                 new_mover_pieces_mask,
                                 new_opponent_pieces_mask, new_piece_complement);
               MOVE_APPLY (piece, num_masks,
@@ -3836,7 +3821,6 @@ static unsigned long long allBlackPawnSquaresFind (
                                     const unsigned long long pin,
                                     const castleEligibility_t castle_eligibility,
                                     const unsigned int depth,
-                                    const unsigned int ply,
                                     const unsigned long long mover_pieces_mask,
                                     const unsigned long long opponent_pieces_mask,
                                     const unsigned int last_ply,
@@ -3901,7 +3885,7 @@ static unsigned long long allBlackPawnSquaresFind (
              allMoveCandidatesLastPlyFind(MOVE_WHITE, piece, 0, castle_eligibility,
                                     mover_pieces_mask ^ (mask1 | p1_move_mask),
                                     opponent_pieces_mask, new_piece_complement):
-             allMovePerft(MOVE_WHITE, piece, 0, castle_eligibility, depth, ply,
+             allMovePerft(MOVE_WHITE, piece, 0, castle_eligibility, depth,
                                     mover_pieces_mask ^ (mask1 | p1_move_mask),
                                     opponent_pieces_mask, new_piece_complement);
           MOVE_APPLY (piece, 2,
@@ -3942,7 +3926,7 @@ static unsigned long long allBlackPawnSquaresFind (
           mn += (last_ply)?
              allMoveCandidatesLastPlyFind(MOVE_WHITE, piece, 0, castle_eligibility,
                             mover_pieces_mask ^ mask1, opponent_pieces_mask, new_piece_complement):
-             allMovePerft(MOVE_WHITE, piece, 0, castle_eligibility, depth, ply,
+             allMovePerft(MOVE_WHITE, piece, 0, castle_eligibility, depth,
                             mover_pieces_mask ^ mask1, opponent_pieces_mask, new_piece_complement);
           MOVE_APPLY (piece, 1,
                         S_PAWN | S_BLACK,0,0,
@@ -4000,7 +3984,6 @@ static unsigned long long allBlackPawnSquaresFind (
                                 0,
                                 castle_eligibility,
                                 depth,
-                                ply,
                                 mover_pieces_mask ^ (mask1 | p1_move_mask),
                                 opponent_pieces_mask, new_piece_complement);
               MOVE_APPLY (piece, num_masks,
@@ -4071,7 +4054,6 @@ static unsigned long long allBlackPawnSquaresFind (
                                   next_en_passant_eligible_pawn,
                                   castle_eligibility,
                                   depth,
-                                  ply,
                                   mover_pieces_mask ^ mask1, 
                                   opponent_pieces_mask, def_piece_complement);
             MOVE_APPLY (piece, 1,
@@ -4231,7 +4213,6 @@ static unsigned long long allBlackPawnSquaresFind (
                                 0,
                                 next_castle_eligibility,
                                 depth,
-                                ply,
                                 new_mover_pieces_mask,
                                 new_opponent_pieces_mask, new_piece_complement);
           MOVE_APPLY (piece, num_masks,
@@ -4272,7 +4253,6 @@ static unsigned long long allBlackPawnSquaresFind (
                                 0,
                                 next_castle_eligibility,
                                 depth,
-                                ply,
                                 new_mover_pieces_mask,
                                 new_opponent_pieces_mask, new_piece_complement);
               MOVE_APPLY (piece, num_masks,
@@ -4413,7 +4393,6 @@ static unsigned long long allBlackPawnSquaresFind (
                                 0,
                                 next_castle_eligibility,
                                 depth,
-                                ply,
                                 new_mover_pieces_mask,
                                 new_opponent_pieces_mask, new_piece_complement);
           MOVE_APPLY (piece, num_masks,
@@ -4454,7 +4433,6 @@ static unsigned long long allBlackPawnSquaresFind (
                                 0,
                                 next_castle_eligibility,
                                 depth,
-                                ply,
                                 new_mover_pieces_mask,
                                 new_opponent_pieces_mask, new_piece_complement);
               MOVE_APPLY (piece, num_masks,
@@ -4920,48 +4898,48 @@ unsigned long long allMoveCandidatesFind (
     {
       num_moves += whiteKingSquaresFind(king_mask, king_position, attack_helper.move_candidate_mask,
                        bit_brd->piece, &dest[num_moves],
-                       castle_eligibility, 1, 0, 0,
+                       castle_eligibility, 1, 0,
                        mover_pieces_mask, opponent_pieces_mask, 0,
                        king_attack_mask, def_piece_complement);
 
       num_moves += allWhitePawnSquaresFind(bit_brd->piece, &dest[num_moves],
                                     en_passant_eligible_pawn, king_position,
                                     1, 0, 0,
-                                    castle_eligibility, 0, 0,
+                                    castle_eligibility, 0,
                                     mover_pieces_mask, opponent_pieces_mask, 0,
                                     def_piece_complement);
       num_moves += allKnightSquaresFind(MOVE_WHITE, bit_brd->piece, &dest[num_moves], king_position,
                                         1, 0, 0, 0,
-                                        castle_eligibility, 0, 0,
+                                        castle_eligibility, 0,
                                         mover_pieces_mask, opponent_pieces_mask, 0,
                                         def_piece_complement);
       num_moves += allBishopRookQueenSquaresFind(MOVE_WHITE, bit_brd->piece,
                                         &dest[num_moves], king_position, 1, 0, 0, 0,
-                                        castle_eligibility, 0, 0,
+                                        castle_eligibility, 0,
                                         mover_pieces_mask, opponent_pieces_mask, 0,
                                         def_piece_complement);
     } else
     {
       num_moves += whiteKingSquaresFind(king_mask, king_position, attack_helper.move_candidate_mask,
                        bit_brd->piece, &dest[num_moves],
-                       castle_eligibility, 1, 0, 0,
+                       castle_eligibility, 1, 0,
                        mover_pieces_mask, opponent_pieces_mask, 0,
                        king_attack_mask, def_piece_complement);
 
       num_moves += allWhitePawnSquaresFind(bit_brd->piece, &dest[num_moves],
                                     en_passant_eligible_pawn, king_position,
                                     1, attack_helper.in_check, attack_helper.pin,
-                                    castle_eligibility, 0, 0,
+                                    castle_eligibility, 0,
                                     mover_pieces_mask, opponent_pieces_mask, 0,
                                     def_piece_complement);
       num_moves += allKnightSquaresFind(MOVE_WHITE, bit_brd->piece, &dest[num_moves], king_position,
                                         1, attack_helper.in_check, attack_helper.pin, attack_helper.move_test_needed,
-                                        castle_eligibility, 0, 0, 
+                                        castle_eligibility, 0,
                                         mover_pieces_mask, opponent_pieces_mask, 0,
                                         def_piece_complement);
       num_moves += allBishopRookQueenSquaresFind(MOVE_WHITE, bit_brd->piece,
                 &dest[num_moves], king_position, 1, attack_helper.in_check, attack_helper.pin, attack_helper.move_test_needed,
-                castle_eligibility, 0, 0,
+                castle_eligibility, 0, 
                 mover_pieces_mask, opponent_pieces_mask, 0,
                 def_piece_complement);
     }
@@ -4990,7 +4968,7 @@ unsigned long long allMoveCandidatesFind (
     {
       num_moves += blackKingSquaresFind(king_mask, king_position, attack_helper.move_candidate_mask,
                        bit_brd->piece, &dest[num_moves],
-                       castle_eligibility, 1, 0, 0,
+                       castle_eligibility, 1, 0,
                        mover_pieces_mask, opponent_pieces_mask, 0,
                        king_attack_mask,
                        def_piece_complement);
@@ -4998,24 +4976,24 @@ unsigned long long allMoveCandidatesFind (
       num_moves += allBlackPawnSquaresFind(bit_brd->piece, &dest[num_moves],
                                     en_passant_eligible_pawn, king_position,
                                     1, 0, 0,
-                                    castle_eligibility, 0, 0,
+                                    castle_eligibility, 0,
                                     mover_pieces_mask, opponent_pieces_mask, 0,
                                     def_piece_complement);
       num_moves += allKnightSquaresFind(MOVE_BLACK, bit_brd->piece, &dest[num_moves], king_position,
                                         1, 0, 0, 0,
-                                        castle_eligibility, 0, 0,
+                                        castle_eligibility, 0,
                                         mover_pieces_mask, opponent_pieces_mask, 0,
                                         def_piece_complement);
       num_moves += allBishopRookQueenSquaresFind(MOVE_BLACK, bit_brd->piece,
                                         &dest[num_moves], king_position, 1, 0, 0, 0,
-                                        castle_eligibility, 0, 0,
+                                        castle_eligibility, 0,
                                         mover_pieces_mask, opponent_pieces_mask, 0,
                                         def_piece_complement);
     } else
     {
       num_moves += blackKingSquaresFind(king_mask, king_position, attack_helper.move_candidate_mask,
                        bit_brd->piece, &dest[num_moves],
-                       castle_eligibility, 1, 0, 0,
+                       castle_eligibility, 1, 0,
                        mover_pieces_mask, opponent_pieces_mask, 0,
                        king_attack_mask,
                        def_piece_complement);
@@ -5023,17 +5001,17 @@ unsigned long long allMoveCandidatesFind (
       num_moves += allBlackPawnSquaresFind(bit_brd->piece, &dest[num_moves],
                                     en_passant_eligible_pawn, king_position,
                                     1, attack_helper.in_check, attack_helper.pin,
-                                    castle_eligibility, 0, 0,
+                                    castle_eligibility, 0,
                                     mover_pieces_mask, opponent_pieces_mask, 0,
                                     def_piece_complement);
       num_moves += allKnightSquaresFind(MOVE_BLACK, bit_brd->piece, &dest[num_moves], king_position,
                                         1, attack_helper.in_check, attack_helper.pin, attack_helper.move_test_needed,
-                                        castle_eligibility, 0, 0,
+                                        castle_eligibility, 0, 
                                         mover_pieces_mask, opponent_pieces_mask, 0,
                                         def_piece_complement);
       num_moves += allBishopRookQueenSquaresFind(MOVE_BLACK, bit_brd->piece,
              &dest[num_moves], king_position, 1, attack_helper.in_check, attack_helper.pin, attack_helper.move_test_needed,
-             castle_eligibility, 0, 0,
+             castle_eligibility, 0, 
              mover_pieces_mask, opponent_pieces_mask, 0,
              def_piece_complement);
     }
@@ -5059,15 +5037,14 @@ unsigned long long allWhiteMovePerft (
                            unsigned long long *restrict piece,
                            const unsigned int en_passant_eligible_pawn,
                            const castleEligibility_t castle_eligibility,
-                           const unsigned int depth,
-                           unsigned int ply,
+                           unsigned int depth,
                            const unsigned long long mover_pieces_mask,
                            const unsigned long long opponent_pieces_mask,
                            const unsigned int def_piece_complement)
 {
   unsigned long long num_moves = 0;
   kingAttackHelper_t attack_helper;
-  const unsigned int next_ply_is_last = (depth == ++ply);
+  const unsigned int next_ply_is_last = (1 == depth--);
   const unsigned long long  king_mask = piece[S_KING | S_WHITE];
   const unsigned int   king_position = bitbrdLowestIndexFromMaskGet(king_mask);
   const unsigned long long  king_attack_mask = kingAttack[king_position];
@@ -5090,7 +5067,7 @@ unsigned long long allWhiteMovePerft (
       {
         num_moves += whiteKingSquaresFind(king_mask, king_position, attack_helper.move_candidate_mask,
                        piece, 0,
-                       castle_eligibility, 0, depth, ply,
+                       castle_eligibility, 0, depth, 
                        mover_pieces_mask, opponent_pieces_mask, 1,
                        king_attack_mask,
                        def_piece_complement);
@@ -5098,24 +5075,24 @@ unsigned long long allWhiteMovePerft (
         num_moves += allWhitePawnSquaresFind(piece, 0,
                                     en_passant_eligible_pawn, king_position,
                                     0, 0, 0,
-                                    castle_eligibility, depth, ply,
+                                    castle_eligibility, depth,
                                     mover_pieces_mask, opponent_pieces_mask, 1,
                                     def_piece_complement);
         num_moves += allKnightSquaresFind(MOVE_WHITE, piece, 0, king_position,
                                         0, 0, 0, 0,
-                                        castle_eligibility, depth, ply,
+                                        castle_eligibility, depth,
                                         mover_pieces_mask, opponent_pieces_mask, 1,
                                         def_piece_complement);
         num_moves += allBishopRookQueenSquaresFind(MOVE_WHITE, piece,
                                         0, king_position, 0, 0, 0, 0,
-                                        castle_eligibility, depth, ply,
+                                        castle_eligibility, depth,
                                         mover_pieces_mask, opponent_pieces_mask, 1,
                                         def_piece_complement);
       } else
       {
         num_moves += whiteKingSquaresFind(king_mask, king_position, attack_helper.move_candidate_mask,
                        piece, 0,
-                       castle_eligibility, 0, depth, ply,
+                       castle_eligibility, 0, depth, 
                        mover_pieces_mask, opponent_pieces_mask, 0,
                        king_attack_mask,
                        def_piece_complement);
@@ -5123,17 +5100,17 @@ unsigned long long allWhiteMovePerft (
         num_moves += allWhitePawnSquaresFind(piece, 0,
                                     en_passant_eligible_pawn, king_position,
                                     0, 0, 0,
-                                    castle_eligibility, depth, ply,
+                                    castle_eligibility, depth,
                                     mover_pieces_mask, opponent_pieces_mask, 0,
                                     def_piece_complement);
         num_moves += allKnightSquaresFind(MOVE_WHITE, piece, 0, king_position,
                                         0, 0, 0, 0,
-                                        castle_eligibility, depth, ply,
+                                        castle_eligibility, depth,
                                         mover_pieces_mask, opponent_pieces_mask, 0,
                                         def_piece_complement);
         num_moves += allBishopRookQueenSquaresFind(MOVE_WHITE, piece,
                                         0, king_position, 0, 0, 0, 0,
-                                        castle_eligibility, depth, ply,
+                                        castle_eligibility, depth,
                                         mover_pieces_mask, opponent_pieces_mask, 0,
                                         def_piece_complement);
       }
@@ -5141,7 +5118,7 @@ unsigned long long allWhiteMovePerft (
     {
       num_moves += whiteKingSquaresFind(king_mask, king_position, attack_helper.move_candidate_mask,
                        piece, 0,
-                       castle_eligibility, 0, depth, ply,
+                       castle_eligibility, 0, depth, 
                        mover_pieces_mask, opponent_pieces_mask, next_ply_is_last,
                        king_attack_mask,
                        def_piece_complement);
@@ -5149,17 +5126,17 @@ unsigned long long allWhiteMovePerft (
       num_moves += allWhitePawnSquaresFind(piece, 0,
                                     en_passant_eligible_pawn, king_position,
                                     0, attack_helper.in_check, attack_helper.pin,
-                                    castle_eligibility, depth, ply,
+                                    castle_eligibility, depth,
                                     mover_pieces_mask, opponent_pieces_mask, next_ply_is_last,
                                     def_piece_complement);
       num_moves += allKnightSquaresFind(MOVE_WHITE, piece, 0, king_position,
                                         0, attack_helper.in_check, attack_helper.pin, attack_helper.move_test_needed,
-                                        castle_eligibility, depth, ply,
+                                        castle_eligibility, depth,
                                         mover_pieces_mask, opponent_pieces_mask, next_ply_is_last,
                                         def_piece_complement);
       num_moves += allBishopRookQueenSquaresFind(MOVE_WHITE, piece,
                              0, king_position, 0, attack_helper.in_check, attack_helper.pin, attack_helper.move_test_needed,
-                             castle_eligibility, depth, ply,
+                             castle_eligibility, depth,
                              mover_pieces_mask, opponent_pieces_mask, next_ply_is_last,
                              def_piece_complement);
     }
@@ -5183,15 +5160,14 @@ unsigned long long allBlackMovePerft (
                            unsigned long long *restrict piece,
                            const unsigned int en_passant_eligible_pawn,
                            const castleEligibility_t castle_eligibility,
-                           const unsigned int depth,
-                           unsigned int ply,
+                           unsigned int depth,
                            const unsigned long long mover_pieces_mask,
                            const unsigned long long opponent_pieces_mask,
                            const unsigned int def_piece_complement)
 {
   unsigned long long num_moves = 0;
   kingAttackHelper_t attack_helper;
-  const unsigned int next_ply_is_last = (depth == ++ply);
+  const unsigned int next_ply_is_last = (1 == depth--);
   const unsigned long long  king_mask = piece[S_KING | S_BLACK];
   const unsigned int   king_position = bitbrdLowestIndexFromMaskGet(king_mask);
   const unsigned long long  king_attack_mask = kingAttack[king_position];
@@ -5214,7 +5190,7 @@ unsigned long long allBlackMovePerft (
       {
         num_moves += blackKingSquaresFind(king_mask, king_position, attack_helper.move_candidate_mask,
                        piece, 0,
-                       castle_eligibility, 0, depth, ply,
+                       castle_eligibility, 0, depth, 
                        mover_pieces_mask, opponent_pieces_mask, 1,
                        king_attack_mask,
                        def_piece_complement);
@@ -5222,24 +5198,24 @@ unsigned long long allBlackMovePerft (
         num_moves += allBlackPawnSquaresFind(piece, 0,
                                     en_passant_eligible_pawn, king_position,
                                     0, 0, 0,
-                                    castle_eligibility, depth, ply,
+                                    castle_eligibility, depth,
                                     mover_pieces_mask, opponent_pieces_mask, 1,
                                     def_piece_complement);
         num_moves += allKnightSquaresFind(MOVE_BLACK, piece, 0, king_position,
                                         0, 0, 0, 0,
-                                        castle_eligibility, depth, ply,
+                                        castle_eligibility, depth,
                                         mover_pieces_mask, opponent_pieces_mask, 1,
                                         def_piece_complement);
         num_moves += allBishopRookQueenSquaresFind(MOVE_BLACK, piece,
                                         0, king_position, 0, 0, 0, 0,
-                                        castle_eligibility, depth, ply,
+                                        castle_eligibility, depth,
                                         mover_pieces_mask, opponent_pieces_mask, 1,
                                         def_piece_complement);
       } else
       {
         num_moves += blackKingSquaresFind(king_mask, king_position, attack_helper.move_candidate_mask,
                        piece, 0,
-                       castle_eligibility, 0, depth, ply,
+                       castle_eligibility, 0, depth,
                        mover_pieces_mask, opponent_pieces_mask, 0,
                        king_attack_mask,
                        def_piece_complement);
@@ -5247,17 +5223,17 @@ unsigned long long allBlackMovePerft (
         num_moves += allBlackPawnSquaresFind(piece, 0,
                                     en_passant_eligible_pawn, king_position,
                                     0, 0, 0,
-                                    castle_eligibility, depth, ply,
+                                    castle_eligibility, depth,
                                     mover_pieces_mask, opponent_pieces_mask, 0,
                                     def_piece_complement);
         num_moves += allKnightSquaresFind(MOVE_BLACK, piece, 0, king_position,
                                         0, 0, 0, 0,
-                                        castle_eligibility, depth, ply,
+                                        castle_eligibility, depth,
                                         mover_pieces_mask, opponent_pieces_mask, 0,
                                         def_piece_complement);
         num_moves += allBishopRookQueenSquaresFind(MOVE_BLACK, piece,
                                         0, king_position, 0, 0, 0, 0,
-                                        castle_eligibility, depth, ply,
+                                        castle_eligibility, depth,
                                         mover_pieces_mask, opponent_pieces_mask, 0,
                                         def_piece_complement);
       }
@@ -5265,7 +5241,7 @@ unsigned long long allBlackMovePerft (
     {
       num_moves += blackKingSquaresFind(king_mask, king_position, attack_helper.move_candidate_mask,
                        piece, 0,
-                       castle_eligibility, 0, depth, ply,
+                       castle_eligibility, 0, depth,
                        mover_pieces_mask, opponent_pieces_mask, next_ply_is_last,
                        king_attack_mask,
                        def_piece_complement);
@@ -5273,17 +5249,17 @@ unsigned long long allBlackMovePerft (
       num_moves += allBlackPawnSquaresFind(piece, 0,
                                     en_passant_eligible_pawn, king_position,
                                     0, attack_helper.in_check, attack_helper.pin,
-                                    castle_eligibility, depth, ply,
+                                    castle_eligibility, depth,
                                     mover_pieces_mask, opponent_pieces_mask, next_ply_is_last,
                                     def_piece_complement);
       num_moves += allKnightSquaresFind(MOVE_BLACK, piece, 0, king_position,
                                         0, attack_helper.in_check, attack_helper.pin, attack_helper.move_test_needed,
-                                        castle_eligibility, depth, ply,
+                                        castle_eligibility, depth,
                                         mover_pieces_mask, opponent_pieces_mask, next_ply_is_last,
                                         def_piece_complement);
       num_moves += allBishopRookQueenSquaresFind(MOVE_BLACK, piece,
                            0, king_position, 0, attack_helper.in_check, attack_helper.pin, attack_helper.move_test_needed,
-                           castle_eligibility, depth, ply,
+                           castle_eligibility, depth,
                            mover_pieces_mask, opponent_pieces_mask, next_ply_is_last,
                            def_piece_complement);
     }

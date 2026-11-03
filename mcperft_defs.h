@@ -177,17 +177,6 @@ typedef struct
   unsigned long long end_workload_number; // Ending workload in file. Can be 0.
 } workloadHeader_t;
 
-/* Workload Record. 
-** The structure is padded to make sure that the size is divisible by 8.
-** The structure size is 40 bytes.
-*/
-typedef struct __attribute__((packed))
-{
-  unsigned char position[32]; /* 32-byte Board Position */
-  brdCtrl_u brd_info;  /* 2-byte board control information */
-} workloadRecord_t;
-
- 
 typedef struct __attribute__((packed))
 { 
   unsigned short high;
@@ -526,16 +515,6 @@ typedef struct
   */
   unsigned long long processed_new_moves;
 } brdGenThreadStatus_t;
-
-/* Board Database Generation Thread Status.
-*/
-typedef struct
-{
-  unsigned int depth;
-  unsigned int split_factor;
-  unsigned long long total_workloads;
-  unsigned long long workloads_processed;
-} countSetupThreadStatus_t;
 
 /* Board Database Aggregation Thread Status.
 */
