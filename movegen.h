@@ -158,6 +158,8 @@ typedef struct
   unsigned long long move_candidate_mask;
 } kingAttackHelper_t __attribute__((aligned(32)));
 
+/* This structure is used in pinCompute().
+*/
 typedef struct
 {
   unsigned long long knight_danger_mask;
@@ -165,6 +167,21 @@ typedef struct
   unsigned long long udlr_danger_mask;
   unsigned long long pad;
 } dangerMap_t __attribute__((aligned(32)));
+
+/* This structure is used in penultimatePlyMoveCountReuseSetup().
+** The content is similar to dangerMap_t, but has complete information
+** for pawns and kings, and also excludes king pinning squares from 
+** diagonal and udlr danger masks.
+*/
+typedef struct
+{
+  unsigned long long knight_danger_mask;
+  unsigned long long diagonal_danger_mask;
+  unsigned long long udlr_danger_mask;
+  unsigned long long white_pawn_danger_mask;
+  unsigned long long black_pawn_danger_mask;
+  unsigned long long king_danger_mask;
+} noisyMap_t;
 
 
 
