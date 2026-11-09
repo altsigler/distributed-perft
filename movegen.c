@@ -725,6 +725,100 @@ static kingAttackHelper_t pinCompute (
 }
 
 /******************************************************************************
+** Adjust move count for the Penultimate Ply Move Count Reuse feature.
+**
+** Return Value:
+**   Move Adjustment.
+******************************************************************************/
+__attribute__((always_inline)) inline 
+static unsigned long long penultimatePlyMoveAdjust (
+                        const color_e whose_move, 
+                        unsigned long long *const piece, 
+                        const unsigned long long move_adjust,
+                        const unsigned int from_index,
+                        const unsigned int to_index,
+                        const unsigned long long mover_pieces_mask,
+                        const unsigned long long opponent_pieces_mask)
+{
+  (void) mover_pieces_mask;
+  (void) opponent_pieces_mask;
+  unsigned long long move_count = 0;
+
+
+  if (move_adjust & (1LLU << from_index))
+  {
+    if (whose_move == MOVE_WHITE)
+    {
+      const unsigned long long pawn_attack_mask = blackPawnAttack[from_index];
+      long long move_delta = (long long) __builtin_popcountll(pawn_attack_mask & piece[S_BLACK | S_PAWN]);
+
+      if (0 != ((1LLU << (from_index + 8)) & piece[S_BLACK | S_PAWN]))
+      {
+        move_delta -= 1;
+      }
+
+      if ((from_index >> 3) == 0) 
+      {
+        move_delta *= 4;
+      }
+      move_count -= (unsigned long long) move_delta;
+    } else
+    {
+      const unsigned long long pawn_attack_mask = whitePawnAttack[from_index];
+      long long move_delta = (long long) __builtin_popcountll(pawn_attack_mask & piece[S_WHITE | S_PAWN]);
+
+      if (0 != ((1LLU << (from_index - 8)) & piece[S_WHITE | S_PAWN]))
+      {
+        move_delta -= 1;
+      }
+
+      if ((from_index >> 3) == 7) 
+      {
+        move_delta *= 4;
+      }
+      move_count -= (unsigned long long) move_delta;
+    }
+  }
+
+  if (move_adjust & (1LLU << to_index))
+  {
+    if (whose_move == MOVE_WHITE)
+    {
+      const unsigned long long pawn_attack_mask = blackPawnAttack[to_index];
+      long long move_delta = (long long) __builtin_popcountll(pawn_attack_mask & piece[S_BLACK | S_PAWN]);
+
+      if (0 != ((1LLU << (to_index + 8)) & piece[S_BLACK | S_PAWN]))
+      {
+        move_delta -= 1;
+      }
+
+      if ((to_index >> 3) == 0) 
+      {
+        move_delta *= 4;
+      }
+      move_count += (unsigned long long) move_delta;
+    } else
+    {
+      const unsigned long long pawn_attack_mask = whitePawnAttack[to_index];
+      long long move_delta = (long long) __builtin_popcountll(pawn_attack_mask & piece[S_WHITE | S_PAWN]);
+
+      if (0 != ((1LLU << (to_index - 8)) & piece[S_WHITE | S_PAWN]))
+      {
+        move_delta -= 1;
+      }
+
+      if ((to_index >> 3) == 7) 
+      {
+        move_delta *= 4;
+      }
+      move_count += (unsigned long long) move_delta;
+    }
+  }
+
+  return move_count;
+}
+
+/******************************************************************************
 ** Find all quite and noisy squares.
 **
 ** Return Values:
@@ -734,6 +828,7 @@ static kingAttackHelper_t pinCompute (
 __attribute__((always_inline)) inline 
 static unsigned long long penultimatePlyMoveCountReuseSetup (
                         unsigned long long *quiet_move_mask,
+                        unsigned long long *move_adjust,
                         const color_e whose_move, 
                         const unsigned int en_passant_eligible_pawn,
                         unsigned long long *const piece, 
@@ -851,79 +946,126 @@ static unsigned long long penultimatePlyMoveCountReuseSetup (
   ***
   *** Not all squares that prevent a pawn from moving forward or squares that 
   *** can be captured by a pawn are noisy.
-  *** The move count for some pawn movements and captures can be adjusted by 
-  *** simply knowing which square is being emptied or which square is being
-  *** filled. For such predictable move counts we create a lookup table indexed by the
-  *** interface number which contains the move adjustment value. The move adjustment can 
-  *** be -2, -1, 0, 1, or 2. The move adjustment indexed by the moving piece
-  *** original position is subtracted from total moves, and the move adjustment
-  *** indexed by the moving piece destination is added to the total moves.
+  *** If a pawn is not pinned then it is able to capture or move one or two 
+  *** squares. The pawn moves are easy to predict, so the squares affected by
+  *** non-pinned pawns are marked, so that this move count adjustment can 
+  *** be done during the piece movement operation.
   ***
-  *** The move adjustment for some pawns cannot be predicted with a simple lookup
-  *** in the adjustment table. Specifically the number of moves for pinned pawns 
-  *** depends on the pin mask, and the number of moves for pawns in their starting 
-  *** position depends on which square is blocked and where the blocking piece moved 
-  *** from and to. 
-  *** For pawns for which the adjustment cannot be easily predicted, the affected 
-  *** squares are marked as "noisy", and no adjustment is done.
-  ***
+  *** For now the forward movement for pawns from the default starting position 
+  *** is not supported. The code for figuring out the adjustment for one/two
+  *** square moves seems to negate any benefits. Perhaps this can be reconsidered
+  *** in the future. However captures from the default start position are supported.
   **/
+
   const unsigned long long opponent_pawn_mask = piece[(opponent_move << 3) | S_PAWN];
+  unsigned long long pinned_pawns = opponent_pawn_mask & attack_helper.pin;
   if (opponent_move == MOVE_WHITE)
   {
     constexpr unsigned long long row1_mask = 0x000000000000ff00;
 
-    // Determine which squares the pawns can capture.
+    /* For now we exclude starting row pawns in order to avoid 
+    ** dealiing with one/two square moves.
+    */
+    pinned_pawns |= (opponent_pawn_mask & row1_mask);
+
+    // Determine which squares the pinned pawns can capture.
     // We don't need to worry about en pasant captures.
-    const unsigned long long capture_left = ((opponent_pawn_mask & ~col0_mask) << 7);
-    const unsigned long long capture_right = ((opponent_pawn_mask & ~col7_mask) << 9);
+    const unsigned long long capture_left = ((pinned_pawns & ~col0_mask) << 7);
+    const unsigned long long capture_right = ((pinned_pawns & ~col7_mask) << 9);
+
+    common_noisy_mask |= capture_left | capture_right;
+
+    // Determine which squares pawns eligible for adjustment can capture.
+    const unsigned long long eligible_capture_pawns = opponent_pawn_mask ^ pinned_pawns;
+    const unsigned long long adjustable_capture_left = ((eligible_capture_pawns & ~col0_mask) << 7);
+    const unsigned long long adjustable_capture_right = ((eligible_capture_pawns & ~col7_mask) << 9);
+
+    /* Mark squares that need to be adjusted.
+    */
+    *move_adjust = adjustable_capture_left | adjustable_capture_right;
+
+    /* Determine which squares are noisy for pinned pawn moves.
+    */
 
     // Determine to which squares pawn can move by one quare.
-    const unsigned long long move_one = (opponent_pawn_mask << 8);
+    const unsigned long long move_one = (pinned_pawns << 8);
 
     // Determine which pawns can move forward two squares.
 
     // Eliminate all pawns that are not in row 1.
-    unsigned long long move_two = (opponent_pawn_mask & row1_mask);
+    unsigned long long move_two = (pinned_pawns & row1_mask);
 
-    // Eliminate all pawns that can't move at least one square.
-    move_two <<= 8;
-    move_two &= ~any_color_pieces_mask;
-    move_two <<= 8; // Move the remaining pawns up one row.
+    move_two <<= 16;
 
     /* Update the noisy mask with all the squares where pawns can move.
     */
-    common_noisy_mask |= capture_left | capture_right | move_one | move_two;
+    common_noisy_mask |=  move_one | move_two;
+
+    /* Determine which pawns can move forward and mark those squares for
+    ** move adjustment.
+    */
+    const unsigned long long move_one_capable = (eligible_capture_pawns << 8);
+    move_two = (eligible_capture_pawns & row1_mask);
+    move_two <<= 16;
+
+    *move_adjust |= move_one_capable | move_two;
+
   } else
   {
     constexpr unsigned long long row6_mask = 0x00ff000000000000;
 
-    // Determine which squares the pawns can capture.
+    /* For now we exclude starting row pawns in order to avoid 
+    ** dealiing with one/two square moves.
+    */
+    pinned_pawns |= (opponent_pawn_mask & row6_mask);
+
+    // Determine which squares the pinned pawns can capture.
     // We don't need to worry about en pasant captures.
-    const unsigned long long capture_left = ((opponent_pawn_mask & ~col7_mask) >> 7);
-    const unsigned long long capture_right = ((opponent_pawn_mask & ~col0_mask) >> 9);
+    const unsigned long long capture_left = ((pinned_pawns & ~col7_mask) >> 7);
+    const unsigned long long capture_right = ((pinned_pawns & ~col0_mask) >> 9);
+
+    common_noisy_mask |= capture_left | capture_right;
+
+    // Determine which squares pawns eligible for adjustment can capture.
+    const unsigned long long eligible_capture_pawns = opponent_pawn_mask ^ pinned_pawns;
+    const unsigned long long adjustable_capture_left = ((eligible_capture_pawns & ~col7_mask) >> 7);
+    const unsigned long long adjustable_capture_right = ((eligible_capture_pawns & ~col0_mask) >> 9);
+
+    /* Mark squares that need to be adjusted.
+    */
+    *move_adjust = adjustable_capture_left | adjustable_capture_right;
+
+    /* Determine which squares are noisy for pinned pawn moves.
+    */
 
     // Determine to which squares pawn can move by one quare.
-    const unsigned long long move_one = (opponent_pawn_mask >> 8);
+    const unsigned long long move_one = (pinned_pawns >> 8);
 
     // Determine which pawns can move forward two squares.
 
     // Eliminate all pawns that are not in row 1.
-    unsigned long long move_two = (opponent_pawn_mask & row6_mask);
+    unsigned long long move_two = (pinned_pawns & row6_mask);
 
-    // Eliminate all pawns that can't move at least one square.
-    move_two >>= 8;
-    move_two &= ~any_color_pieces_mask;
-    move_two >>= 8; // Move the remaining pawns up one row.
+    move_two >>= 16;
 
     /* Update the noisy mask with all the squares where pawns can move.
     */
-    common_noisy_mask |= capture_left | capture_right | move_one | move_two;
+    common_noisy_mask |= move_one | move_two;
+
+    /* Determine which pawns can move forward and mark those squares for
+    ** move adjustment.
+    */
+    const unsigned long long move_one_capable = (eligible_capture_pawns >> 8);
+    move_two = (eligible_capture_pawns & row6_mask);
+    move_two >>= 16;
+    
+    *move_adjust |= move_one_capable | move_two;
   }
+
 
   /*** Knight
   **** 
-  **** Nothing to do because knoghts can't be blocked.
+  **** Nothing to do because knights can't be blocked.
   ***/
 
   /**** Bishop/Queen
@@ -1762,7 +1904,8 @@ static unsigned long long whiteKingSquaresFind (
                             const unsigned long long king_attack_mask,
                             const unsigned int def_piece_complement,
                             const unsigned long long num_reuse_moves,
-                            const unsigned long long quiet_move_mask)
+                            const unsigned long long quiet_move_mask,
+                            const unsigned long long move_adjust)
 {
   if (!move_candidate_mask)
                   return 0;
@@ -1798,7 +1941,14 @@ static unsigned long long whiteKingSquaresFind (
         {
           if (0 == (quiet_move_mask & mask1))
           {
-            mn += num_reuse_moves;
+            mn += num_reuse_moves; 
+            if (0 != (move_adjust & mask1))
+            {
+              const unsigned int index = bitbrdLowestIndexFromMaskGet(mask2);
+              mn += penultimatePlyMoveAdjust (MOVE_WHITE, piece, move_adjust,
+                                                piece_index, index, 
+                                                mover_pieces_mask, opponent_pieces_mask);
+            }
           } else
           {
             MOVE_APPLY (piece, 1,
@@ -2025,7 +2175,8 @@ static unsigned long long blackKingSquaresFind (
                             const unsigned long long king_attack_mask,
                             const unsigned int def_piece_complement,
                             const unsigned long long num_reuse_moves,
-                            const unsigned long long quiet_move_mask)
+                            const unsigned long long quiet_move_mask,
+                            const unsigned long long move_adjust)
 {
   if (!move_candidate_mask)
                   return 0;
@@ -2061,6 +2212,13 @@ static unsigned long long blackKingSquaresFind (
           if (0 == (quiet_move_mask & mask1))
           {
             mn += num_reuse_moves; 
+            if (0 != (move_adjust & mask1))
+            {
+              const unsigned int index = bitbrdLowestIndexFromMaskGet(mask2);
+              mn += penultimatePlyMoveAdjust (MOVE_BLACK, piece, move_adjust,
+                                                piece_index, index, 
+                                                mover_pieces_mask, opponent_pieces_mask);
+            }
           } else
           {
             MOVE_APPLY (piece, 1,
@@ -2288,7 +2446,8 @@ static unsigned long long allBishopRookQueenSquaresFind (
                                    const unsigned long long num_reuse_moves,
                                    const unsigned long long bishop_quiet_move_mask,
                                    const unsigned long long rook_quiet_move_mask,
-                                   const unsigned long long queen_quiet_move_mask)
+                                   const unsigned long long queen_quiet_move_mask,
+                                   const unsigned long long move_adjust)
 {
   const unsigned long long any_color_pieces_mask = mover_pieces_mask | opponent_pieces_mask;
   unsigned long long mn = 0;
@@ -2399,7 +2558,18 @@ static unsigned long long allBishopRookQueenSquaresFind (
             {
               if (0 == (bishop_quiet_move_mask & mask1))
               {
-                mn += num_reuse_moves;
+                if (0 == move_adjust)
+                {
+                  unreachable();
+                }
+                mn += num_reuse_moves; 
+                if (0 != (move_adjust & mask1))
+                {
+                  const unsigned int index = bitbrdLowestIndexFromMaskGet(mask2);
+                  mn += penultimatePlyMoveAdjust (whose_move, piece, move_adjust,
+                                                piece_index, index, 
+                                                mover_pieces_mask, opponent_pieces_mask);
+                }
               } else
               {
                 MOVE_APPLY (piece, 1,
@@ -2566,7 +2736,48 @@ static unsigned long long allBishopRookQueenSquaresFind (
             {
               if (0 == (rook_quiet_move_mask & mask1))
               {
+#if 0 // HACK - ROOK
+              MOVE_APPLY (piece, 1,
+                        p1,0,0,
+                        mask1,0,0);
+
+              unsigned long long real_move_count = allMoveCandidatesLastPlyFind(whose_move ^ 1, piece, 0, castle_eligibility,
+                                mover_pieces_mask ^ mask1, opponent_pieces_mask, def_piece_complement);
+              MOVE_APPLY (piece, 1,
+                        p1,0,0,
+                        mask1,0,0);
+
+               const unsigned int index = bitbrdLowestIndexFromMaskGet(mask2);
+               unsigned long long adjustment = 
+                       penultimatePlyMoveAdjust (whose_move, piece, move_adjust,
+                                                piece_index, index, 
+                                                mover_pieces_mask, opponent_pieces_mask);
+
+               if ((num_reuse_moves + adjustment) == real_move_count)
+               {
+                 mn += real_move_count;
+               } else
+               {
+                 printf ("real_move_count:%llu num_reuse_moves:%llu adjustment:%lld\n",
+                            real_move_count, num_reuse_moves, (long long) adjustment);
+                 bitbrdPrint (piece);
+                 MOVE_APPLY (piece, 1,
+                        p1,0,0,
+                        mask1,0,0);
+                 bitbrdPrint (piece);
+                 exit (-1);
+               }
+#else
+
                 mn += num_reuse_moves;
+                if (0 != (move_adjust & mask1))
+                {
+                  const unsigned int index = bitbrdLowestIndexFromMaskGet(mask2);
+                  mn += penultimatePlyMoveAdjust (whose_move, piece, move_adjust,
+                                                piece_index, index, 
+                                                mover_pieces_mask, opponent_pieces_mask);
+                }
+#endif
               } else
               {
                 MOVE_APPLY (piece, 1,
@@ -2726,6 +2937,13 @@ static unsigned long long allBishopRookQueenSquaresFind (
               if (0 == (queen_quiet_move_mask & mask1))
               {
                 mn += num_reuse_moves;
+                if (0 != (move_adjust & mask1))
+                {
+                  const unsigned int index = bitbrdLowestIndexFromMaskGet(mask2);
+                  mn += penultimatePlyMoveAdjust (whose_move, piece, move_adjust,
+                                                piece_index, index, 
+                                                mover_pieces_mask, opponent_pieces_mask);
+                }
               } else
               {
                 MOVE_APPLY (piece, 1,
@@ -2958,7 +3176,8 @@ static unsigned long long allKnightSquaresFind (
                                     const unsigned int last_ply,
                                     const unsigned int def_piece_complement,
                                     const unsigned long long num_reuse_moves,
-                                    const unsigned long long quiet_move_mask)
+                                    const unsigned long long quiet_move_mask,
+                                    const unsigned long long move_adjust)
 {
   const unsigned char p1 = (unsigned char) (S_KNIGHT | (whose_move << 3));
   unsigned long long piece_mask = piece[p1];
@@ -3067,7 +3286,45 @@ static unsigned long long allKnightSquaresFind (
           {
             if (0 == (quiet_move_mask & mask1))
             {
-              mn += num_reuse_moves;
+#if 0 // HACK - KNIGHT
+              MOVE_APPLY (piece, 1,
+                        p1,0,0,
+                        mask1,0,0);
+
+              unsigned long long real_move_count = allMoveCandidatesLastPlyFind(whose_move ^ 1, piece, 0, castle_eligibility,
+                                mover_pieces_mask ^ mask1, opponent_pieces_mask, def_piece_complement);
+              MOVE_APPLY (piece, 1,
+                        p1,0,0,
+                        mask1,0,0);
+
+               unsigned long long adjustment = 
+                       penultimatePlyMoveAdjust (whose_move, piece, move_adjust,
+                                                piece_index, index, 
+                                                mover_pieces_mask, opponent_pieces_mask);
+
+               if ((num_reuse_moves + adjustment) == real_move_count)
+               {
+                 mn += real_move_count;
+               } else
+               {
+                 printf ("real_move_count:%llu num_reuse_moves:%llu adjustment:%lld\n",
+                            real_move_count, num_reuse_moves, (long long) adjustment);
+                 bitbrdPrint (piece);
+                 MOVE_APPLY (piece, 1,
+                        p1,0,0,
+                        mask1,0,0);
+                 bitbrdPrint (piece);
+                 exit (-1);
+               }
+#else
+              mn += num_reuse_moves; 
+              if (0 != (move_adjust & mask1))
+              {
+                mn += penultimatePlyMoveAdjust (whose_move, piece, move_adjust,
+                                                piece_index, index, 
+                                                mover_pieces_mask, opponent_pieces_mask);
+              }
+#endif
             } else
             {
               MOVE_APPLY (piece, 1,
@@ -3216,7 +3473,8 @@ static unsigned long long allWhitePawnSquaresFind (
                                     const unsigned int last_ply,
                                     const unsigned int def_piece_complement,
                                     const unsigned long long num_reuse_moves,
-                                    const unsigned long long quiet_move_mask)
+                                    const unsigned long long quiet_move_mask,
+                                    const unsigned long long move_adjust)
 {
   unsigned long long piece_mask = piece[S_PAWN | S_WHITE];
 
@@ -3317,7 +3575,13 @@ static unsigned long long allWhitePawnSquaresFind (
           {
             if (0 == (quiet_move_mask & mask1))
             {
-              mn += num_reuse_moves;
+              mn += num_reuse_moves; 
+              if (0 != (move_adjust & mask1))
+              {
+                mn += penultimatePlyMoveAdjust (MOVE_WHITE, piece, move_adjust,
+                                                piece_index, piece_index + 8, 
+                                                mover_pieces_mask, opponent_pieces_mask);
+              }
             } else
             {
               MOVE_APPLY (piece, 1,
@@ -3450,7 +3714,13 @@ static unsigned long long allWhitePawnSquaresFind (
             {
               if ((0 == next_en_passant_eligible_pawn) && (0 == (quiet_move_mask & mask1)))
               {
-                mn += num_reuse_moves;
+                mn += num_reuse_moves; 
+                if (0 != (move_adjust & mask1))
+                {
+                  mn += penultimatePlyMoveAdjust (MOVE_WHITE, piece, move_adjust,
+                                                piece_index, piece_index + 16, 
+                                                mover_pieces_mask, opponent_pieces_mask);
+                }
               } else
               {
                 MOVE_APPLY (piece, 1,
@@ -4284,7 +4554,8 @@ static unsigned long long allBlackPawnSquaresFind (
                                     const unsigned int last_ply,
                                     const unsigned int def_piece_complement,
                                     const unsigned long long num_reuse_moves,
-                                    const unsigned long long quiet_move_mask)
+                                    const unsigned long long quiet_move_mask,
+                                    const unsigned long long move_adjust)
 {
   unsigned long long piece_mask = piece[S_PAWN | S_BLACK];
 
@@ -4384,7 +4655,13 @@ static unsigned long long allBlackPawnSquaresFind (
           {
             if (0 == (quiet_move_mask & mask1))
             {
-              mn += num_reuse_moves;
+              mn += num_reuse_moves; 
+              if (0 != (move_adjust & mask1))
+              {
+                mn += penultimatePlyMoveAdjust (MOVE_BLACK, piece, move_adjust,
+                                                piece_index, piece_index - 8, 
+                                                mover_pieces_mask, opponent_pieces_mask);
+              }
             } else
             {
               MOVE_APPLY (piece, 1,
@@ -4519,7 +4796,13 @@ static unsigned long long allBlackPawnSquaresFind (
             {
               if ((0 == next_en_passant_eligible_pawn) && (0 == (quiet_move_mask & mask1)))
               {
-                mn += num_reuse_moves;
+                mn += num_reuse_moves; 
+                if (0 != (move_adjust & mask1))
+                {
+                  mn += penultimatePlyMoveAdjust (MOVE_BLACK, piece, move_adjust,
+                                                piece_index, piece_index - 16, 
+                                                mover_pieces_mask, opponent_pieces_mask);
+                }
               } else
               {
                 MOVE_APPLY (piece, 1,
@@ -5387,50 +5670,50 @@ unsigned long long allMoveCandidatesFind (
                        bit_brd->piece, &dest[num_moves],
                        castle_eligibility, 1, 0,
                        mover_pieces_mask, opponent_pieces_mask, 0,
-                       king_attack_mask, def_piece_complement, 0, ~0LLU);
+                       king_attack_mask, def_piece_complement, 0, ~0LLU, 0);
 
       num_moves += allWhitePawnSquaresFind(bit_brd->piece, &dest[num_moves],
                                     en_passant_eligible_pawn, king_position,
                                     1, 0, 0,
                                     castle_eligibility, 0,
                                     mover_pieces_mask, opponent_pieces_mask, 0,
-                                    def_piece_complement, 0, ~0LLU);
+                                    def_piece_complement, 0, ~0LLU, 0);
       num_moves += allKnightSquaresFind(MOVE_WHITE, bit_brd->piece, &dest[num_moves], king_position,
                                         1, 0, 0, 0,
                                         castle_eligibility, 0,
                                         mover_pieces_mask, opponent_pieces_mask, 0,
-                                        def_piece_complement, 0, ~0LLU);
+                                        def_piece_complement, 0, ~0LLU, 0);
       num_moves += allBishopRookQueenSquaresFind(MOVE_WHITE, bit_brd->piece,
                                         &dest[num_moves], king_position, 1, 0, 0, 0,
                                         castle_eligibility, 0,
                                         mover_pieces_mask, opponent_pieces_mask, 0,
                                         def_piece_complement,
-                                        0, ~0LLU, ~0LLU, ~0LLU);
+                                        0, ~0LLU, ~0LLU, ~0LLU, 0);
     } else
     {
       num_moves += whiteKingSquaresFind(king_mask, king_position, attack_helper.move_candidate_mask,
                        bit_brd->piece, &dest[num_moves],
                        castle_eligibility, 1, 0,
                        mover_pieces_mask, opponent_pieces_mask, 0,
-                       king_attack_mask, def_piece_complement, 0, ~0LLU);
+                       king_attack_mask, def_piece_complement, 0, ~0LLU, 0);
 
       num_moves += allWhitePawnSquaresFind(bit_brd->piece, &dest[num_moves],
                                     en_passant_eligible_pawn, king_position,
                                     1, attack_helper.in_check, attack_helper.pin,
                                     castle_eligibility, 0,
                                     mover_pieces_mask, opponent_pieces_mask, 0,
-                                    def_piece_complement, 0, ~0LLU);
+                                    def_piece_complement, 0, ~0LLU, 0);
       num_moves += allKnightSquaresFind(MOVE_WHITE, bit_brd->piece, &dest[num_moves], king_position,
                                         1, attack_helper.in_check, attack_helper.pin, attack_helper.move_test_needed,
                                         castle_eligibility, 0,
                                         mover_pieces_mask, opponent_pieces_mask, 0,
-                                        def_piece_complement, 0, ~0LLU);
+                                        def_piece_complement, 0, ~0LLU, 0);
       num_moves += allBishopRookQueenSquaresFind(MOVE_WHITE, bit_brd->piece,
                 &dest[num_moves], king_position, 1, attack_helper.in_check, attack_helper.pin, attack_helper.move_test_needed,
                 castle_eligibility, 0, 
                 mover_pieces_mask, opponent_pieces_mask, 0,
                 def_piece_complement,
-                0, ~0LLU, ~0LLU, ~0LLU);
+                0, ~0LLU, ~0LLU, ~0LLU, 0);
     }
   } else 
   {
@@ -5460,25 +5743,25 @@ unsigned long long allMoveCandidatesFind (
                        castle_eligibility, 1, 0,
                        mover_pieces_mask, opponent_pieces_mask, 0,
                        king_attack_mask,
-                       def_piece_complement, 0, ~0LLU);
+                       def_piece_complement, 0, ~0LLU, 0);
 
       num_moves += allBlackPawnSquaresFind(bit_brd->piece, &dest[num_moves],
                                     en_passant_eligible_pawn, king_position,
                                     1, 0, 0,
                                     castle_eligibility, 0,
                                     mover_pieces_mask, opponent_pieces_mask, 0,
-                                    def_piece_complement, 0, ~0LLU);
+                                    def_piece_complement, 0, ~0LLU, 0);
       num_moves += allKnightSquaresFind(MOVE_BLACK, bit_brd->piece, &dest[num_moves], king_position,
                                         1, 0, 0, 0,
                                         castle_eligibility, 0,
                                         mover_pieces_mask, opponent_pieces_mask, 0,
-                                        def_piece_complement, 0, ~0LLU);
+                                        def_piece_complement, 0, ~0LLU, 0);
       num_moves += allBishopRookQueenSquaresFind(MOVE_BLACK, bit_brd->piece,
                                         &dest[num_moves], king_position, 1, 0, 0, 0,
                                         castle_eligibility, 0,
                                         mover_pieces_mask, opponent_pieces_mask, 0,
                                         def_piece_complement,
-                                        0, ~0LLU, ~0LLU, ~0LLU);
+                                        0, ~0LLU, ~0LLU, ~0LLU, 0);
     } else
     {
       num_moves += blackKingSquaresFind(king_mask, king_position, attack_helper.move_candidate_mask,
@@ -5486,25 +5769,25 @@ unsigned long long allMoveCandidatesFind (
                        castle_eligibility, 1, 0,
                        mover_pieces_mask, opponent_pieces_mask, 0,
                        king_attack_mask,
-                       def_piece_complement, 0, ~0LLU);
+                       def_piece_complement, 0, ~0LLU, 0);
 
       num_moves += allBlackPawnSquaresFind(bit_brd->piece, &dest[num_moves],
                                     en_passant_eligible_pawn, king_position,
                                     1, attack_helper.in_check, attack_helper.pin,
                                     castle_eligibility, 0,
                                     mover_pieces_mask, opponent_pieces_mask, 0,
-                                    def_piece_complement, 0, ~0LLU);
+                                    def_piece_complement, 0, ~0LLU, 0);
       num_moves += allKnightSquaresFind(MOVE_BLACK, bit_brd->piece, &dest[num_moves], king_position,
                                         1, attack_helper.in_check, attack_helper.pin, attack_helper.move_test_needed,
                                         castle_eligibility, 0, 
                                         mover_pieces_mask, opponent_pieces_mask, 0,
-                                        def_piece_complement, 0, ~0LLU);
+                                        def_piece_complement, 0, ~0LLU, 0);
       num_moves += allBishopRookQueenSquaresFind(MOVE_BLACK, bit_brd->piece,
              &dest[num_moves], king_position, 1, attack_helper.in_check, attack_helper.pin, attack_helper.move_test_needed,
              castle_eligibility, 0, 
              mover_pieces_mask, opponent_pieces_mask, 0,
              def_piece_complement,
-             0, ~0LLU, ~0LLU, ~0LLU);
+             0, ~0LLU, ~0LLU, ~0LLU, 0);
     }
   } 
 
@@ -5557,8 +5840,10 @@ unsigned long long allWhiteMovePerft (
     if (next_ply_is_last)
     {
       unsigned long long quiet_move_mask[8];
+      unsigned long long move_adjust = 0;
       const unsigned long long num_reuse_moves = 
             penultimatePlyMoveCountReuseSetup (quiet_move_mask,
+                                                &move_adjust,
                                                 MOVE_WHITE, en_passant_eligible_pawn,
                                                 piece, castle_eligibility,
                                                 mover_pieces_mask, opponent_pieces_mask,
@@ -5569,7 +5854,7 @@ unsigned long long allWhiteMovePerft (
                      mover_pieces_mask, opponent_pieces_mask, 1,
                      king_attack_mask,
                      def_piece_complement,
-                     num_reuse_moves, quiet_move_mask[S_KING]);
+                     num_reuse_moves, quiet_move_mask[S_KING], move_adjust);
 
       num_moves += allWhitePawnSquaresFind(piece, 0,
                                   en_passant_eligible_pawn, king_position,
@@ -5577,13 +5862,13 @@ unsigned long long allWhiteMovePerft (
                                   castle_eligibility, depth,
                                   mover_pieces_mask, opponent_pieces_mask, 1,
                                   def_piece_complement,
-                                  num_reuse_moves, quiet_move_mask[S_PAWN]);
+                                  num_reuse_moves, quiet_move_mask[S_PAWN], move_adjust);
       num_moves += allKnightSquaresFind(MOVE_WHITE, piece, 0, king_position,
                                       0, 0, 0, 0,
                                       castle_eligibility, depth,
                                       mover_pieces_mask, opponent_pieces_mask, 1,
                                       def_piece_complement,
-                                      num_reuse_moves, quiet_move_mask[S_KNIGHT]);
+                                      num_reuse_moves, quiet_move_mask[S_KNIGHT], move_adjust);
       num_moves += allBishopRookQueenSquaresFind(MOVE_WHITE, piece,
                                       0, king_position, 0, 0, 0, 0,
                                       castle_eligibility, depth,
@@ -5592,7 +5877,7 @@ unsigned long long allWhiteMovePerft (
                                       num_reuse_moves, 
                                       quiet_move_mask[S_BISHOP],
                                       quiet_move_mask[S_ROOK],
-                                      quiet_move_mask[S_QUEEN]);
+                                      quiet_move_mask[S_QUEEN], move_adjust);
     } else
     {
       num_moves += whiteKingSquaresFind(king_mask, king_position, attack_helper.move_candidate_mask,
@@ -5600,25 +5885,25 @@ unsigned long long allWhiteMovePerft (
                      castle_eligibility, 0, depth, 
                      mover_pieces_mask, opponent_pieces_mask, 0,
                      king_attack_mask,
-                     def_piece_complement, 0, ~0LLU);
+                     def_piece_complement, 0, ~0LLU, 0);
 
       num_moves += allWhitePawnSquaresFind(piece, 0,
                                   en_passant_eligible_pawn, king_position,
                                   0, 0, 0,
                                   castle_eligibility, depth,
                                   mover_pieces_mask, opponent_pieces_mask, 0,
-                                  def_piece_complement, 0, ~0LLU);
+                                  def_piece_complement, 0, ~0LLU, 0);
       num_moves += allKnightSquaresFind(MOVE_WHITE, piece, 0, king_position,
                                       0, 0, 0, 0,
                                       castle_eligibility, depth,
                                       mover_pieces_mask, opponent_pieces_mask, 0,
-                                      def_piece_complement, 0, ~0LLU);
+                                      def_piece_complement, 0, ~0LLU, 0);
       num_moves += allBishopRookQueenSquaresFind(MOVE_WHITE, piece,
                                       0, king_position, 0, 0, 0, 0,
                                       castle_eligibility, depth,
                                       mover_pieces_mask, opponent_pieces_mask, 0,
                                       def_piece_complement,
-                                      0, ~0LLU, ~0LLU, ~0LLU);
+                                      0, ~0LLU, ~0LLU, ~0LLU, 0);
     }
   } else
   {
@@ -5627,25 +5912,25 @@ unsigned long long allWhiteMovePerft (
                      castle_eligibility, 0, depth, 
                      mover_pieces_mask, opponent_pieces_mask, next_ply_is_last,
                      king_attack_mask,
-                     def_piece_complement, 0, ~0LLU);
+                     def_piece_complement, 0, ~0LLU, 0);
 
     num_moves += allWhitePawnSquaresFind(piece, 0,
                                   en_passant_eligible_pawn, king_position,
                                   0, attack_helper.in_check, attack_helper.pin,
                                   castle_eligibility, depth,
                                   mover_pieces_mask, opponent_pieces_mask, next_ply_is_last,
-                                  def_piece_complement, 0, ~0LLU);
+                                  def_piece_complement, 0, ~0LLU, 0);
     num_moves += allKnightSquaresFind(MOVE_WHITE, piece, 0, king_position,
                                       0, attack_helper.in_check, attack_helper.pin, attack_helper.move_test_needed,
                                       castle_eligibility, depth,
                                       mover_pieces_mask, opponent_pieces_mask, next_ply_is_last,
-                                      def_piece_complement, 0, ~0LLU);
+                                      def_piece_complement, 0, ~0LLU, 0);
     num_moves += allBishopRookQueenSquaresFind(MOVE_WHITE, piece,
                            0, king_position, 0, attack_helper.in_check, attack_helper.pin, attack_helper.move_test_needed,
                            castle_eligibility, depth,
                            mover_pieces_mask, opponent_pieces_mask, next_ply_is_last,
                            def_piece_complement,
-                           0, ~0LLU, ~0LLU, ~0LLU);
+                           0, ~0LLU, ~0LLU, ~0LLU, 0);
   }
 
 
@@ -5696,8 +5981,10 @@ unsigned long long allBlackMovePerft (
     if (next_ply_is_last)
     {
       unsigned long long quiet_move_mask[8];
+      unsigned long long move_adjust = 0;
       const unsigned long long num_reuse_moves = 
             penultimatePlyMoveCountReuseSetup (quiet_move_mask,
+                                                &move_adjust,
                                                 MOVE_BLACK, en_passant_eligible_pawn,
                                                 piece, castle_eligibility,
                                                 mover_pieces_mask, opponent_pieces_mask,
@@ -5709,7 +5996,7 @@ unsigned long long allBlackMovePerft (
                      mover_pieces_mask, opponent_pieces_mask, 1,
                      king_attack_mask,
                      def_piece_complement,
-                     num_reuse_moves, quiet_move_mask[S_KING]);
+                     num_reuse_moves, quiet_move_mask[S_KING], move_adjust);
 
       num_moves += allBlackPawnSquaresFind(piece, 0,
                                   en_passant_eligible_pawn, king_position,
@@ -5717,13 +6004,13 @@ unsigned long long allBlackMovePerft (
                                   castle_eligibility, depth,
                                   mover_pieces_mask, opponent_pieces_mask, 1,
                                   def_piece_complement, 
-                                  num_reuse_moves, quiet_move_mask[S_PAWN]);
+                                  num_reuse_moves, quiet_move_mask[S_PAWN], move_adjust);
       num_moves += allKnightSquaresFind(MOVE_BLACK, piece, 0, king_position,
                                       0, 0, 0, 0,
                                       castle_eligibility, depth,
                                       mover_pieces_mask, opponent_pieces_mask, 1,
                                       def_piece_complement,
-                                      num_reuse_moves, quiet_move_mask[S_KNIGHT]);
+                                      num_reuse_moves, quiet_move_mask[S_KNIGHT], move_adjust);
       num_moves += allBishopRookQueenSquaresFind(MOVE_BLACK, piece,
                                       0, king_position, 0, 0, 0, 0,
                                       castle_eligibility, depth,
@@ -5732,7 +6019,7 @@ unsigned long long allBlackMovePerft (
                                       num_reuse_moves,
                                       quiet_move_mask[S_BISHOP],
                                       quiet_move_mask[S_ROOK],
-                                      quiet_move_mask[S_QUEEN]);
+                                      quiet_move_mask[S_QUEEN], move_adjust);
     } else
     {
       num_moves += blackKingSquaresFind(king_mask, king_position, attack_helper.move_candidate_mask,
@@ -5740,25 +6027,25 @@ unsigned long long allBlackMovePerft (
                      castle_eligibility, 0, depth,
                      mover_pieces_mask, opponent_pieces_mask, 0,
                      king_attack_mask,
-                     def_piece_complement, 0, ~0LLU);
+                     def_piece_complement, 0, ~0LLU, 0);
 
       num_moves += allBlackPawnSquaresFind(piece, 0,
                                   en_passant_eligible_pawn, king_position,
                                   0, 0, 0,
                                   castle_eligibility, depth,
                                   mover_pieces_mask, opponent_pieces_mask, 0,
-                                  def_piece_complement, 0, ~0LLU);
+                                  def_piece_complement, 0, ~0LLU, 0);
       num_moves += allKnightSquaresFind(MOVE_BLACK, piece, 0, king_position,
                                       0, 0, 0, 0,
                                       castle_eligibility, depth,
                                       mover_pieces_mask, opponent_pieces_mask, 0,
-                                      def_piece_complement, 0, ~0LLU);
+                                      def_piece_complement, 0, ~0LLU, 0);
       num_moves += allBishopRookQueenSquaresFind(MOVE_BLACK, piece,
                                       0, king_position, 0, 0, 0, 0,
                                       castle_eligibility, depth,
                                       mover_pieces_mask, opponent_pieces_mask, 0,
                                       def_piece_complement,
-                                      0, ~0LLU, ~0LLU, ~0LLU);
+                                      0, ~0LLU, ~0LLU, ~0LLU, 0);
     }
   } else
   {
@@ -5767,25 +6054,25 @@ unsigned long long allBlackMovePerft (
                      castle_eligibility, 0, depth,
                      mover_pieces_mask, opponent_pieces_mask, next_ply_is_last,
                      king_attack_mask,
-                     def_piece_complement, 0, ~0LLU);
+                     def_piece_complement, 0, ~0LLU, 0);
 
     num_moves += allBlackPawnSquaresFind(piece, 0,
                                   en_passant_eligible_pawn, king_position,
                                   0, attack_helper.in_check, attack_helper.pin,
                                   castle_eligibility, depth,
                                   mover_pieces_mask, opponent_pieces_mask, next_ply_is_last,
-                                  def_piece_complement, 0, ~0LLU);
+                                  def_piece_complement, 0, ~0LLU, 0);
     num_moves += allKnightSquaresFind(MOVE_BLACK, piece, 0, king_position,
                                       0, attack_helper.in_check, attack_helper.pin, attack_helper.move_test_needed,
                                       castle_eligibility, depth,
                                       mover_pieces_mask, opponent_pieces_mask, next_ply_is_last,
-                                      def_piece_complement, 0, ~0LLU);
+                                      def_piece_complement, 0, ~0LLU, 0);
     num_moves += allBishopRookQueenSquaresFind(MOVE_BLACK, piece,
                          0, king_position, 0, attack_helper.in_check, attack_helper.pin, attack_helper.move_test_needed,
                          castle_eligibility, depth,
                          mover_pieces_mask, opponent_pieces_mask, next_ply_is_last,
                          def_piece_complement,
-                         0, ~0LLU, ~0LLU, ~0LLU);
+                         0, ~0LLU, ~0LLU, ~0LLU, 0);
   }
 
   return num_moves;
