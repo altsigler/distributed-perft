@@ -132,7 +132,9 @@ static unsigned long long allMoveCandidatesLastPlyFindInternal (
                            const unsigned int def_piece_complement,
                            const unsigned int king_position,
                            const unsigned long long any_color_pieces_mask,
-                           const kingAttackHelper_t attack_helper);
+                           const kingAttackHelper_t attack_helper,
+                           unsigned long long *const diaqgonal_attack_mask,
+                           unsigned long long *const udlr_attack_mask);
 
 __attribute__((always_inline)) inline
 static unsigned long long allMoveCandidatesLastPlyFind (
@@ -736,12 +738,8 @@ static unsigned long long penultimatePlyMoveAdjust (
                         unsigned long long *const piece, 
                         const unsigned long long move_adjust,
                         const unsigned int from_index,
-                        const unsigned int to_index,
-                        const unsigned long long mover_pieces_mask,
-                        const unsigned long long opponent_pieces_mask)
+                        const unsigned int to_index)
 {
-  (void) mover_pieces_mask;
-  (void) opponent_pieces_mask;
   unsigned long long move_count = 0;
 
 
@@ -858,6 +856,8 @@ static unsigned long long penultimatePlyMoveCountReuseSetup (
                             opponent_pieces_mask, any_color_pieces_mask,
                             opponent_king_attack_mask, castle_eligibility);
 
+  unsigned long long diagonal_attack_mask = 0;
+  unsigned long long udlr_attack_mask = 0;
   const unsigned long long num_reuse_moves = allMoveCandidatesLastPlyFindInternal(
                             opponent_move,
                             piece,
@@ -867,7 +867,9 @@ static unsigned long long penultimatePlyMoveCountReuseSetup (
                             def_piece_complement,
                             opponent_king_position,
                             any_color_pieces_mask,
-                            attack_helper);
+                            attack_helper,
+                            &diagonal_attack_mask,
+                            &udlr_attack_mask);
 
   /* Bit mask of squares that are not quiet for any piece type.
   */
@@ -1072,35 +1074,13 @@ static unsigned long long penultimatePlyMoveCountReuseSetup (
   *****
   ***** Check all visible diagonals and mark them as noisy.
   ****/
-  unsigned long long opponent_bishop_mask = 
-            piece[(opponent_move << 3) | S_BISHOP] |
-            piece[(opponent_move << 3) | S_QUEEN];
-  while (opponent_bishop_mask)
-  {
-    const unsigned int index = bitbrdLowestIndexFromMaskGet(opponent_bishop_mask);
-
-    common_noisy_mask |= diagonalVisibilityMap[index]
-                          [lookupKeyCompute (any_color_pieces_mask, diagonalBlocker[index])];
-
-    opponent_bishop_mask = _blsr_u64(opponent_bishop_mask);
-  }
+  common_noisy_mask |= diagonal_attack_mask;
 
   /**** Rook/Queen
   *****
   ***** Check all visible up/down/left/right and mark them as noisy.
   ****/
-  unsigned long long opponent_rook_mask = 
-            piece[(opponent_move << 3) | S_ROOK] |
-            piece[(opponent_move << 3) | S_QUEEN];
-  while (opponent_rook_mask)
-  {
-    const unsigned int index = bitbrdLowestIndexFromMaskGet(opponent_rook_mask);
-
-    common_noisy_mask |= udlrVisibilityMap[index]
-                          [lookupKeyCompute (any_color_pieces_mask, udlrBlocker[index])];
-
-    opponent_rook_mask = _blsr_u64(opponent_rook_mask);
-  }
+  common_noisy_mask |= udlr_attack_mask;
 
   /* Check for potential pins. 
   ** Squares between pinning pieces and the opponent king are noisy.
@@ -1108,6 +1088,8 @@ static unsigned long long penultimatePlyMoveCountReuseSetup (
   unsigned long long mover_bishop_mask = 
             piece[(whose_move << 3) | S_BISHOP] |
             piece[(whose_move << 3) | S_QUEEN];
+
+  mover_bishop_mask &= diagonalAttack[opponent_king_position] | noisy_map.diagonal_danger_mask;
   while (mover_bishop_mask)
   {
     const unsigned int index = bitbrdLowestIndexFromMaskGet(mover_bishop_mask);
@@ -1130,6 +1112,8 @@ static unsigned long long penultimatePlyMoveCountReuseSetup (
   unsigned long long mover_rook_mask = 
             piece[(whose_move << 3) | S_ROOK] |
             piece[(whose_move << 3) | S_QUEEN];
+
+  mover_rook_mask &= udlrAttack[opponent_king_position] | noisy_map.udlr_danger_mask;
   while (mover_rook_mask)
   {
     const unsigned int index = bitbrdLowestIndexFromMaskGet(mover_rook_mask);
@@ -1218,7 +1202,9 @@ static unsigned long long allBRQNPSquaresLastPlyFindNoTest (
                                    const unsigned long long any_color_pieces_mask,
                                    const unsigned int pin_mode,
                                    const unsigned long long pin_mask,
-                                   const unsigned int def_piece_complement)
+                                   const unsigned int def_piece_complement,
+                                   unsigned long long *const diagonal_attack_mask,
+                                   unsigned long long *const udlr_attack_mask)
 {
   unsigned long long mn = 0;
   unsigned long long piece_mask = piece[S_PAWN | (whose_move << 3)];
@@ -1257,6 +1243,11 @@ static unsigned long long allBRQNPSquaresLastPlyFindNoTest (
       */
       mn += (unsigned long long) __builtin_popcountll (open_and_visible_mask_2);
 
+      if (diagonal_attack_mask)
+      {
+        *diagonal_attack_mask |= open_and_visible_mask_1 | open_and_visible_mask_2;
+      }
+
   /* ROOK - 1 */
       const unsigned int piece_index_3 = bitbrdLowestIndexFromMaskGet(rook_piece_mask);
       rook_piece_mask = _blsr_u64(rook_piece_mask);
@@ -1279,6 +1270,11 @@ static unsigned long long allBRQNPSquaresLastPlyFindNoTest (
 
       const unsigned long long open_and_visible_mask_4 = udlrVisibilityMap[piece_index_4][lookup_index_4] &
                                                       ~mover_pieces_mask;
+
+      if (udlr_attack_mask)
+      {
+        *udlr_attack_mask |= open_and_visible_mask_3 | open_and_visible_mask_4;
+      }
 
       /* Add all open and visible opponent squares to the move count.
       */
@@ -1319,6 +1315,15 @@ static unsigned long long allBRQNPSquaresLastPlyFindNoTest (
                                                 diagonalVisibilityMap[piece_index_7][lookup_index_7]) &
                                                         ~mover_pieces_mask;
 
+      if (udlr_attack_mask)
+      {
+        *udlr_attack_mask |= udlrVisibilityMap[piece_index_7][udlr_lookup_index_7] & ~mover_pieces_mask;
+      }
+      if (diagonal_attack_mask)
+      {
+        *diagonal_attack_mask |= diagonalVisibilityMap[piece_index_7][lookup_index_7] & ~mover_pieces_mask;
+      }
+
       /* Add all open and visible opponent squares to the move count.
       */
       mn += (unsigned long long) __builtin_popcountll (open_and_visible_mask_7);
@@ -1341,6 +1346,11 @@ static unsigned long long allBRQNPSquaresLastPlyFindNoTest (
 
       unsigned long long open_and_visible_mask = diagonalVisibilityMap[piece_index][lookup_index] &
                                                       ~mover_pieces_mask;
+
+      if (diagonal_attack_mask)
+      {
+        *diagonal_attack_mask |= open_and_visible_mask;
+      }
 
       if (pin_mode > 1)
       {
@@ -1371,6 +1381,11 @@ static unsigned long long allBRQNPSquaresLastPlyFindNoTest (
 
       unsigned long long open_and_visible_mask = udlrVisibilityMap[piece_index][lookup_index] &
                                                       ~mover_pieces_mask;
+
+      if (udlr_attack_mask)
+      {
+        *udlr_attack_mask |= open_and_visible_mask;
+      }
 
       if (pin_mode > 1)
       {
@@ -1435,6 +1450,15 @@ static unsigned long long allBRQNPSquaresLastPlyFindNoTest (
       unsigned long long open_and_visible_mask = (udlrVisibilityMap[piece_index][udlr_lookup_index] |
                                                 diagonalVisibilityMap[piece_index][lookup_index]) &
                                                         ~mover_pieces_mask;
+
+      if (udlr_attack_mask)
+      {
+        *udlr_attack_mask |= udlrVisibilityMap[piece_index][udlr_lookup_index] & ~mover_pieces_mask;
+      }
+      if (diagonal_attack_mask)
+      {
+        *diagonal_attack_mask |= diagonalVisibilityMap[piece_index][lookup_index] & ~mover_pieces_mask;
+      }
 
       if (pin_mode > 1)
       {
@@ -1946,8 +1970,7 @@ static unsigned long long whiteKingSquaresFind (
             {
               const unsigned int index = bitbrdLowestIndexFromMaskGet(mask2);
               mn += penultimatePlyMoveAdjust (MOVE_WHITE, piece, move_adjust,
-                                                piece_index, index, 
-                                                mover_pieces_mask, opponent_pieces_mask);
+                                                piece_index, index); 
             }
           } else
           {
@@ -2216,8 +2239,7 @@ static unsigned long long blackKingSquaresFind (
             {
               const unsigned int index = bitbrdLowestIndexFromMaskGet(mask2);
               mn += penultimatePlyMoveAdjust (MOVE_BLACK, piece, move_adjust,
-                                                piece_index, index, 
-                                                mover_pieces_mask, opponent_pieces_mask);
+                                                piece_index, index); 
             }
           } else
           {
@@ -2567,8 +2589,7 @@ static unsigned long long allBishopRookQueenSquaresFind (
                 {
                   const unsigned int index = bitbrdLowestIndexFromMaskGet(mask2);
                   mn += penultimatePlyMoveAdjust (whose_move, piece, move_adjust,
-                                                piece_index, index, 
-                                                mover_pieces_mask, opponent_pieces_mask);
+                                                piece_index, index); 
                 }
               } else
               {
@@ -2750,8 +2771,7 @@ static unsigned long long allBishopRookQueenSquaresFind (
                const unsigned int index = bitbrdLowestIndexFromMaskGet(mask2);
                unsigned long long adjustment = 
                        penultimatePlyMoveAdjust (whose_move, piece, move_adjust,
-                                                piece_index, index, 
-                                                mover_pieces_mask, opponent_pieces_mask);
+                                                piece_index, index); 
 
                if ((num_reuse_moves + adjustment) == real_move_count)
                {
@@ -2774,8 +2794,7 @@ static unsigned long long allBishopRookQueenSquaresFind (
                 {
                   const unsigned int index = bitbrdLowestIndexFromMaskGet(mask2);
                   mn += penultimatePlyMoveAdjust (whose_move, piece, move_adjust,
-                                                piece_index, index, 
-                                                mover_pieces_mask, opponent_pieces_mask);
+                                                piece_index, index); 
                 }
 #endif
               } else
@@ -2941,8 +2960,7 @@ static unsigned long long allBishopRookQueenSquaresFind (
                 {
                   const unsigned int index = bitbrdLowestIndexFromMaskGet(mask2);
                   mn += penultimatePlyMoveAdjust (whose_move, piece, move_adjust,
-                                                piece_index, index, 
-                                                mover_pieces_mask, opponent_pieces_mask);
+                                                piece_index, index); 
                 }
               } else
               {
@@ -3014,7 +3032,9 @@ static unsigned long long allBishopRookQueenSquaresLastPlyFind (
                                    const unsigned long long pin,
                                    const unsigned long long move_test_needed,
                                    const unsigned long long mover_pieces_mask,
-                                   const unsigned long long opponent_pieces_mask)
+                                   const unsigned long long opponent_pieces_mask,
+                                   unsigned long long *const diagonal_attack_mask,
+                                   unsigned long long *const udlr_attack_mask)
 {
   const unsigned long long any_color_pieces_mask = mover_pieces_mask | opponent_pieces_mask;
   unsigned long long mn = 0;
@@ -3037,6 +3057,10 @@ static unsigned long long allBishopRookQueenSquaresLastPlyFind (
       unsigned long long open_and_visible_mask = diagonalVisibilityMap[piece_index][lookup_index] &
                                                         valid_moves;
 
+      if (diagonal_attack_mask)
+      {
+        *diagonal_attack_mask |= open_and_visible_mask;
+      }
 
       if (unlikely (pin && (pin & from_mask)))
       {
@@ -3079,6 +3103,11 @@ static unsigned long long allBishopRookQueenSquaresLastPlyFind (
       unsigned long long open_and_visible_mask = udlrVisibilityMap[piece_index][lookup_index] &
                                                         valid_moves;
 
+      if (udlr_attack_mask)
+      {
+        *udlr_attack_mask |= open_and_visible_mask;
+      }
+
       if (unlikely(pin && (pin & from_mask)))
       {
         /* We can only move to other pinned squares.
@@ -3120,9 +3149,20 @@ static unsigned long long allBishopRookQueenSquaresLastPlyFind (
       const unsigned long long udlr_lookup_index =  
                      lookupKeyCompute (any_color_pieces_mask, aggregateAttackVal->udlrBlocker);
 
-      unsigned long long open_and_visible_mask = (udlrVisibilityMap[piece_index][udlr_lookup_index] |
-                                                  diagonalVisibilityMap[piece_index][lookup_index]) &
+      const unsigned long long udlr_visibility_map = udlrVisibilityMap[piece_index][udlr_lookup_index];
+      const unsigned long long diagonal_visibility_map = diagonalVisibilityMap[piece_index][lookup_index];
+      unsigned long long open_and_visible_mask = (udlr_visibility_map |
+                                                  diagonal_visibility_map) &
                                                         valid_moves;
+
+      if (diagonal_attack_mask)
+      {
+        *diagonal_attack_mask |= diagonal_visibility_map & valid_moves;
+      }
+      if (udlr_attack_mask)
+      {
+        *udlr_attack_mask |= udlr_visibility_map & valid_moves;
+      }
 
       if (unlikely (pin && (pin & from_mask)))
       {
@@ -3299,8 +3339,7 @@ static unsigned long long allKnightSquaresFind (
 
                unsigned long long adjustment = 
                        penultimatePlyMoveAdjust (whose_move, piece, move_adjust,
-                                                piece_index, index, 
-                                                mover_pieces_mask, opponent_pieces_mask);
+                                                piece_index, index); 
 
                if ((num_reuse_moves + adjustment) == real_move_count)
                {
@@ -3321,8 +3360,7 @@ static unsigned long long allKnightSquaresFind (
               if (0 != (move_adjust & mask1))
               {
                 mn += penultimatePlyMoveAdjust (whose_move, piece, move_adjust,
-                                                piece_index, index, 
-                                                mover_pieces_mask, opponent_pieces_mask);
+                                                piece_index, index); 
               }
 #endif
             } else
@@ -3579,8 +3617,7 @@ static unsigned long long allWhitePawnSquaresFind (
               if (0 != (move_adjust & mask1))
               {
                 mn += penultimatePlyMoveAdjust (MOVE_WHITE, piece, move_adjust,
-                                                piece_index, piece_index + 8, 
-                                                mover_pieces_mask, opponent_pieces_mask);
+                                                piece_index, piece_index + 8); 
               }
             } else
             {
@@ -3718,8 +3755,7 @@ static unsigned long long allWhitePawnSquaresFind (
                 if (0 != (move_adjust & mask1))
                 {
                   mn += penultimatePlyMoveAdjust (MOVE_WHITE, piece, move_adjust,
-                                                piece_index, piece_index + 16, 
-                                                mover_pieces_mask, opponent_pieces_mask);
+                                                piece_index, piece_index + 16); 
                 }
               } else
               {
@@ -4659,8 +4695,7 @@ static unsigned long long allBlackPawnSquaresFind (
               if (0 != (move_adjust & mask1))
               {
                 mn += penultimatePlyMoveAdjust (MOVE_BLACK, piece, move_adjust,
-                                                piece_index, piece_index - 8, 
-                                                mover_pieces_mask, opponent_pieces_mask);
+                                                piece_index, piece_index - 8); 
               }
             } else
             {
@@ -4800,8 +4835,7 @@ static unsigned long long allBlackPawnSquaresFind (
                 if (0 != (move_adjust & mask1))
                 {
                   mn += penultimatePlyMoveAdjust (MOVE_BLACK, piece, move_adjust,
-                                                piece_index, piece_index - 16, 
-                                                mover_pieces_mask, opponent_pieces_mask);
+                                                piece_index, piece_index - 16); 
                 }
               } else
               {
@@ -6090,7 +6124,9 @@ static unsigned long long allWhiteLastPlyInLine(
                            const unsigned int king_position,
                            const kingAttackHelper_t *const attack_helper,
                            const unsigned long long mover_pieces_mask,
-                           const unsigned long long opponent_pieces_mask)
+                           const unsigned long long opponent_pieces_mask,
+                           unsigned long long *const diagonal_attack_mask,
+                           unsigned long long *const udlr_attack_mask)
 {
   unsigned long long num_moves;
 
@@ -6108,7 +6144,8 @@ static unsigned long long allWhiteLastPlyInLine(
   num_moves += allBishopRookQueenSquaresLastPlyFind(MOVE_WHITE, piece,
                                         king_position, attack_helper->in_check, attack_helper->pin, 
                                         attack_helper->move_test_needed,
-                                        mover_pieces_mask, opponent_pieces_mask
+                                        mover_pieces_mask, opponent_pieces_mask,
+                                        diagonal_attack_mask, udlr_attack_mask
                                         );
 
   return num_moves;
@@ -6124,11 +6161,14 @@ static unsigned long long allWhiteLastPly(
                            const unsigned int king_position,
                            const kingAttackHelper_t *const attack_helper,
                            const unsigned long long mover_pieces_mask,
-                           const unsigned long long opponent_pieces_mask)
+                           const unsigned long long opponent_pieces_mask,
+                           unsigned long long *const diagonal_attack_mask,
+                           unsigned long long *const udlr_attack_mask)
 {
   return allWhiteLastPlyInLine (piece, en_passant_eligible_pawn, 
                                 king_position, attack_helper,
-                                mover_pieces_mask, opponent_pieces_mask
+                                mover_pieces_mask, opponent_pieces_mask,
+                                diagonal_attack_mask, udlr_attack_mask
                                 );
 }
                             
@@ -6143,7 +6183,9 @@ static unsigned long long allBlackLastPlyInLine(
                            const unsigned int king_position,
                            const kingAttackHelper_t *const attack_helper,
                            const unsigned long long mover_pieces_mask,
-                           const unsigned long long opponent_pieces_mask)
+                           const unsigned long long opponent_pieces_mask,
+                           unsigned long long *const diagonal_attack_mask,
+                           unsigned long long *const udlr_attack_mask)
 {
   unsigned long long num_moves;
 
@@ -6161,7 +6203,8 @@ static unsigned long long allBlackLastPlyInLine(
   num_moves += allBishopRookQueenSquaresLastPlyFind(MOVE_BLACK, piece,
                                         king_position, attack_helper->in_check, attack_helper->pin,
                                         attack_helper->move_test_needed,
-                                        mover_pieces_mask, opponent_pieces_mask
+                                        mover_pieces_mask, opponent_pieces_mask,
+                                        diagonal_attack_mask, udlr_attack_mask
                                         );
 
   return num_moves;
@@ -6175,11 +6218,14 @@ static unsigned long long allBlackLastPly(
                            const unsigned int king_position,
                            const kingAttackHelper_t *const attack_helper,
                            const unsigned long long mover_pieces_mask,
-                           const unsigned long long opponent_pieces_mask)
+                           const unsigned long long opponent_pieces_mask,
+                           unsigned long long *const diagonal_attack_mask,
+                           unsigned long long *const udlr_attack_mask)
 {
   return allBlackLastPlyInLine (piece, en_passant_eligible_pawn,
                                 king_position, attack_helper,
-                                mover_pieces_mask, opponent_pieces_mask
+                                mover_pieces_mask, opponent_pieces_mask,
+                                diagonal_attack_mask, udlr_attack_mask
                                 );
 }
 
@@ -6199,7 +6245,9 @@ static unsigned long long allMoveCandidatesLastPlyFindInternal (
                            const unsigned int def_piece_complement,
                            const unsigned int king_position,
                            const unsigned long long any_color_pieces_mask,
-                           const kingAttackHelper_t attack_helper)
+                           const kingAttackHelper_t attack_helper,
+                           unsigned long long *const diagonal_attack_mask,
+                           unsigned long long *const udlr_attack_mask)
 {
   unsigned long long num_moves = 0;
   num_moves += kingSquaresLastPlyFind (
@@ -6211,7 +6259,8 @@ static unsigned long long allMoveCandidatesLastPlyFindInternal (
     {
       num_moves += allBRQNPSquaresLastPlyFindNoTest (MOVE_WHITE, piece, en_passant_eligible_pawn,
                                             mover_pieces_mask,opponent_pieces_mask,
-                                            any_color_pieces_mask, 0, 0, def_piece_complement);
+                                            any_color_pieces_mask, 0, 0, def_piece_complement,
+                                            diagonal_attack_mask, udlr_attack_mask);
     } else
     {
       if (!attack_helper.in_check && !attack_helper.move_test_needed)
@@ -6220,19 +6269,22 @@ static unsigned long long allMoveCandidatesLastPlyFindInternal (
         {
           num_moves += allBRQNPSquaresLastPlyFindNoTest (MOVE_WHITE, piece, en_passant_eligible_pawn,
                                             mover_pieces_mask,opponent_pieces_mask,
-                                            any_color_pieces_mask, 1, attack_helper.pin, def_piece_complement);
+                                            any_color_pieces_mask, 1, attack_helper.pin, def_piece_complement,
+                                            diagonal_attack_mask, udlr_attack_mask);
         } else
         {
           num_moves += allBRQNPSquaresLastPlyFindNoTest (MOVE_WHITE, piece, en_passant_eligible_pawn,
                                             mover_pieces_mask,opponent_pieces_mask,
-                                            any_color_pieces_mask, 2, attack_helper.pin, def_piece_complement);
+                                            any_color_pieces_mask, 2, attack_helper.pin, def_piece_complement,
+                                            diagonal_attack_mask, udlr_attack_mask);
         }
       } else
       {
         num_moves += allWhiteLastPly (piece, en_passant_eligible_pawn,
                                     king_position,
                                     &attack_helper,
-                                    mover_pieces_mask, opponent_pieces_mask);
+                                    mover_pieces_mask, opponent_pieces_mask,
+                                    diagonal_attack_mask, udlr_attack_mask);
       }
     }
   } else
@@ -6241,7 +6293,8 @@ static unsigned long long allMoveCandidatesLastPlyFindInternal (
     {
       num_moves +=  allBRQNPSquaresLastPlyFindNoTest (MOVE_BLACK, piece, en_passant_eligible_pawn,
                                             mover_pieces_mask,opponent_pieces_mask,
-                                            any_color_pieces_mask, 0, 0, def_piece_complement);
+                                            any_color_pieces_mask, 0, 0, def_piece_complement,
+                                            diagonal_attack_mask, udlr_attack_mask);
     } else
     {
       if (!attack_helper.in_check && !attack_helper.move_test_needed)
@@ -6250,19 +6303,22 @@ static unsigned long long allMoveCandidatesLastPlyFindInternal (
         {
           num_moves += allBRQNPSquaresLastPlyFindNoTest (MOVE_BLACK, piece, en_passant_eligible_pawn,
                                             mover_pieces_mask,opponent_pieces_mask,
-                                            any_color_pieces_mask, 1, attack_helper.pin, def_piece_complement);
+                                            any_color_pieces_mask, 1, attack_helper.pin, def_piece_complement,
+                                            diagonal_attack_mask, udlr_attack_mask);
         } else
         {
           num_moves += allBRQNPSquaresLastPlyFindNoTest (MOVE_BLACK, piece, en_passant_eligible_pawn,
                                             mover_pieces_mask,opponent_pieces_mask,
-                                            any_color_pieces_mask, 2, attack_helper.pin, def_piece_complement);
+                                            any_color_pieces_mask, 2, attack_helper.pin, def_piece_complement,
+                                            diagonal_attack_mask, udlr_attack_mask);
         }
       } else
       {
         num_moves += allBlackLastPly (piece, en_passant_eligible_pawn,
                                     king_position,
                                     &attack_helper,
-                                    mover_pieces_mask, opponent_pieces_mask);
+                                    mover_pieces_mask, opponent_pieces_mask,
+                                    diagonal_attack_mask, udlr_attack_mask);
       }
     }
   }
@@ -6319,7 +6375,8 @@ static unsigned long long allMoveCandidatesLastPlyFind (
                             def_piece_complement,
                             king_position,
                             any_color_pieces_mask,
-                            attack_helper);
+                            attack_helper, 
+                            0, 0);
 }
 
 /******************************************************************************
