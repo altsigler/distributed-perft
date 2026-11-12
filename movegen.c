@@ -83,10 +83,8 @@ static unsigned long long udlrVisibilityMap[BRDS*BRDS][MAX_UDLR_HASH_INDEX];
 ** squares the king can move.
 ** The "danger" table represents squares from which opponent pieces can
 ** attack one of the squares to which the king can move.
-** There are three different "danger" vectors. One used for knights, one used for
+** There are two different "danger" vectors. One one used for
 ** bishops and one used for rooks.
-** The opponent pawns and king don't use the "danger" table because it is quicker to simply
-** test for attack from those pieces.
 **
 ** The "occupancyDangerMap" table is organized as a double subscribted array indexed
 ** by the mover king position and the occupancy hash value.
@@ -96,10 +94,9 @@ static unsigned long long udlrVisibilityMap[BRDS*BRDS][MAX_UDLR_HASH_INDEX];
 */
 static dangerMap_t occupancyDangerMap[BRDS*BRDS][1<<12];
 
-/* This arrays is similar to occupancyDangerMap, except it is used for figuring out
-** which squares cannot be source/destination for quiet moves.
+/* Similar to danger map, except used for knights, pawns, and king.
 */
-static noisyMap_t occupancyNoisyMap[BRDS*BRDS][1<<12];
+static noisyMap_t occupancyNoisyMap[BRDS*BRDS];
 
 /* This is a mask agains which we generate the occupancyDangerMap.
 ** For most squares the kingOccupancy is the same as kingAttack. 
@@ -456,7 +453,10 @@ static kingAttackHelper_t pinCompute (
                                       const unsigned long long mover_pieces_mask,
                                       const unsigned long long any_color_pieces_mask,
                                       unsigned long long king_attack_mask,
-                                      const castleEligibility_t castle_eligibility)
+                                      const castleEligibility_t castle_eligibility,
+                                      unsigned long long *quiet_mask_bishop,
+                                      unsigned long long *quiet_mask_rook,
+                                      unsigned long long *quiet_mask_common)
 {
   unsigned long long attack_pawn;
   unsigned long long attack_king;
@@ -522,12 +522,9 @@ static kingAttackHelper_t pinCompute (
   const unsigned long long occupancy_index =
                             _pext_u64 (mover_pieces_mask,
                                              kingOccupancy[position_index]);
-  const dangerMap_t danger_map =
-                    occupancyDangerMap[position_index][occupancy_index];
-                   
   // Knight Attack
   unsigned long long opponent_knight_mask = attack_knight & 
-                                                danger_map.knight_danger_mask;
+                                      occupancyNoisyMap[position_index].knight_danger_mask;
   while (unlikely(opponent_knight_mask))
   {
     const unsigned int index = bitbrdLowestIndexFromMaskGet(opponent_knight_mask);
@@ -543,6 +540,17 @@ static kingAttackHelper_t pinCompute (
     opponent_knight_mask = _blsr_u64(opponent_knight_mask);
   }
 
+  const dangerMap_t danger_map =
+                    occupancyDangerMap[position_index][occupancy_index];
+  if (quiet_mask_bishop)
+  {
+    *quiet_mask_bishop = danger_map.diagonal_danger_mask;
+  }
+  if (quiet_mask_rook)
+  {
+    *quiet_mask_rook = danger_map.udlr_danger_mask;
+  }
+                   
   // Bishop/Queen Attack
   FORCE_TOUCH (any_color_pieces_mask);
 
@@ -554,6 +562,11 @@ static kingAttackHelper_t pinCompute (
 
     const unsigned long long diagonal_attack = diagonalAttack[index];
 
+    if (quiet_mask_common)
+    {
+      *quiet_mask_common |= diagonal_attack & danger_map.diagonal_danger_mask; 
+    }
+
     /* If the mover king is in the attack lanes of this piece then check if there 
     ** is a pin or check.
     */
@@ -561,6 +574,12 @@ static kingAttackHelper_t pinCompute (
     {
       const unsigned long long attack_lane = attackLanes[position_index][index];
       const unsigned long long detected_pieces = attack_lane & any_color_pieces_mask;
+
+      if (quiet_mask_common)
+      {
+        *quiet_mask_common |= attack_lane | (1LLU << index);
+      }
+
       if (0 == detected_pieces)
       {
         if (attack_helper.in_check)
@@ -600,6 +619,11 @@ static kingAttackHelper_t pinCompute (
   
     const unsigned long long udlr_attack = udlrAttack[index];
 
+    if (quiet_mask_common)
+    {
+      *quiet_mask_common |= udlr_attack & danger_map.udlr_danger_mask; 
+    }
+
     /* If the mover king is in the attack lanes of this piece then check if there 
     ** is a pin or check.
     */
@@ -607,6 +631,12 @@ static kingAttackHelper_t pinCompute (
     {
       const unsigned long long attack_lane = attackLanes[position_index][index];
       const unsigned long long detected_pieces = attack_lane & any_color_pieces_mask;
+
+      if (quiet_mask_common)
+      {
+        *quiet_mask_common |= attack_lane | (1LLU << index);
+      }
+
       if (0 == detected_pieces)
       {
         if (attack_helper.in_check)
@@ -850,11 +880,18 @@ static unsigned long long penultimatePlyMoveCountReuseSetup (
   const unsigned int opponent_king_position = bitbrdLowestIndexFromMaskGet(opponent_king_mask);
   unsigned long long opponent_king_attack_mask = kingAttack[opponent_king_position];
 
+  unsigned long long quiet_mask_bishop = 0;
+  unsigned long long quiet_mask_rook = 0;
+  unsigned long long quiet_mask_common = 0;
+
   const kingAttackHelper_t attack_helper = pinCompute (
                             opponent_move, piece, opponent_king_position, opponent_king_mask,
                             0,
                             opponent_pieces_mask, any_color_pieces_mask,
-                            opponent_king_attack_mask, castle_eligibility);
+                            opponent_king_attack_mask, castle_eligibility,
+                            &quiet_mask_bishop,
+                            &quiet_mask_rook,
+                            &quiet_mask_common);
 
   unsigned long long diagonal_attack_mask = 0;
   unsigned long long udlr_attack_mask = 0;
@@ -873,7 +910,7 @@ static unsigned long long penultimatePlyMoveCountReuseSetup (
 
   /* Bit mask of squares that are not quiet for any piece type.
   */
-  unsigned long long common_noisy_mask;
+  unsigned long long common_noisy_mask = quiet_mask_common;
 
   /* For every opponent piece mark all squares to which the opponent can move
   ** as a noisy square. 
@@ -918,25 +955,22 @@ static unsigned long long penultimatePlyMoveCountReuseSetup (
       opponent_king_move |= white_long_move_mask;
     }
   }
-  common_noisy_mask = opponent_king_move;
+  common_noisy_mask |= opponent_king_move;
 
   /* In addition to marking the squares where the king can move as noisy, we 
   ** also need to mark squares from which potential king moves can be attacked.
   ** The masks are different for pawns, knights, king, bishops, and rooks.
   ** Therefor for each piece type we update the appropriate quiet_move_mask.
   */
-  const unsigned long long occupancy_index =
-                            _pext_u64 (opponent_pieces_mask,
-                                             kingOccupancy[opponent_king_position]);
   const noisyMap_t noisy_map =
-                    occupancyNoisyMap[opponent_king_position][occupancy_index];
+                    occupancyNoisyMap[opponent_king_position];
 
-  
+  quiet_mask_bishop |= diagonalAttack[opponent_king_position];
+  quiet_mask_rook |= udlrAttack[opponent_king_position];
+
   quiet_move_mask[S_KNIGHT] = noisy_map.knight_danger_mask;
-  quiet_move_mask[S_BISHOP] = noisy_map.diagonal_danger_mask;
-  quiet_move_mask[S_ROOK] = noisy_map.udlr_danger_mask;
-  quiet_move_mask[S_QUEEN] = noisy_map.udlr_danger_mask | 
-                              noisy_map.diagonal_danger_mask;
+  quiet_move_mask[S_BISHOP] = quiet_mask_bishop;
+  quiet_move_mask[S_ROOK] = quiet_mask_rook;
   quiet_move_mask[S_KING] = noisy_map.king_danger_mask;
   quiet_move_mask[S_PAWN] = (whose_move == MOVE_WHITE)?
                                         noisy_map.white_pawn_danger_mask:
@@ -1072,83 +1106,26 @@ static unsigned long long penultimatePlyMoveCountReuseSetup (
 
   /**** Bishop/Queen
   *****
-  ***** Check all visible diagonals and mark them as noisy.
+  ***** Mark all visible diagonals as noisy.
   ****/
   common_noisy_mask |= diagonal_attack_mask;
 
   /**** Rook/Queen
   *****
-  ***** Check all visible up/down/left/right and mark them as noisy.
+  ***** Mark all visible up/down/left/right as noisy.
   ****/
   common_noisy_mask |= udlr_attack_mask;
-
-  /* Check for potential pins. 
-  ** Squares between pinning pieces and the opponent king are noisy.
-  */
-  unsigned long long mover_bishop_mask = 
-            piece[(whose_move << 3) | S_BISHOP] |
-            piece[(whose_move << 3) | S_QUEEN];
-
-  mover_bishop_mask &= diagonalAttack[opponent_king_position] | noisy_map.diagonal_danger_mask;
-  while (mover_bishop_mask)
-  {
-    const unsigned int index = bitbrdLowestIndexFromMaskGet(mover_bishop_mask);
-
-    if ((1LLU << index) & diagonalAttack[opponent_king_position])
-    {
-      common_noisy_mask |= attackLanes[opponent_king_position][index] |
-                                (1LLU << index);
-    }
-
-    /* The attack squares for bishop/rook are noisy for all pieces.
-    */
-    if (noisy_map.diagonal_danger_mask & (1LLU << index))
-    {
-      common_noisy_mask |= noisy_map.diagonal_danger_mask & diagonalAttack[index];
-    }
-    mover_bishop_mask = _blsr_u64(mover_bishop_mask);
-  }
-
-  unsigned long long mover_rook_mask = 
-            piece[(whose_move << 3) | S_ROOK] |
-            piece[(whose_move << 3) | S_QUEEN];
-
-  mover_rook_mask &= udlrAttack[opponent_king_position] | noisy_map.udlr_danger_mask;
-  while (mover_rook_mask)
-  {
-    const unsigned int index = bitbrdLowestIndexFromMaskGet(mover_rook_mask);
-
-    if ((1LLU << index) & udlrAttack[opponent_king_position])
-    {
-      common_noisy_mask |= attackLanes[opponent_king_position][index] |
-                                (1LLU << index);
-    }
-
-    /* The attack squares for bishop/rook are noisy for all pieces.
-    */
-    if (noisy_map.udlr_danger_mask & (1LLU << index))
-    {
-      common_noisy_mask |= noisy_map.udlr_danger_mask & udlrAttack[index];
-    }
-    mover_rook_mask = _blsr_u64(mover_rook_mask);
-  }
-
-  /* For bishop and rook any potential pinning square is noisy.
-  */
-  quiet_move_mask[S_QUEEN] |= diagonalAttack[opponent_king_position] |
-                              udlrAttack[opponent_king_position];
-  quiet_move_mask[S_ROOK] |= udlrAttack[opponent_king_position];
-  quiet_move_mask[S_BISHOP] |= diagonalAttack[opponent_king_position];
-
 
   /* Add the common noisy mask to the individual piece masks.
   */
   quiet_move_mask[S_KING] |= common_noisy_mask;
-  quiet_move_mask[S_QUEEN] |= common_noisy_mask;
   quiet_move_mask[S_ROOK] |= common_noisy_mask;
   quiet_move_mask[S_BISHOP] |= common_noisy_mask;
   quiet_move_mask[S_KNIGHT] |= common_noisy_mask;
   quiet_move_mask[S_PAWN] |= common_noisy_mask;
+
+  quiet_move_mask[S_QUEEN] = quiet_move_mask[S_BISHOP] | 
+                              quiet_move_mask[S_ROOK];
 
 
   return num_reuse_moves;
@@ -5696,7 +5673,8 @@ unsigned long long allMoveCandidatesFind (
                             MOVE_WHITE, bit_brd->piece, king_position, king_mask,
                             en_passant_eligible_pawn,
                             mover_pieces_mask, any_color_pieces_mask,
-                            king_attack_mask, castle_eligibility);
+                            king_attack_mask, castle_eligibility,
+                            0, 0, 0);
 
     if (!attack_helper.in_check && !attack_helper.pin)
     {
@@ -5768,7 +5746,8 @@ unsigned long long allMoveCandidatesFind (
                             MOVE_BLACK, bit_brd->piece, king_position, king_mask,
                             en_passant_eligible_pawn,
                             mover_pieces_mask, any_color_pieces_mask,
-                            king_attack_mask, castle_eligibility);
+                            king_attack_mask, castle_eligibility,
+                            0, 0, 0);
 
     if (!attack_helper.in_check && !attack_helper.pin)
     {
@@ -5867,7 +5846,8 @@ unsigned long long allWhiteMovePerft (
                             MOVE_WHITE, piece, king_position, king_mask,
                             en_passant_eligible_pawn,
                             mover_pieces_mask, any_color_pieces_mask,
-                            king_attack_mask, castle_eligibility);
+                            king_attack_mask, castle_eligibility,
+                            0, 0, 0);
 
   if (!attack_helper.in_check && !attack_helper.pin)
   {
@@ -6008,7 +5988,8 @@ unsigned long long allBlackMovePerft (
                           MOVE_BLACK, piece, king_position, king_mask,
                           en_passant_eligible_pawn,
                           mover_pieces_mask, any_color_pieces_mask,
-                          king_attack_mask, castle_eligibility);
+                          king_attack_mask, castle_eligibility,
+                          0, 0, 0);
 
   if (!attack_helper.in_check && !attack_helper.pin)
   {
@@ -6364,7 +6345,8 @@ static unsigned long long allMoveCandidatesLastPlyFind (
                             whose_move, piece, king_position, king_mask,
                             en_passant_eligible_pawn,
                             mover_pieces_mask, any_color_pieces_mask,
-                            king_attack_mask, castle_eligibility);
+                            king_attack_mask, castle_eligibility,
+                            0, 0, 0);
 
   return allMoveCandidatesLastPlyFindInternal(
                             whose_move,
@@ -6945,6 +6927,11 @@ static void dangerMapCreate (void)
       king_movement_mask |= (1LLU << (i+2));
     }    
 
+
+    /* Add knight/bishop/rook attack squares on the king.
+    */
+    occupancyNoisyMap[i].knight_danger_mask |= knightAttack[i];
+
     for (unsigned int j = 0; j < (1U << king_occupancy_size); j++)
     {
       const unsigned long long occupied_squares = _pdep_u64 (j, king_occupancy_mask);
@@ -6955,11 +6942,10 @@ static void dangerMapCreate (void)
         const unsigned int index = bitbrdLowestIndexFromMaskGet(open_squares);
         open_squares ^= 1LLU << index;
 
-        occupancyDangerMap[i][j].knight_danger_mask |= knightAttack[index];
-        occupancyNoisyMap[i][j].knight_danger_mask |= knightAttack[index];
-        occupancyNoisyMap[i][j].king_danger_mask |= kingAttack[index];
-        occupancyNoisyMap[i][j].white_pawn_danger_mask |= whitePawnAttack[index];
-        occupancyNoisyMap[i][j].black_pawn_danger_mask |= blackPawnAttack[index];
+        occupancyNoisyMap[i].knight_danger_mask |= knightAttack[index];
+        occupancyNoisyMap[i].king_danger_mask |= kingAttack[index];
+        occupancyNoisyMap[i].white_pawn_danger_mask |= whitePawnAttack[index];
+        occupancyNoisyMap[i].black_pawn_danger_mask |= blackPawnAttack[index];
 
         /* We need to take one more step to remove dangerous squares
         ** that are not actually dangerous because the lane between the attacker and the
@@ -6976,7 +6962,6 @@ static void dangerMapCreate (void)
           if (!detected_pieces)
           {
             occupancyDangerMap[i][j].diagonal_danger_mask |= 1LLU << diagonal_index;
-            occupancyNoisyMap[i][j].diagonal_danger_mask |= 1LLU << diagonal_index;
           }
         }
 
@@ -6992,15 +6977,9 @@ static void dangerMapCreate (void)
           if (!detected_pieces)
           {
             occupancyDangerMap[i][j].udlr_danger_mask |= 1LLU << udlr_index;
-            occupancyNoisyMap[i][j].udlr_danger_mask |= 1LLU << udlr_index;
           }
         }
       }
-
-      /* Add knight/bishop/rook attack squares on the king.
-      */
-      occupancyDangerMap[i][j].knight_danger_mask |= knightAttack[i];
-      occupancyNoisyMap[i][j].knight_danger_mask |= knightAttack[i];
 
       const unsigned int row = i >> 3;
       if ((row > 0) && (row < 7))

@@ -162,11 +162,9 @@ typedef struct
 */
 typedef struct
 {
-  unsigned long long knight_danger_mask;
   unsigned long long diagonal_danger_mask;
   unsigned long long udlr_danger_mask;
-  unsigned long long pad;
-} dangerMap_t __attribute__((aligned(32)));
+} dangerMap_t __attribute__((aligned(16)));
 
 /* This structure is used in penultimatePlyMoveCountReuseSetup().
 ** The content is similar to dangerMap_t, but has complete information
@@ -176,8 +174,6 @@ typedef struct
 typedef struct
 {
   unsigned long long knight_danger_mask;
-  unsigned long long diagonal_danger_mask;
-  unsigned long long udlr_danger_mask;
   unsigned long long white_pawn_danger_mask;
   unsigned long long black_pawn_danger_mask;
   unsigned long long king_danger_mask;
