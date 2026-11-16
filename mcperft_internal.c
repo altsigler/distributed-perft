@@ -2721,12 +2721,13 @@ static void  brdDbDeepSearch (const unsigned int num_cores,
       exit (-1);
     }
     unsigned long long num_entries = (unsigned long long) num_bytes / sizeof(plyPositionEntry_t);
+    const unsigned long long remaining_workloads = total_workloads - resolved_workloads;
 
     /* Check if we read all positions for this workload file.
     */
-    if ((workloads_extracted + num_entries) >= total_workloads)
+    if ((workloads_extracted + num_entries) >= remaining_workloads)
     {
-      num_entries = total_workloads - workloads_extracted; 
+      num_entries = remaining_workloads - workloads_extracted; 
       more_entries_needed = 0;
 
       if (0 == num_entries)
@@ -3098,10 +3099,10 @@ void brdDbCount (const char *workload_file)
 
 
   /* Optimize the single core position hash database size.
-  ** Since we are starting 9 plies away from the standard staring position,
+  ** Since we are starting up to 11 plies away from the standard staring position,
   ** the database size doesn't need to be as big as we would normally need for a 
   ** developed middle game position. Using less memory is better suited, 
-  ** for 1GB memory footpring search machines. 
+  ** for smaller memory footpring search machines. 
   */
   if (workload_header.workload_depth <= 6)
   {
