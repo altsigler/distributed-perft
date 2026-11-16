@@ -5849,12 +5849,13 @@ unsigned long long allWhiteMovePerft (
                             king_attack_mask, castle_eligibility,
                             0, 0, 0);
 
+  unsigned long long quiet_move_mask[8];
+  unsigned long long move_adjust = 0;
+
   if (!attack_helper.in_check && !attack_helper.pin)
   {
     if (next_ply_is_last)
     {
-      unsigned long long quiet_move_mask[8];
-      unsigned long long move_adjust = 0;
       const unsigned long long num_reuse_moves = 
             penultimatePlyMoveCountReuseSetup (quiet_move_mask,
                                                 &move_adjust,
@@ -5991,12 +5992,13 @@ unsigned long long allBlackMovePerft (
                           king_attack_mask, castle_eligibility,
                           0, 0, 0);
 
+  unsigned long long quiet_move_mask[8];
+  unsigned long long move_adjust = 0;
+
   if (!attack_helper.in_check && !attack_helper.pin)
   {
     if (next_ply_is_last)
     {
-      unsigned long long quiet_move_mask[8];
-      unsigned long long move_adjust = 0;
       const unsigned long long num_reuse_moves = 
             penultimatePlyMoveCountReuseSetup (quiet_move_mask,
                                                 &move_adjust,
@@ -6064,30 +6066,46 @@ unsigned long long allBlackMovePerft (
     }
   } else
   {
+    const unsigned long long num_reuse_moves = (0 == next_ply_is_last)?0:
+            penultimatePlyMoveCountReuseSetup (quiet_move_mask,
+                                                &move_adjust,
+                                                MOVE_BLACK, en_passant_eligible_pawn,
+                                                piece, castle_eligibility,
+                                                mover_pieces_mask, opponent_pieces_mask,
+                                                def_piece_complement);
+
     num_moves += blackKingSquaresFind(king_mask, king_position, attack_helper.move_candidate_mask,
                      piece, 0,
                      castle_eligibility, 0, depth,
                      mover_pieces_mask, opponent_pieces_mask, next_ply_is_last,
                      king_attack_mask,
-                     def_piece_complement, 0, ~0LLU, 0);
+                     def_piece_complement, 
+                     num_reuse_moves, quiet_move_mask[S_KING], move_adjust);
 
     num_moves += allBlackPawnSquaresFind(piece, 0,
                                   en_passant_eligible_pawn, king_position,
                                   0, attack_helper.in_check, attack_helper.pin,
                                   castle_eligibility, depth,
                                   mover_pieces_mask, opponent_pieces_mask, next_ply_is_last,
-                                  def_piece_complement, 0, ~0LLU, 0);
+                                  def_piece_complement,
+                                  num_reuse_moves, quiet_move_mask[S_PAWN], move_adjust);
+
     num_moves += allKnightSquaresFind(MOVE_BLACK, piece, 0, king_position,
                                       0, attack_helper.in_check, attack_helper.pin, attack_helper.move_test_needed,
                                       castle_eligibility, depth,
                                       mover_pieces_mask, opponent_pieces_mask, next_ply_is_last,
-                                      def_piece_complement, 0, ~0LLU, 0);
+                                      def_piece_complement,
+                                      num_reuse_moves, quiet_move_mask[S_KNIGHT], move_adjust);
+
     num_moves += allBishopRookQueenSquaresFind(MOVE_BLACK, piece,
                          0, king_position, 0, attack_helper.in_check, attack_helper.pin, attack_helper.move_test_needed,
                          castle_eligibility, depth,
                          mover_pieces_mask, opponent_pieces_mask, next_ply_is_last,
                          def_piece_complement,
-                         0, ~0LLU, ~0LLU, ~0LLU, 0);
+                         num_reuse_moves,
+                         quiet_move_mask[S_BISHOP],
+                         quiet_move_mask[S_ROOK],
+                         quiet_move_mask[S_QUEEN], move_adjust);
   }
 
   return num_moves;
