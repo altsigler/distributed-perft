@@ -6066,13 +6066,24 @@ unsigned long long allBlackMovePerft (
     }
   } else
   {
-    const unsigned long long num_reuse_moves = (0 == next_ply_is_last)?0:
-            penultimatePlyMoveCountReuseSetup (quiet_move_mask,
+    unsigned long long num_reuse_moves = 0;
+    if (0 != next_ply_is_last)
+    {
+      if (!attack_helper.in_check)
+      {
+        num_reuse_moves = penultimatePlyMoveCountReuseSetup (quiet_move_mask,
                                                 &move_adjust,
                                                 MOVE_BLACK, en_passant_eligible_pawn,
                                                 piece, castle_eligibility,
                                                 mover_pieces_mask, opponent_pieces_mask,
                                                 def_piece_complement);
+      } else
+      {
+        /* When in check there are no quiet moves.
+        */
+        memset (quiet_move_mask, 0xff, sizeof(quiet_move_mask));
+      }
+    }
 
     num_moves += blackKingSquaresFind(king_mask, king_position, attack_helper.move_candidate_mask,
                      piece, 0,
