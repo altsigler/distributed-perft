@@ -428,6 +428,8 @@ char *int128ToStr(unsigned _BitInt(128) val,
   unsigned int i = buf_size - 1;
   char tmp_buf[5];
   unsigned int tmp_buf_size;
+
+  memset (buf, 0, buf_size);
   buf[i--] = 0;
 
   do

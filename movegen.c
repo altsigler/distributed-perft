@@ -2564,10 +2564,6 @@ static unsigned long long allBishopRookQueenSquaresFind (
             {
               if (0 == (bishop_quiet_move_mask & mask1))
               {
-                if (0 == move_adjust)
-                {
-                  unreachable();
-                }
                 mn += num_reuse_moves; 
                 if (0 != (move_adjust & mask1))
                 {

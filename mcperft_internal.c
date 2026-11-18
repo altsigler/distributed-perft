@@ -286,11 +286,15 @@ static void * asyncPositionReadWriteThread (void *arg)
 **
 ** If update_enable is set to 0 then the position file is read-only. 
 **
+** If the num_skip_records is greater than 0 then the file pointer is
+** moved the specified number of positions from the start of the position file.
+** This feature is used when counting moves.
 ******************************************************************************/
 static bufferedPositionFile_t
      bufferedPositionFileReadUpdateStart (const unsigned int ply,
                                           const unsigned long long buffer_size_in_bytes,
-                                          const unsigned int update_enable)
+                                          const unsigned int update_enable,
+                                          const unsigned long long num_skip_records)
 {
   bufferedPositionFile_t pf = {};
   char file_name[1024];
@@ -337,7 +341,7 @@ static bufferedPositionFile_t
 
   /* Get total file size.
   */
-  struct stat file_stat;
+  struct stat file_stat = {};
   if (0 != fstat (pf.fd, &file_stat))
   {
     perror ("stat - Position File");
@@ -367,6 +371,33 @@ static bufferedPositionFile_t
 
   pf.max_entries_in_buffer = pf.buffer_size_in_bytes / element_size_in_bytes;
 
+  /* Skip specified number of records.
+  */
+  unsigned long long num_additional_skip_records = 0;
+  if (0 != num_skip_records)
+  {
+    const unsigned long long requested_skip_bytes = num_skip_records * element_size_in_bytes;
+
+    /* The file pointer must be set to start of closest block.
+    */
+    const unsigned long long block_skip_bytes = (requested_skip_bytes / pf.buffer_size_in_bytes) * pf.buffer_size_in_bytes;
+
+    if (0 != block_skip_bytes)
+    {
+      const off_t skip_count = lseek (pf.fd, (off_t) block_skip_bytes, SEEK_CUR);
+      if (skip_count < 0)
+      {
+        perror ("lseek - Skip position file entries.");
+        exit (-1);
+      }
+    }
+
+    /* We may need to skip more records in order to reach the requested start location.
+    ** We are guaranteed that the number of additional records fits into one read buffer.
+    */
+    num_additional_skip_records = (requested_skip_bytes - block_skip_bytes) / element_size_in_bytes;
+  }
+
   /* Read the first buffer from the file.
   */
   if (0 != pthread_create (&pf.async_thread, 0, asyncPositionReadWriteThread, &pf))
@@ -392,6 +423,10 @@ static bufferedPositionFile_t
   ** buffer.
   */
   pf.max_position_index = pf.bytes_in_buffer[pf.in_use_buffer] / sizeof(plyPositionEntry_t);
+
+  /* Adjust for additonal skip records.
+  */
+  pf.current_position_index += num_additional_skip_records;
 
   /* Start the async task again to read the second buffer.
   */
@@ -1965,7 +2000,7 @@ static void * brd_db_generate (void *arg)
   bufferedPositionFile_t pf = bufferedPositionFileReadUpdateStart(
                                         ply_number,
                                         board_db->sort_block_size / 40,
-                                        1);
+                                        1, 0);
   gen_status->total_ply_positions = pf.total_positions_in_file;
 
   gen_status->ply_processing_phase = 1;  
@@ -2405,8 +2440,10 @@ void brdDbGenerate(
   /* Use one third of physical memory for the sort block. 
   ** We use two sort blocks. While one block is populated and sorted, 
   ** the other block is written to file.
+  ** The sort block must be multiple of page size.
   */
-  const unsigned long long sort_block_size = (total_ram / 2) / 2;
+  const unsigned long long page_size = (unsigned long long) sysconf(_SC_PAGESIZE);
+  const unsigned long long sort_block_size = (((total_ram / 2) / 2) / page_size) * page_size;
 
   /* By default the Linux process can have only 1024 open files.
   ** The hard limit is usually 500K open files. 
@@ -2444,11 +2481,11 @@ void brdDbGenerate(
   board_db.max_sortblock_positions = sort_block_size / sizeof(sortBlockEntry_t);
 
   board_db.active_sort_block = 0;
-  board_db.sort_block[0] = aligned_alloc ((size_t) sysconf(_SC_PAGESIZE), sort_block_size);
+  board_db.sort_block[0] = aligned_alloc ((size_t) page_size, sort_block_size);
   (void) madvise (board_db.sort_block[0], sort_block_size, MADV_HUGEPAGE);
   assert (board_db.sort_block[0]);
 
-  board_db.sort_block[1] = aligned_alloc ((size_t) sysconf(_SC_PAGESIZE), sort_block_size);
+  board_db.sort_block[1] = aligned_alloc ((size_t) page_size, sort_block_size);
   (void) madvise (board_db.sort_block[1], sort_block_size, MADV_HUGEPAGE);
 
   assert (board_db.sort_block[1]);
@@ -2676,7 +2713,7 @@ static void * brd_db_deep_search (void *arg)
 static void  brdDbDeepSearch (const unsigned int num_cores, 
                               const unsigned int depth, 
                               const unsigned long long total_workloads,
-                              const int position_fd, 
+                              bufferedPositionFile_t *const pf, 
                               const int result_fd,
                               plyPositionEntry_t *const work_load_buffer, 
                               unsigned long long *const search_result_buffer,
@@ -2699,26 +2736,23 @@ static void  brdDbDeepSearch (const unsigned int num_cores,
 
   do 
   {
-    const long long num_bytes = read (position_fd, work_load_buffer, chunk_size);
+    plyPositionEntry_t *position_entry;
+    unsigned long long num_bytes = 0;
+    unsigned long long num_workloads = 0;
+    while (0 != (position_entry = bufferedPositionFileReadUpdate(pf)))
+    {
+      memcpy (&work_load_buffer[num_workloads], position_entry, sizeof (plyPositionEntry_t));
+      num_bytes += sizeof(plyPositionEntry_t);
+      num_workloads++;
+      if (num_bytes >= chunk_size)
+      {
+        break;
+      }
+    }
     if (num_bytes == 0)
     {
       // Detected End of File.
       break;
-    }
-    if (num_bytes < 0)
-    {
-      perror ("read workload");
-      exit (-1);
-    }
-    /* If the number of read bytes is not an exact multiple of workload record
-    ** size then we have a problem.
-    */
-    if (0 != ((unsigned long long) num_bytes % sizeof(plyPositionEntry_t)))
-    {
-      printf ("ERROR: Workload Read detected corruped file.\n");
-      printf ("chunk_size:%'llu num_bytes:%'llu entry_size:%zu\n",
-                        chunk_size, num_bytes, sizeof(plyPositionEntry_t));
-      exit (-1);
     }
     unsigned long long num_entries = (unsigned long long) num_bytes / sizeof(plyPositionEntry_t);
     const unsigned long long remaining_workloads = total_workloads - resolved_workloads;
@@ -2835,12 +2869,22 @@ static void  brdDbDeepSearch (const unsigned int num_cores,
 
     /* Write the current chunk into the results file.
     */
-    const unsigned long long write_bytes = sizeof(unsigned long long) * num_entries;
-
-    if (write_bytes != (unsigned long long) write (result_fd, search_result_buffer, write_bytes))
+    const unsigned long long write_bytes_request = sizeof(unsigned long long) * num_entries;
+    unsigned long long total_bytes_written = 0;
+    while (total_bytes_written < write_bytes_request)
     {
-      perror ("write to result file");
-      exit (-1);
+      const ssize_t write_bytes =  write (result_fd, 
+                                     &search_result_buffer[total_bytes_written / sizeof(unsigned long long)], 
+                                     write_bytes_request - total_bytes_written);
+      if (write_bytes < 0)
+      {
+        perror ("write to result file");
+        printf ("write_bytes_request:%'llu total_bytes_written:%'llu\n",
+                      write_bytes_request, 
+                      total_bytes_written);
+        exit (-1);
+      }
+      total_bytes_written += (unsigned long long) write_bytes;
     }
 
   } while (more_entries_needed);
@@ -2893,24 +2937,7 @@ void brdDbCount (const char *workload_file)
     exit (-1);
   }
 
-  char position_file_name[1024];
-
-  sprintf (position_file_name, "%s%u_positions", 
-                PLY_FILE_PREFIX, workload_header.position_db_depth);
-  const int position_fd = open (position_file_name, O_RDONLY);
-  if (position_fd < 0)
-  {
-    perror ("open - position file");
-    exit (-1);
-  }
-
-  /* Set the file pointer to the first position for this workload.
-  */
-  if (0 > lseek (position_fd, (__off_t) (workload_header.start_workload_number * sizeof (plyPositionEntry_t)), SEEK_SET))
-  {
-    perror ("lseek position file");
-    exit (-1);
-  }
+  
 
   workloadHeader_t search_header;
 
@@ -3010,7 +3037,7 @@ void brdDbCount (const char *workload_file)
       exit (-1);
     }
 
-    struct stat statbuf;
+    struct stat statbuf = {};
     if (0 > fstat (result_fd, &statbuf))
     {
       perror ("stat result file");
@@ -3021,20 +3048,19 @@ void brdDbCount (const char *workload_file)
                     ((unsigned long long) statbuf.st_size - 
                                 sizeof(workloadHeader_t)) / sizeof (unsigned long long);
 
-    /* If the results file contains some entries then advance the workload file
-    ** descriptor to skip the already computed entries.
+    /* If the results file contains some entries then advance the workload file.
     */
     if (num_entries)
     {
-      if (0 > lseek (position_fd, (__off_t) (num_entries * sizeof (plyPositionEntry_t)), SEEK_CUR))
-      {
-        perror ("lseek workload file");
-        exit (-1);
-      }
-
       resolved_workloads = num_entries;
     }
   }
+  const unsigned long long num_skip_records = workload_header.start_workload_number + resolved_workloads;
+  bufferedPositionFile_t pf = bufferedPositionFileReadUpdateStart(
+                                        workload_header.position_db_depth,
+                                        1'000'000'000,
+                                        0, 
+                                        num_skip_records);
 
   /* Determine how many cores are available. 
   ** We will use all cores to do the search.
@@ -3091,6 +3117,7 @@ void brdDbCount (const char *workload_file)
   printf ("Search Result File:   %s\n", results_file_name);
   printf ("Overall Search Depth: %u\n", workload_header.depth);
   printf ("Deep Search Depth:    %u\n", workload_header.workload_depth);
+  printf ("Starting Work Load:   %'llu\n", workload_header.start_workload_number);
   printf ("Number of Work Loads: %'llu\n", workload_header.num_workloads);
   printf ("Resolved Work Loads:  %'llu\n", resolved_workloads);
   printf ("Deep Search Cores:    %u\n", num_cores); 
@@ -3119,7 +3146,7 @@ void brdDbCount (const char *workload_file)
   {
     brdDbDeepSearch (num_cores, search_header.workload_depth, 
                     search_header.num_workloads,
-                    position_fd, result_fd,
+                    &pf, result_fd,
                     work_load_buffer, search_result_buffer,
                     resolved_workloads,
                     chunk_size);
@@ -3129,12 +3156,12 @@ void brdDbCount (const char *workload_file)
   free (search_result_buffer);
   (void) close (result_fd);
   (void) close (workload_fd);
-  (void) close (position_fd);
+  bufferedPositionFileReadUpdateFinish(&pf);
 
   /* Double check that the search results file has the expected number of entries.
   */
   {
-    struct stat statbuf;
+    struct stat statbuf = {};
     if (0 > stat (temp_file_name, &statbuf))
     {
       perror ("stat result file");
@@ -3147,6 +3174,8 @@ void brdDbCount (const char *workload_file)
     {
       printf ("ERROR: Search result file %s doesn't seem to match workload file %s\n",
                     temp_file_name, workload_file_name);
+      printf ("       Expected Number of Workloads:%'llu\n", workload_header.num_workloads);
+      printf ("       Actual Number of Workloads:  %'llu\n", num_results);
       exit (-1);
     }
   }
@@ -3171,7 +3200,7 @@ static unsigned long long brdPlyNumPositionsGet (unsigned int ply)
                     PLY_FILE_PREFIX,
                     ply);
 
-  struct stat statbuf;
+  struct stat statbuf = {};
 
   if (0 != stat (buf, &statbuf))
   {
@@ -3425,7 +3454,7 @@ static void brdDbLastPlyMovesCount (const unsigned int search_depth,
   bufferedPositionFile_t pf = bufferedPositionFileReadUpdateStart(
                                         search_depth - 1,
                                         40'000'000,
-                                        0);
+                                        0, 0);
 
   for (unsigned long long i = 0; i < num_boards_in_ply; i++)
   {
@@ -3483,7 +3512,7 @@ static void brdDbDeepSearchAggregate (
   bufferedPositionFile_t pf = bufferedPositionFileReadUpdateStart(
                                         position_db_depth - 1,
                                         40'000'000,
-                                        0);
+                                        0, 0);
   for (unsigned long long i = 0; i < num_boards_in_ply; i++)
   {
     aggregate->workloads_processed++;
@@ -3590,7 +3619,7 @@ static void brdDbPositionTreeAggregate (const unsigned int search_depth,
     bufferedPositionFile_t pf = bufferedPositionFileReadUpdateStart(
                                         (unsigned int) ply_number,
                                         40'000'000,
-                                        0);
+                                        0, 0);
 #if 1 // HACK
     printf ("%s %d - search_depth:%u position_db_depth:%u ply_number:%d num_board_in_ply:%'llu\n",
                     __FUNCTION__, __LINE__,
@@ -3602,6 +3631,12 @@ static void brdDbPositionTreeAggregate (const unsigned int search_depth,
     {
       position_count_space[ply_number][i] = 0;
       plyPositionEntry_t *position = bufferedPositionFileReadUpdate(&pf);
+
+      if (0 == position->num_moves)
+      {
+        aggregate->workloads_processed++;
+        continue;
+      }
 
       moveEntry_t move_entry[position->num_moves];
 
