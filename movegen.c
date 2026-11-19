@@ -391,10 +391,9 @@ static void castleEligibilityRookCaptureCheck (const color_e whose_move,
 **  one of the squares to which the king can move.
 ******************************************************************************/
 __attribute__((always_inline)) inline
-static unsigned int pinUpdate (unsigned long long *restrict pin,
-                       unsigned int *restrict move_test_needed,
+static unsigned int pinUpdate (kingAttackHelper_t *const attack_helper,
                         const color_e whose_move,
-                        const unsigned long long *restrict piece,
+                        const unsigned long long *const piece,
                         const unsigned int attacker_index,
                         const unsigned int en_passant_eligible_pawn,
                         const unsigned long long mover_pieces_mask,
@@ -411,11 +410,11 @@ static unsigned int pinUpdate (unsigned long long *restrict pin,
     const unsigned int num_pinned_pieces = (unsigned int) __builtin_popcountll (detected_pieces);
     if (1 == num_pinned_pieces)
     {
-      if (*pin)
+      if (attack_helper->pin)
       {
-        *move_test_needed = 1;
+        attack_helper->move_test_needed = 1;
       }
-      *pin |= (attack_lane | (1LLU << attacker_index));
+      attack_helper->pin |= (attack_lane | (1LLU << attacker_index));
     } else if ((2 == num_pinned_pieces) &&
             en_passant_eligible_pawn &&
             ((1LLU << en_passant_eligible_pawn) & detected_pieces) &&
@@ -427,8 +426,8 @@ static unsigned int pinUpdate (unsigned long long *restrict pin,
       ** pawn are pinned together. The en passant capture removes two pawns
       ** from the same row, potentially exposing the king.
       */
-      *move_test_needed = 1;
-      *pin |= (attack_lane | (1LLU << attacker_index));
+      attack_helper->move_test_needed = 1;
+      attack_helper->pin |= (attack_lane | (1LLU << attacker_index));
     }
     return 1;
   }
@@ -446,7 +445,7 @@ __attribute__((always_inline)) inline
 //__attribute__((noinline)) 
 static kingAttackHelper_t pinCompute (
                                       const color_e whose_move,
-                                      const unsigned long long *restrict piece,
+                                      const unsigned long long *const piece,
                                       const unsigned int position_index,
                                       const unsigned long long mover_king_mask,
                                       const unsigned int en_passant_eligible_pawn,
@@ -590,7 +589,7 @@ static kingAttackHelper_t pinCompute (
         attack_mask |= diagonal_attack;
       } else
       {
-        if (0 == pinUpdate (&attack_helper.pin, &attack_helper.move_test_needed, 
+        if (0 == pinUpdate (&attack_helper,
                     whose_move, piece,  
                     index, en_passant_eligible_pawn,
                     mover_pieces_mask, detected_pieces,
@@ -647,7 +646,7 @@ static kingAttackHelper_t pinCompute (
         attack_mask |= udlr_attack;
       } else
       {
-        if (0 == pinUpdate (&attack_helper.pin, &attack_helper.move_test_needed,
+        if (0 == pinUpdate (&attack_helper,
                     whose_move, piece,
                     index, en_passant_eligible_pawn,
                     mover_pieces_mask, detected_pieces,
@@ -1461,7 +1460,7 @@ static unsigned long long allBRQNPSquaresLastPlyFindNoTest (
 
     // Remove pawns eligible for promotion.
     unsigned long long shortcut_pawns = (piece_mask & ~row6_mask);
-    unsigned long long pinned_pawn;
+    unsigned long long pinned_pawn = 0;
 
     if (pin_mode == 1)
     {
@@ -1641,7 +1640,7 @@ static unsigned long long allBRQNPSquaresLastPlyFindNoTest (
 
     // Remove pawns eligible for promotion.
     unsigned long long shortcut_pawns = (piece_mask & ~row1_mask);
-    unsigned long long pinned_pawn;
+    unsigned long long pinned_pawn = 0;
 
     if (pin_mode == 1)
     {
@@ -6170,35 +6169,29 @@ static unsigned long long allMoveCandidatesLastPlyFindInternal (
                            unsigned long long *const diagonal_attack_mask,
                            unsigned long long *const udlr_attack_mask)
 {
-  unsigned long long num_moves = 0;
-  num_moves += kingSquaresLastPlyFind (
-                            attack_helper.move_candidate_mask);
+  unsigned long long num_moves = 
+                        kingSquaresLastPlyFind (attack_helper.move_candidate_mask);
+
+  if (!attack_helper.in_check && !attack_helper.pin)
+  {
+    return num_moves + allBRQNPSquaresLastPlyFindNoTest (whose_move, piece, en_passant_eligible_pawn,
+                                          mover_pieces_mask,opponent_pieces_mask,
+                                          any_color_pieces_mask, 0, 0, def_piece_complement,
+                                          diagonal_attack_mask, udlr_attack_mask, 0);
+  }  
+
 
   if (whose_move == MOVE_WHITE)
   {
-    if (!attack_helper.in_check && !attack_helper.pin)
-    {
-      num_moves += allBRQNPSquaresLastPlyFindNoTest (MOVE_WHITE, piece, en_passant_eligible_pawn,
-                                            mover_pieces_mask,opponent_pieces_mask,
-                                            any_color_pieces_mask, 0, 0, def_piece_complement,
-                                            diagonal_attack_mask, udlr_attack_mask, 0);
-    } else
     {
       if (!attack_helper.move_test_needed)
       {
-        if (attack_helper.pin & piece[S_PAWN | S_WHITE])
-        {
-          num_moves += allBRQNPSquaresLastPlyFindNoTest (MOVE_WHITE, piece, en_passant_eligible_pawn,
+        const unsigned int pin_mode = (attack_helper.pin == 0)?0:
+                                    (attack_helper.pin & piece[S_PAWN | S_WHITE])?1:2;
+        num_moves += allBRQNPSquaresLastPlyFindNoTest (MOVE_WHITE, piece, en_passant_eligible_pawn,
                                             mover_pieces_mask,opponent_pieces_mask,
-                                            any_color_pieces_mask, 1, attack_helper.pin, def_piece_complement,
+                                            any_color_pieces_mask, pin_mode, attack_helper.pin, def_piece_complement,
                                             diagonal_attack_mask, udlr_attack_mask, attack_helper.in_check);
-        } else
-        {
-          num_moves += allBRQNPSquaresLastPlyFindNoTest (MOVE_WHITE, piece, en_passant_eligible_pawn,
-                                            mover_pieces_mask,opponent_pieces_mask,
-                                            any_color_pieces_mask, 2, attack_helper.pin, def_piece_complement,
-                                            diagonal_attack_mask, udlr_attack_mask, attack_helper.in_check);
-        }
       } else
       {
         num_moves += allWhiteLastPly (piece, en_passant_eligible_pawn,
@@ -6210,29 +6203,15 @@ static unsigned long long allMoveCandidatesLastPlyFindInternal (
     }
   } else
   {
-    if (!attack_helper.in_check && !attack_helper.pin)
-    {
-      num_moves +=  allBRQNPSquaresLastPlyFindNoTest (MOVE_BLACK, piece, en_passant_eligible_pawn,
-                                            mover_pieces_mask,opponent_pieces_mask,
-                                            any_color_pieces_mask, 0, 0, def_piece_complement,
-                                            diagonal_attack_mask, udlr_attack_mask, 0);
-    } else
     {
       if (!attack_helper.move_test_needed)
       {
-        if (attack_helper.pin & piece[S_PAWN | S_BLACK])
-        {
-          num_moves += allBRQNPSquaresLastPlyFindNoTest (MOVE_BLACK, piece, en_passant_eligible_pawn,
+        const unsigned int pin_mode = (attack_helper.pin == 0)?0:
+                                    (attack_helper.pin & piece[S_PAWN | S_BLACK])?1:2;
+        num_moves += allBRQNPSquaresLastPlyFindNoTest (MOVE_BLACK, piece, en_passant_eligible_pawn,
                                             mover_pieces_mask,opponent_pieces_mask,
-                                            any_color_pieces_mask, 1, attack_helper.pin, def_piece_complement,
+                                            any_color_pieces_mask, pin_mode, attack_helper.pin, def_piece_complement,
                                             diagonal_attack_mask, udlr_attack_mask, attack_helper.in_check);
-        } else
-        {
-          num_moves += allBRQNPSquaresLastPlyFindNoTest (MOVE_BLACK, piece, en_passant_eligible_pawn,
-                                            mover_pieces_mask,opponent_pieces_mask,
-                                            any_color_pieces_mask, 2, attack_helper.pin, def_piece_complement,
-                                            diagonal_attack_mask, udlr_attack_mask, attack_helper.in_check);
-        }
       } else
       {
         num_moves += allBlackLastPly (piece, en_passant_eligible_pawn,
